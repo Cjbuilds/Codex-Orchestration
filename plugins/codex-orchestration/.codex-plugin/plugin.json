@@ -1,7 +1,7 @@
 {
   "name": "codex-orchestration",
-  "version": "0.2.0",
-  "description": "Keep the current Codex model as orchestrator, add an optional plan advisor, and route eligible work to efficient executors.",
+  "version": "0.3.0",
+  "description": "Keep the current Codex model in charge, add an optional plan reviewer, and steer eligible work to efficient executors.",
   "author": {
     "name": "CJ Zafir",
     "url": "https://github.com/Cjbuilds"
@@ -19,8 +19,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Codex Orchestration",
-    "shortDescription": "Optional plan advisor plus efficient executors",
-    "longDescription": "Keep the current session model as Codex's root orchestrator, optionally review non-trivial plans through a read-only advisor, and route compatible native subagent work to an efficient executor.",
+    "shortDescription": "Optional plan reviewer plus efficient executors",
+    "longDescription": "Keep the current task model as Codex's orchestrator, optionally review non-trivial plans through a root-facing advisor, and steer suitable Codex subagent work to an efficient executor.",
     "developerName": "CJ Zafir",
     "category": "Productivity",
     "capabilities": [
@@ -29,9 +29,9 @@
       "Subagent workflows"
     ],
     "defaultPrompt": [
-      "/codex-orchestration executor: GPT-5.6 Luna xhigh, advisor: Anthropic Fable 5 xhigh",
-      "$codex-orchestration:codex-orchestration ask me which executor to use and whether I want an optional advisor; keep the current session model as orchestrator.",
-      "$codex-orchestration:codex-orchestration persist my executor and optional advisor roles for this project without changing the root model."
+      "/codex-orchestration executor: GPT-5.6 Luna xhigh, advisor: none — inspect this project and suggest the next useful task.",
+      "$codex-orchestration:codex-orchestration ask me for an executor and optional advisor.",
+      "$codex-orchestration:codex-orchestration executor: GPT-5.6 Luna xhigh, advisor: none, save for this project."
     ]
   }
 }

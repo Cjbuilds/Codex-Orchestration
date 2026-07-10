@@ -1,7 +1,7 @@
 interface:
   display_name: "Codex Orchestration"
-  short_description: "Optional plan advisor plus efficient executors"
-  default_prompt: "Use $codex-orchestration with GPT-5.6 Luna at xhigh as executor and ask whether I want an optional advisor; keep my current session model as orchestrator."
+  short_description: "Optional plan reviewer plus efficient executors"
+  default_prompt: "Use $codex-orchestration to choose an executor and optional advisor while the current task model stays in charge."
 
 policy:
   allow_implicit_invocation: false
