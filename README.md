@@ -17,6 +17,8 @@ Start a new Codex task after installation. In the desktop app, type `/` and choo
 
 Setup uses a small standard-library helper and requires Python 3.11 or newer. Codex uses `python3` on macOS/Linux or an available `py -3.11`/`python` launcher on Windows.
 
+Claude Fable 5 also requires the official Claude Code CLI, logged in with a first-party Pro or Max account. Codex remains the only UI: the plugin calls Claude headlessly when plan review is needed.
+
 The picker is the source of truth for the exact label. Depending on the client, it may appear as `/codex-orchestration`, `$codex-orchestration`, or `$codex-orchestration:codex-orchestration`.
 
 ## Set it up once
@@ -36,6 +38,14 @@ Add a second-opinion model when the extra review is worth it:
 ```text
 /codex-orchestration setup executor: GPT-5.6 Luna Extra High, advisor: GPT-5.6 Terra high
 ```
+
+Or use Claude Fable 5 as the root-only advisor:
+
+```text
+/codex-orchestration setup executor: GPT-5.6 Luna Extra High, advisor: Claude Fable 5 Extra High
+```
+
+That route uses the authenticated `claude` CLI through a bundled local MCP server. It does not need an Anthropic API key or a custom Codex provider.
 
 Codex resolves the display names against the active model catalog, previews the personal config change, checks the active binary plus the known PATH/Desktop clients, and applies the clean setup. Pass any other installation to the configurator with `--compat-bin`. It never changes the model selected for the current task.
 
@@ -169,7 +179,9 @@ Four details matter:
 3. `usage_hint_text` puts the chosen Luna or Terra route directly on Codex's spawn tool. This is what tells the root which model and effort to request for delegated execution.
 4. Codex-Orchestration deliberately uses `fork_turns = "none"` for every different child route. Full-history forks inherit the root and reject overrides; Codex can also accept a positive partial fork, but `none` avoids copied history and requires a deliberate self-contained packet.
 
-The installer writes those values through Codex App Server's own `config/read` and atomic `config/batchWrite` APIs. That preserves unrelated tables, comments, inline comments, and custom multi-agent limits; validates the complete config; and detects concurrent edits. The policy takes effect in new tasks. A small namespaced state file records its schema, config path, selected seats, the four managed values, and the exact pre-setup snapshots needed by `disable`; it uses restrictive file permissions where supported. A normal clean setup contains generated policy text, the namespace value, seat IDs, and that restoration metadata. If you explicitly replace your own hint text, its exact old value must be kept for restoration—so never put credentials in routing hints.
+The installer writes those values through Codex App Server's own `config/read` and atomic `config/batchWrite` APIs. That preserves unrelated tables, comments, inline comments, and custom multi-agent limits; validates the complete config; and detects concurrent edits. The policy takes effect in new tasks. A small namespaced state file records its schema, config path, selected seats, the managed values, and the exact pre-setup snapshots needed by `disable`; it uses restrictive file permissions where supported. A normal clean setup contains generated policy text, the namespace value, seat IDs, and that restoration metadata. If you explicitly replace your own hint text, its exact old value must be kept for restoration—so never put credentials in routing hints.
+
+The Claude Fable 5 MCP launchers are bundled but disabled by default. Selecting that advisor enables exactly one compatible Python launcher through the plugin's namespaced config. Setup and status check only the local Claude login and capabilities—they do not make a model call. `disable` restores the prior MCP override values as well as the routing fields. Codex may retain an inert empty TOML table header after deleting the last override; the plugin does not rewrite user TOML merely for cosmetic cleanup.
 
 The setup sets `tool_namespace = "agents"` because the currently validated Desktop route needs that namespace for expanded child-model controls. It changes the callable namespace; it does not name Luna, force a spawn, or replace Codex's delegation judgment.
 
@@ -202,7 +214,8 @@ One honest boundary remains: Codex has no global `executor_model = ...` engine s
 | Luna selected as the root | Luna currently declares multi-agent v1, so the v2 policy is not the right root route. Luna is best used here as a child of a Sol/Terra v2 root. |
 | Older Codex that rejects `multi_agent_mode_hint_text` | The installer refuses to break its shared config and keeps the per-task skill fallback available. Update that client before enabling the persistent preset. |
 | OpenAI root and OpenAI executor | Direct per-spawn model route; simplest setup. |
-| Different provider for advisor or executor | Use a loaded, namespaced custom agent with an already configured provider. |
+| Claude Fable 5 advisor | Bundled read-only MCP route through the authenticated Claude Code CLI; no custom provider. |
+| Any other different-provider advisor or executor | Use a loaded, namespaced custom agent with an already configured provider. |
 
 Desktop and CLI normally share `~/.codex/config.toml`. The setup asks the target binary, the `codex` on your PATH, and the Desktop binary when present to parse the complete four-field preset in an isolated home. That proves config compatibility, not a live child route. Report `route accepted` or `used and confirmed` only from the exact runtime evidence described above; the installer does not guess compatibility from a version number.
 
@@ -222,16 +235,37 @@ If a client cannot load the persistent policy, invoke the skill with the work in
 
 The skill uses the strongest child control that client exposes. On current v2 surfaces it passes the exact model and effort with `fork_turns = "none"`. If exact routing is unavailable, it says so. It never counts an inherited-root child as the requested executor.
 
-## Advisor or executor from another provider
+## Claude Fable 5 inside Codex
 
-A model name alone cannot create provider access. An Anthropic advisor, for example, needs an existing authenticated Codex-compatible provider plus a personal custom agent loaded before the task starts.
+Claude Fable 5 is a built-in advisor route, not a Codex child-model override. GPT-5.6 Sol remains the orchestrator and Luna or Terra remain normal Codex executors. When a non-trivial executor plan needs review, Sol calls the local `review_plan` MCP tool; the tool invokes Claude Code headlessly and returns the result to Sol.
+
+The bridge is intentionally narrow:
+
+- it accepts one self-contained review packet and exposes no implementation tool;
+- it removes API-key and Bedrock/Vertex/Foundry override variables before launching Claude;
+- it requires a first-party Pro or Max login from `claude auth status`;
+- it pins `claude-fable-5`, uses safe mode with tools disabled, and does not persist a Claude session;
+- it requires `PLAN_APPROVED` or `PLAN_REVISE` and verifies runtime metadata actually includes `claude-fable-5`;
+- any failure is reported as advisor unavailable, never silently treated as approval.
+
+The setup command is all that is needed:
+
+```text
+/codex-orchestration setup executor: GPT-5.6 Luna Extra High, advisor: Claude Fable 5 Extra High
+```
+
+Start a new Codex task afterward. The Fable call appears as an MCP tool call inside Codex, not as a Claude desktop window or a Codex subagent card.
+
+## Other providers
+
+A model name alone cannot create provider access. Outside the dedicated Claude Fable 5 route, an Anthropic advisor, for example, needs an existing authenticated Codex-compatible provider plus a personal custom agent loaded before the task starts.
 
 Codex custom providers use the Responses wire protocol. A raw Anthropic Messages endpoint and key are not interchangeable. A supported route such as Amazon Bedrock may also be appropriate.
 
 Once the provider is configured and tested, setup can save the namespaced roles:
 
 ```text
-/codex-orchestration setup executor: GPT-5.6 Luna Extra High, advisor: Fable 5 Extra High, advisor provider: <existing-provider-id>
+/codex-orchestration setup executor: GPT-5.6 Luna Extra High, advisor: <model> <effort>, advisor provider: <existing-provider-id>
 ```
 
 For this path, Codex-Orchestration creates only:
@@ -310,7 +344,7 @@ Uninstalling the plugin does not silently delete a policy or custom-agent file t
 python3 -m unittest discover -s tests -v
 ```
 
-The suite covers the native App Server protocol, capability detection, generated policy contract, setup/status/disable, exact restoration, custom agents, packaging, migration safety, model inspection, and an isolated real-CLI marketplace lifecycle.
+The suite covers the native App Server protocol, capability detection, generated policy contract, setup/status/disable, exact restoration, the Claude Fable 5 MCP bridge, custom agents, packaging, migration safety, model inspection, and an isolated real-CLI marketplace lifecycle.
 
 ## Design sources
 

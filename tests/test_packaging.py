@@ -24,7 +24,8 @@ class PackagingTests(unittest.TestCase):
 
         self.assertEqual(manifest["name"], "codex-orchestration")
         self.assertEqual(manifest["skills"], "./skills/")
-        self.assertEqual(manifest["version"], "0.4.0")
+        self.assertEqual(manifest["mcpServers"], "./.mcp.json")
+        self.assertRegex(manifest["version"], r"^0\.5\.0(?:\+codex\.\d+)?$")
         self.assertRegex(
             manifest["version"],
             r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$",
@@ -43,6 +44,23 @@ class PackagingTests(unittest.TestCase):
         self.assertTrue(custom.is_file())
         self.assertIn("config/batchWrite", native.read_text(encoding="utf-8"))
         self.assertIn("Standalone custom agent", custom.read_text(encoding="utf-8"))
+
+    def test_fable_mcp_is_packaged_and_disabled_until_selected(self) -> None:
+        mcp = json.loads((PLUGIN_ROOT / ".mcp.json").read_text(encoding="utf-8"))
+        servers = mcp["mcpServers"]
+        self.assertEqual(
+            set(servers),
+            {
+                "fable-advisor-python3",
+                "fable-advisor-python",
+                "fable-advisor-py",
+            },
+        )
+        for server in servers.values():
+            self.assertFalse(server["enabled"])
+            self.assertEqual(server["cwd"], ".")
+            self.assertIn("fable_advisor_mcp.py", server["args"][-1])
+        self.assertTrue((SKILL_ROOT / "scripts" / "fable_advisor_mcp.py").is_file())
 
     def test_explicit_invocation_metadata_is_consistent(self) -> None:
         metadata = (SKILL_ROOT / "agents" / "openai.yaml").read_text(encoding="utf-8")
@@ -89,7 +107,7 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("@openai/codex@0.144.1", workflow)
         smoke_text = smoke.read_text(encoding="utf-8")
         self.assertIn('OLD_VERSION = "0.3.0"', smoke_text)
-        self.assertIn('NEW_VERSION = "0.4.0"', smoke_text)
+        self.assertIn('NEW_VERSION = "0.5.0"', smoke_text)
         self.assertIn("configure_native_routing.py", smoke_text)
         self.assertIn("configure_orchestration.py", smoke_text)
         self.assertIn('"marketplace",\n                    "upgrade"', smoke_text)

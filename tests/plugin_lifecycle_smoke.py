@@ -2,7 +2,7 @@
 """Exercise a real Codex plugin install, Git upgrade, and both setup routes.
 
 A disposable bare Git marketplace is served over loopback HTTP. The real Codex
-CLI installs 0.3.0, runs its documented marketplace-upgrade command after 0.4.0
+CLI installs 0.3.0, runs its documented marketplace-upgrade command after 0.5.0
 is pushed to that Git remote, installs the refreshed package, verifies its cache,
 and runs native-policy plus custom-agent setup/status/cleanup in isolation.
 """
@@ -30,7 +30,7 @@ PLUGIN_ID = "codex-orchestration@codex-orchestration"
 MARKETPLACE_NAME = "codex-orchestration"
 OLD_RELEASE = "d93b86e735a12a9fefcfd35b0b35199ce3e9a2a7"
 OLD_VERSION = "0.3.0"
-NEW_VERSION = "0.4.0"
+NEW_VERSION = "0.5.0"
 COMMAND_TIMEOUT_SECONDS = 60
 
 
@@ -199,7 +199,11 @@ def main() -> int:
         )
     )
     current_version = manifest.get("version")
-    assert_equal(current_version, NEW_VERSION, "checkout release version")
+    if not isinstance(current_version, str):
+        raise SmokeFailure("checkout release version is not a string")
+    assert_equal(
+        current_version.split("+", 1)[0], NEW_VERSION, "checkout release base version"
+    )
 
     with tempfile.TemporaryDirectory(prefix="codex-orchestration-lifecycle-") as raw:
         temp = Path(raw)

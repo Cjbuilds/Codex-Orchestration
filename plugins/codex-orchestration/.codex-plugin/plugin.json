@@ -1,6 +1,6 @@
 {
   "name": "codex-orchestration",
-  "version": "0.4.0",
+  "version": "0.5.0+codex.20260711022251",
   "description": "Configure Codex once so the selected task model leads while efficient models handle delegated execution.",
   "author": {
     "name": "CJ Zafir",
@@ -17,6 +17,7 @@
     "usage-limits"
   ],
   "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Codex Orchestration",
     "shortDescription": "One-time efficient executor routing",

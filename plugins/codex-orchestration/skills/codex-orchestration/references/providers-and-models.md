@@ -26,6 +26,7 @@ These facts were source-checked and runtime-tested on July 10, 2026. Always capa
 | `tool_namespace = "agents"` | On live-tested Desktop `0.144.0-alpha.4`, the default `collaboration` namespace rejected expanded model/effort metadata; `agents` accepted it and spawned Luna at `xhigh`. | Required for this validated direct-routing path. It changes the callable namespace but does not select Luna. |
 | `usage_hint_text` | Appended to the spawn tool description | Carries the exact executor/advisor route where the root chooses children. |
 | `multi_agent_mode_hint_text` | Replaces the default proactive/explicit mode hint and is sent to root and child tasks | Must contain both root and child boundaries. |
+| Claude Fable 5 MCP route | Root-only `review_plan` tool invokes the authenticated Claude Code CLI headlessly | Built-in cross-provider advisor exception; no custom Codex provider or advisor child. |
 | `fork_turns` default | `all` | Different model/effort/role overrides are rejected unless the call uses `none` or a positive partial fork. |
 | v2 default concurrency | Four active threads including the root | Normally at most three children run concurrently. Codex chooses the useful count. |
 | Older CLI 0.142.5 | Rejects `multi_agent_mode_hint_text` as an unknown feature-table field | Never write the global native policy without checking every known shared-config client. |
@@ -76,6 +77,8 @@ For a durable custom-agent route it uses:
 agent_type="codex_orchestration_executor", fork_turns="none"
 agent_type="codex_orchestration_advisor", fork_turns="none"
 ```
+
+For Claude Fable 5 it names the enabled bundled MCP server and tells the root to call its `review_plan` tool. This is a root tool call, not `spawn_agent`, so `fork_turns` does not apply.
 
 The custom mode text is visible in spawned children too. That is why it says: if root, orchestrate; if child, stay within the packet and never spawn.
 
@@ -146,7 +149,7 @@ Restore state lives at:
 ~/.codex/.codex-orchestration-routing.json
 ```
 
-It contains the prior and managed values of the four owned fields, chosen seat IDs, schema/version markers, scalar-conversion metadata when needed, and config path. It never copies provider definitions, auth stores, or config outside those fields. A normal clean setup contains generated policy text, the namespace value, seat IDs, and restoration metadata. Explicit replacement must retain the user's exact old hint text so disable can restore it; routing hints must never contain credentials. State is written with a same-directory atomic replacement and restrictive file mode where supported. If persistence fails after config apply, the configurator rolls the config back using the returned version.
+It contains the prior and managed values of the four routing fields, chosen seat IDs, schema/version markers, scalar-conversion metadata when needed, and config path. When Claude Fable 5 is selected, it also records only the plugin-scoped MCP launcher overrides that setup touched. It never copies provider definitions, auth stores, account identifiers, or credentials. A normal clean setup contains generated policy text, the namespace value, seat IDs, and restoration metadata. Explicit replacement must retain the user's exact old hint text so disable can restore it; routing hints must never contain credentials. State is written with a same-directory atomic replacement and restrictive file mode where supported. If persistence fails after config apply, the configurator rolls the config back using the returned version.
 
 Disable compares every current managed value before restoration. If the user edited a managed field after setup, it stops instead of erasing that work. Without state, each surviving marker proves ownership only of that hint string. Disable may safely remove the marked string or strings, but it leaves metadata visibility and the tool namespace unchanged because their previous values are unknown.
 
@@ -204,6 +207,10 @@ The standalone-agent configurator remains dry-run first, rejects symlinks and ha
 
 Direct v2 `model` overrides retain the parent's provider. They are the simplest route for an OpenAI root and OpenAI Luna/Terra child.
 
+Claude Fable 5 is the explicit built-in exception. The plugin does not pretend it is a Codex model or translate Anthropic into the Responses protocol. Instead, a disabled-by-default local MCP server invokes the official `claude` CLI with the user's first-party Pro or Max login. Setup enables one Python 3.11+ launcher variant, and disable restores every prior plugin override value. Codex's TOML editor can retain an inert empty table header after its final key is deleted; the configurator does not risk a broad TOML rewrite for cosmetic cleanup.
+
+The bridge removes `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and Bedrock/Vertex/Foundry selection variables from the child environment. It re-checks `claude auth status`, pins `claude-fable-5` and the saved effort, disables tools and session persistence, disables prompt suggestions, and requires JSON runtime metadata to confirm the model. Setup and status never make a model call.
+
 A cross-provider seat normally needs:
 
 1. a provider already defined and authenticated in the user's Codex config;
@@ -220,6 +227,8 @@ Codex custom providers currently use the Responses wire protocol. An Anthropic M
 A task-local advisor is review-only by instruction. Do not claim it is mechanically read-only unless the effective child sandbox confirms that.
 
 A saved advisor requests `sandbox_mode = "read-only"`, but live parent permission overrides may be reapplied to children. Keep the behavioral prohibition on edits and mutation even with the requested sandbox.
+
+The Claude Fable 5 advisor is mechanically narrower than a child: the MCP tool accepts only a review packet, launches Claude with safe mode and no tools, and exposes no edit or shell operation. It still has open-world model access, so the packet must be deliberate and self-contained.
 
 Advisor failure is never approval. A configured advisor is required for a non-trivial executor plan unless the user explicitly marks it best-effort. Transport failure, malformed output, missing context, or wrong route becomes `advisor unavailable`; stop before executor work by default, or disclose and continue under the root only in best-effort mode.
 

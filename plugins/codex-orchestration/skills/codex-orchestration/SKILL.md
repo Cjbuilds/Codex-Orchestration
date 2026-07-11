@@ -11,10 +11,11 @@ This skill adds a model route to Codex's existing multi-agent flow. It does not 
 
 ## Understand the command
 
-Support four simple forms:
+Support these simple forms:
 
 ```text
 /codex-orchestration setup executor: GPT-5.6 Luna Extra High
+/codex-orchestration setup executor: GPT-5.6 Luna Extra High, advisor: Claude Fable 5 Extra High
 /codex-orchestration status
 /codex-orchestration disable
 /codex-orchestration remove custom roles personally
@@ -41,13 +42,13 @@ For a task-local request, append `— <original task>`. Keep every supplied modi
 
 If an old prompt contains `orchestrator:`, explain that the current task model already owns that role. Ignore that seat instead of switching or persisting it.
 
-Normalize `Extra High` to `xhigh`. Resolve display names to exact IDs only through the executing host's model catalog, picker, a loaded custom agent, or official provider documentation. Never invent an ID. For persistent direct routing, resolve `auto` to the catalog's concrete default.
+Normalize `Extra High` to `xhigh` for Codex models. `Claude Fable 5 Extra High` is the built-in advisor label; map it to `--advisor-fable --advisor-effort max`, not the Codex model catalog. Resolve every other display name to an exact ID only through the executing host's model catalog, picker, a loaded custom agent, or official provider documentation. Never invent an ID. For persistent direct routing, resolve `auto` to the catalog's concrete default.
 
 Read [providers-and-models.md](references/providers-and-models.md) before setup, when clients disagree, when a model is absent, when providers differ, or when custom agents or legacy migration are involved.
 
 ## One-time native setup
 
-Use this path for a current same-provider setup such as Sol root to Luna or Terra executors.
+Use this path for a current same-provider setup such as Sol root to Luna or Terra executors. Claude Fable 5 is the one built-in cross-provider advisor exception because it runs through the bundled read-only MCP bridge and the user's authenticated Claude Code CLI.
 
 1. Identify the Codex binary used by the active host. Do not assume the shell `codex` is the Desktop binary.
 2. Resolve the exact executor and optional advisor IDs and efforts from that host.
@@ -70,20 +71,22 @@ python3 <skill-dir>/scripts/configure_native_routing.py \
   --apply
 ```
 
-Add `--advisor-model` and `--advisor-effort` only when an advisor was supplied. Omission persists `advisor: none`.
+Add `--advisor-model` and `--advisor-effort` for a same-provider Codex advisor. For Claude Fable 5, use `--advisor-fable --advisor-effort max`. The configurator requires Claude Code to be logged in through a first-party Pro or Max account, chooses an available Python 3.11+ MCP launcher, and performs only an auth/capability check during setup. It never extracts a token, writes a credential, or makes a model call during setup or status. Omission persists `advisor: none`.
 
 The configurator capability-tests the complete four-field preset on the active target, `codex` on PATH when different, the known macOS Desktop binary when present, and every explicit `--compat-bin`. A successful isolated config probe means that client can parse the preset; it is not a live child-model confirmation. Report `route accepted` or `used and confirmed` only from the exact live spawn evidence defined below. Ask about other Codex/IDE installations that share this config only when the environment suggests they exist, and pass their binaries explicitly. If the request or active host indicates a named `--profile`, explain that normal setup manages the default user layer and is not verified for that profile; do not add a routine question for users with no profile signal. If a checked client rejects any managed field, stop before apply. Recommend updating it or using the task-local fallback. `--allow-incompatible-client` requires a separate explicit user decision because it can make the shared config unreadable to that client.
 
 For the current validated v2 direct route, set `tool_namespace = "agents"`. Live testing on Desktop `0.144.0-alpha.4` showed that the default reserved `collaboration.spawn_agent` schema rejected expanded model/effort metadata, while `agents` accepted the same request and spawned Luna at `xhigh`. Treat this as a required control-surface setting for that tested path, not as the executor selection. `usage_hint_text` carries the actual executor/advisor route.
 
-Do not add `enabled = true` for a Sol or Terra root. Their current model metadata selects v2. The configurator intentionally manages only:
+Do not add `enabled = true` for a Sol or Terra root. Their current model metadata selects v2. The configurator intentionally manages these routing fields:
 
 - `features.multi_agent_v2.hide_spawn_agent_metadata`;
 - `features.multi_agent_v2.tool_namespace`;
 - `features.multi_agent_v2.multi_agent_mode_hint_text`;
 - `features.multi_agent_v2.usage_hint_text`.
 
-It uses Codex App Server's `config/read` and `config/batchWrite` APIs, not a home-grown TOML rewrite. It preserves unrelated settings and comments, validates the whole effective config, and uses the user-layer version to detect races. Restore snapshots are limited to the four owned config fields; the namespaced state also records schema/version markers, config path, selected seats, and scalar-conversion metadata when needed. If the user explicitly replaces existing hint text, the exact prior text is stored for restoration; warn them never to place credentials in routing hints.
+When Claude Fable 5 is selected, it additionally manages only the plugin-scoped `enabled` override for the chosen bundled MCP launcher and any launcher variant already overridden by the user. All bundled variants are disabled by default. The original override values are stored and restored by `disable`. Codex's TOML editor may retain an inert empty table header after deleting the last override; never rewrite the file merely to remove that cosmetic header.
+
+It uses Codex App Server's `config/read` and `config/batchWrite` APIs, not a home-grown TOML rewrite. It preserves unrelated settings and comments, validates the whole effective config, and uses the user-layer version to detect races. Restore snapshots cover the four routing fields plus the narrowly scoped MCP overrides only when Fable is selected; the namespaced state also records schema/version markers, config path, selected seats, and scalar-conversion metadata when needed. If the user explicitly replaces existing hint text, the exact prior text is stored for restoration; warn them never to place credentials in routing hints.
 
 If a user-authored mode or usage hint already exists, do not replace it automatically. Show the conflict. Use `--replace-existing-policy` only after the user explicitly approves replacing and later restoring those exact values.
 
@@ -117,9 +120,25 @@ Disable must remain available even if an older client is incompatible with the a
 
 For personal v0.4 custom roles, preview and apply removal with `configure_orchestration.py --scope personal --personal-route-names --remove-saved-roles`. For older fixed-name personal roles, run a separate preview without `--personal-route-names`. Project removal uses `--scope project --root <trusted-project> --remove-saved-roles`. Delete only files that the configurator fully validates as managed; edited or user-owned files require manual review.
 
+## Claude Fable 5 advisor
+
+Use this built-in route when the user names Claude Fable 5. Do not create a custom provider or custom-agent file for it.
+
+In every user-facing status or result, use the exact name `Claude Fable 5`. Report authentication as `first-party login ready`; do not expose or restate Claude account-plan metadata.
+
+Prerequisites:
+
+- the official `claude` CLI is installed;
+- `claude auth status` reports a first-party Pro or Max login;
+- a Python 3.11+ launcher is available.
+
+The plugin packages three disabled MCP launcher variants for macOS, Linux, and Windows. Setup enables exactly the compatible variant through the plugin's namespaced config. At review time the MCP server removes API-key and Bedrock/Vertex/Foundry override variables, re-checks first-party login, and invokes `claude -p --model claude-fable-5` with `--safe-mode`, no tools, no session persistence, prompt suggestions disabled, and JSON output. The saved route pins the model and effort; the root cannot replace them through tool arguments.
+
+The bridge accepts only one self-contained `packet`. It requires `PLAN_APPROVED` or `PLAN_REVISE` as the first non-empty line and requires runtime `modelUsage` to confirm `claude-fable-5`. Any auth, transport, format, or model-confirmation failure is `advisor unavailable`, never approval. It returns no account identifier or credential.
+
 ## Durable or cross-provider custom agents
 
-Direct `model` routing is same-provider. A different provider needs an already authenticated Codex-compatible provider and a loaded custom agent that pins `model_provider`.
+Direct `model` routing is same-provider. Except for the built-in Claude Fable 5 MCP route above, a different provider needs an already authenticated Codex-compatible provider and a loaded custom agent that pins `model_provider`.
 
 Use the existing standalone-agent configurator for this extended path. Personal scope is required for machine-local provider IDs and affects all projects, so the user's explicit cross-provider `setup` request must name or confirm the existing provider ID. Never create provider definitions, collect keys in chat, or write credentials.
 
@@ -222,6 +241,8 @@ PLAN_REVISE
 
 The root adjudicates every suggestion and owns the revised plan. Allow at most one confirmation pass after a material revision. A configured advisor is a gate for a non-trivial executor plan by default. Transport failure, malformed output, inaccessible routing, or missing context means `advisor unavailable`, never approval; stop before executor work unless the user explicitly made the advisor best-effort.
 
+For Claude Fable 5, call the configured MCP server's `review_plan` tool instead of spawning an advisor child. It remains root-only and read-only; executors never receive the tool or direct it.
+
 ## Executor handoff
 
 Give each executor one bounded packet with:
@@ -273,6 +294,7 @@ Never call that 65% fewer raw tokens, a guaranteed five-hour or weekly-limit sav
 ## Resources
 
 - `scripts/configure_native_routing.py`: one-time native setup, status, update, and disable.
+- `scripts/fable_advisor_mcp.py`: fail-closed Claude Fable 5 plan-review bridge.
 - `scripts/configure_orchestration.py`: namespaced custom agents, provider pins, safe removal, and legacy migration.
 - `scripts/inspect_models.py`: fallible host-catalog diagnostics.
 - [providers-and-models.md](references/providers-and-models.md): detailed capability, provider, compatibility, persistence, and usage boundaries.

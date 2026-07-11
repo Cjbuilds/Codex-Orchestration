@@ -111,6 +111,19 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("verify_agent_routes", NATIVE_SCRIPT)
         self.assertIn("same-name project role", SKILL)
 
+    def test_fable_is_a_bundled_root_only_mcp_advisor(self) -> None:
+        self.assertIn("Claude Fable 5 Extra High", SKILL)
+        self.assertIn("--advisor-fable --advisor-effort max", SKILL)
+        self.assertIn("built-in cross-provider advisor exception", SKILL)
+        self.assertIn("All bundled variants are disabled by default", SKILL)
+        self.assertIn("first-party Pro or Max account", SKILL)
+        self.assertIn("never extracts a token", SKILL)
+        self.assertIn("runtime `modelUsage` to confirm `claude-fable-5`", SKILL)
+        self.assertIn("call the configured MCP server's `review_plan` tool", SKILL)
+        self.assertIn("instead of spawning an advisor child", SKILL)
+        self.assertIn("use the exact name `Claude Fable 5`", SKILL)
+        self.assertIn("do not expose or restate Claude account-plan metadata", SKILL)
+
     def test_direct_routes_are_guarded_to_the_root_provider(self) -> None:
         self.assertIn("Direct model overrides keep the root's provider", SKILL)
         self.assertIn("target model is on the same provider", NATIVE_SCRIPT)

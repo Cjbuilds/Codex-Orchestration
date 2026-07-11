@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.0 — 2026-07-10
+
+- Add Claude Fable 5 as an opt-in, root-only advisor inside Codex through a bundled local MCP bridge to the authenticated Claude Code CLI.
+- Keep all MCP launcher variants disabled by default; setup enables only the compatible Python 3.11+ variant and disable restores the prior plugin override values.
+- Pin `claude-fable-5`, sanitize API/provider override variables, disable tools, sessions, and prompt suggestions, and fail closed unless both the plan signal and runtime model metadata are valid.
+- Extend setup and status with no-spend login/capability checks and add unit, lifecycle, restoration, packaging, and protocol coverage.
+- Keep user-facing status on the exact `Claude Fable 5` name and omit account-plan metadata from MCP results.
+
 ## 0.4.0 — 2026-07-10
 
 - Make one-time, config-first routing the primary workflow: setup once, then use Codex normally.
