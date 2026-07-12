@@ -2,7 +2,7 @@
 """Exercise a real Codex plugin install, Git upgrade, and both setup routes.
 
 A disposable bare Git marketplace is served over loopback HTTP. The real Codex
-CLI installs 0.3.0, runs its documented marketplace-upgrade command after 0.4.0
+CLI installs 0.3.0, runs its documented marketplace-upgrade command after 0.5.0
 is pushed to that Git remote, installs the refreshed package, verifies its cache,
 and runs native-policy plus custom-agent setup/status/cleanup in isolation.
 """
@@ -30,7 +30,7 @@ PLUGIN_ID = "codex-orchestration@codex-orchestration"
 MARKETPLACE_NAME = "codex-orchestration"
 OLD_RELEASE = "d93b86e735a12a9fefcfd35b0b35199ce3e9a2a7"
 OLD_VERSION = "0.3.0"
-NEW_VERSION = "0.4.0"
+NEW_VERSION = "0.5.0"
 COMMAND_TIMEOUT_SECONDS = 60
 
 
@@ -421,6 +421,65 @@ def main() -> int:
                 "installed package contents",
             )
 
+            native_configurator = (
+                installed_root
+                / "skills"
+                / "codex-orchestration"
+                / "scripts"
+                / "configure_native_routing.py"
+            )
+            direct_native_command = [
+                sys.executable,
+                str(native_configurator),
+                "--codex-bin",
+                codex,
+                "--codex-home",
+                str(codex_home),
+                "--allow-incompatible-client",
+                "--executor-model",
+                "gpt-5.6-luna",
+                "--executor-effort",
+                "xhigh",
+            ]
+            direct_preview = run(direct_native_command, cwd=project, env=env)
+            if "Dry run only" not in direct_preview.stdout:
+                raise SmokeFailure("Direct native setup did not report a dry run")
+            direct_apply = run(
+                [*direct_native_command, "--apply"], cwd=project, env=env
+            )
+            if "Native routing policy installed" not in direct_apply.stdout:
+                raise SmokeFailure("Direct native setup did not install its policy")
+            direct_status = run(
+                [
+                    sys.executable,
+                    str(native_configurator),
+                    "--codex-bin",
+                    codex,
+                    "--codex-home",
+                    str(codex_home),
+                    "--status",
+                    "--require-effective",
+                ],
+                cwd=project,
+                env=env,
+            )
+            if "Executor: gpt-5.6-luna@xhigh" not in direct_status.stdout:
+                raise SmokeFailure("Direct native status lost the selected model route")
+            run(
+                [
+                    sys.executable,
+                    str(native_configurator),
+                    "--codex-bin",
+                    codex,
+                    "--codex-home",
+                    str(codex_home),
+                    "--disable",
+                    "--apply",
+                ],
+                cwd=project,
+                env=env,
+            )
+
             fake_codex = temp / "fake-codex"
             write_fake_codex(fake_codex)
             configurator = (
@@ -479,13 +538,6 @@ def main() -> int:
                 if expected not in executor:
                     raise SmokeFailure(f"Generated executor is missing {expected!r}")
 
-            native_configurator = (
-                installed_root
-                / "skills"
-                / "codex-orchestration"
-                / "scripts"
-                / "configure_native_routing.py"
-            )
             native_command = [
                 sys.executable,
                 str(native_configurator),
@@ -523,6 +575,7 @@ def main() -> int:
                     "--codex-home",
                     str(codex_home),
                     "--status",
+                    "--require-effective",
                 ],
                 cwd=project,
                 env=env,

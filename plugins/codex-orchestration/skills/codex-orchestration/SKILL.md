@@ -95,9 +95,13 @@ For status:
 python3 <skill-dir>/scripts/configure_native_routing.py \
   --codex-bin <active-codex-binary> \
   --status
+
+python3 <skill-dir>/scripts/configure_native_routing.py \
+  --codex-bin <active-codex-binary> \
+  --status --require-effective
 ```
 
-Run status from the target project. Report the current task model as the orchestrator, the configured executor and advisor, whether the personal policy is installed and effective in that workspace, whether effective spawn controls are visible, whether the effective tool namespace is `agents`, the target config path, and checked-client compatibility. State that the installer cannot infer v2 activation for the model selected in a task; current Sol or Terra is the intended root.
+Run status from the target project. The first form is descriptive. Use `--require-effective` for automation and release gates; it returns nonzero for incompatible clients, conflicts, overrides, incomplete controls, unavailable agent routes, or orphaned v0.4+ personal roles. Report the current task model as the orchestrator, the configured executor and advisor, whether the personal policy is installed and effective in that workspace, whether effective spawn controls are visible, whether the effective tool namespace is `agents`, the target config path, and checked-client compatibility. State that neither status form proves a live route or infers v2 activation for the model selected in a task; current Sol or Terra is the intended root.
 
 To change seats, run normal `setup` again. The configurator keeps the original restore snapshot rather than treating its own managed values as user settings.
 
@@ -149,6 +153,18 @@ python3 <skill-dir>/scripts/configure_native_routing.py \
 ```
 
 Omit `--advisor-agent` when none is configured. `--personal-route-names` generates stable CODEX_HOME-specific names and prints them for the native command. The native configurator verifies exactly one matching personal file and refuses a same-name project role in the current workspace. A custom-agent file is a stronger durable model/provider pin than a direct tool hint, but runtime identity is confirmed only when the host exposes it. Start a new task so Codex loads the role files.
+
+These are two separate storage transactions. If the native command fails after the role transaction applied, immediately preview and then apply:
+
+```bash
+python3 <skill-dir>/scripts/configure_orchestration.py \
+  --scope personal \
+  --personal-route-names \
+  --codex-bin <active-codex-binary> \
+  --remove-saved-roles
+```
+
+Remove only files the configurator validates as managed. If cleanup fails or the operation was interrupted, stop and run native `--status --require-effective`; report each orphaned managed role for manual review. Never claim the two stores changed atomically. On Windows, new managed roles can be created, but updating or removing an existing role fails closed; explain that limitation before choosing the custom-agent path.
 
 The standalone configurator also retains project-scoped saved roles, safe removal, and opt-in migration for releases 0.1–0.3. It must never change the root model, permissions, credentials, or global agent limits.
 

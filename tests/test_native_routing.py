@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
-import os
 from pathlib import Path
 import subprocess
 import sys
@@ -352,6 +352,10 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertIn("Executor: gpt-5.6-luna@xhigh", status.stdout)
         self.assertIn("Advisor: none", status.stdout)
         self.assertIn("V2 tool namespace: agents", status.stdout)
+        self.assertIn("Routing validation: not performed", status.stdout)
+
+        required = self.run_script("--status", "--require-effective")
+        self.assertEqual(required.returncode, 0)
 
         disabled = self.run_script("--disable", "--apply")
         self.assertIn("Native routing disabled", disabled.stdout)
@@ -502,6 +506,10 @@ class NativeRoutingTests(unittest.TestCase):
         status = self.run_script("--status")
         self.assertIn("managed fields conflict", status.stdout)
         self.assertIn("Seats: suppressed", status.stdout)
+        required = self.run_script(
+            "--status", "--require-effective", check=False
+        )
+        self.assertEqual(required.returncode, 1)
         update = self.run_script(
             "--executor-model",
             "gpt-5.6-terra",
@@ -574,6 +582,69 @@ class NativeRoutingTests(unittest.TestCase):
             allow_incompatible=False,
         )
         self.assertIn("Native routing disabled", disabled.stdout)
+
+    def test_require_effective_rejects_inactive_and_incompatible_status(self) -> None:
+        inactive = self.run_script(
+            "--status", "--require-effective", check=False
+        )
+        self.assertEqual(inactive.returncode, 1)
+        self.assertIn("Native policy: inactive", inactive.stdout)
+
+        self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "high",
+            "--apply",
+        )
+        old_codex = self.root / "old-status-codex"
+        old_codex.write_text(textwrap.dedent(FAKE_CODEX), encoding="utf-8")
+        old_codex.chmod(0o755)
+        incompatible = self.run_script(
+            "--status",
+            "--require-effective",
+            "--compat-bin",
+            str(old_codex),
+            check=False,
+        )
+        self.assertEqual(incompatible.returncode, 1)
+        self.assertIn("incompatible", incompatible.stdout)
+
+    def test_require_effective_rejects_orphaned_managed_personal_role(self) -> None:
+        self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "high",
+            "--apply",
+        )
+        agents = self.home / "agents"
+        agents.mkdir()
+        orphan_name = "codex_orchestration_executor_012345abcdef"
+        (agents / "orphan.toml").write_text(
+            "\n".join(
+                (
+                    NATIVE.CUSTOM_AGENT_MANAGED_MARKER,
+                    f'name = "{orphan_name}"',
+                    'description = "Managed orphan"',
+                    'model = "gpt-5.6-luna"',
+                    'developer_instructions = "Stay bounded."',
+                    "",
+                )
+            ),
+            encoding="utf-8",
+        )
+        status = self.run_script(
+            "--status", "--require-effective", check=False
+        )
+        self.assertEqual(status.returncode, 1)
+        self.assertIn("Orphaned managed custom agents", status.stdout)
+        self.assertIn(orphan_name, status.stdout)
+
+    def test_require_effective_requires_status(self) -> None:
+        result = self.run_script("--require-effective", check=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("requires --status", result.stderr)
 
     def test_state_from_another_config_is_refused(self) -> None:
         self.run_script(
@@ -684,6 +755,55 @@ class NativeRoutingTests(unittest.TestCase):
         )
         self.assertEqual(state["executor"]["model"], "gpt-5.6-luna")
 
+    def test_effective_readback_rejects_unexpected_rollback_status(self) -> None:
+        effective = {
+            "features": {
+                "multi_agent_v2": {
+                    "hide_spawn_agent_metadata": True,
+                    "tool_namespace": "collaboration",
+                }
+            }
+        }
+        (self.home / ".fake-effective-config.json").write_text(
+            json.dumps(effective), encoding="utf-8"
+        )
+        real_batch_write = NATIVE._batch_write
+        calls = 0
+
+        def batch_write(*args: object, **kwargs: object) -> dict[str, object]:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return real_batch_write(*args, **kwargs)
+            return {"status": "unexpected", "version": "sha256:unknown"}
+
+        argv = [
+            str(SCRIPT),
+            "--codex-bin",
+            str(self.codex),
+            "--codex-home",
+            str(self.home),
+            "--allow-incompatible-client",
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "high",
+            "--apply",
+        ]
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(NATIVE, "_batch_write", side_effect=batch_write),
+            mock.patch.object(sys, "stderr", stderr),
+        ):
+            result = NATIVE.main()
+
+        self.assertEqual(result, 2)
+        self.assertEqual(calls, 2)
+        self.assertIn("automatic rollback failed", stderr.getvalue())
+        self.assertIn("unexpected rollback status", stderr.getvalue())
+        self.assertTrue((self.home / NATIVE.STATE_FILENAME).exists())
+
     def test_ok_overridden_restores_every_owned_field(self) -> None:
         initial = {
             "features": {
@@ -725,6 +845,50 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertEqual(feature["tool_namespace"], "agents")
         self.assertIn(NATIVE.MANAGED_MARKER, feature["usage_hint_text"])
         self.assertFalse((self.home / NATIVE.STATE_FILENAME).exists())
+
+    def test_state_failure_rejects_unexpected_rollback_status(self) -> None:
+        real_batch_write = NATIVE._batch_write
+        calls = 0
+
+        def batch_write(*args: object, **kwargs: object) -> dict[str, object]:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return real_batch_write(*args, **kwargs)
+            return {"status": "unexpected", "version": "sha256:unknown"}
+
+        argv = [
+            str(SCRIPT),
+            "--codex-bin",
+            str(self.codex),
+            "--codex-home",
+            str(self.home),
+            "--allow-incompatible-client",
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "high",
+            "--apply",
+        ]
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(
+                NATIVE,
+                "_write_state",
+                side_effect=NATIVE.ConfigurationError("forced state failure"),
+            ),
+            mock.patch.object(NATIVE, "_batch_write", side_effect=batch_write),
+            mock.patch.object(sys, "stderr", stderr),
+        ):
+            result = NATIVE.main()
+
+        self.assertEqual(result, 2)
+        self.assertEqual(calls, 2)
+        self.assertIn("may still contain managed fields", stderr.getvalue())
+        self.assertIn("unexpected rollback status", stderr.getvalue())
+        feature = self.read_fake_config()["features"]["multi_agent_v2"]
+        self.assertIn(NATIVE.MANAGED_MARKER, feature["usage_hint_text"])
 
     def test_custom_agent_route_and_optional_advisor(self) -> None:
         self.write_personal_agent("codex_orchestration_executor")

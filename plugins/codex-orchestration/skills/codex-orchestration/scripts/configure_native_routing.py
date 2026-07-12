@@ -41,6 +41,12 @@ PROBE_TIMEOUT_SECONDS = 15
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+/@-]{0,199}$")
 AGENT_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 EFFORT_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+PERSONAL_MANAGED_ROLE_RE = re.compile(
+    r"^codex_orchestration_(?:executor|advisor)_[0-9a-f]{12}$"
+)
+CUSTOM_AGENT_MANAGED_MARKER = (
+    "# Managed by codex-orchestration. Standalone custom agent v2."
+)
 MISSING = object()
 
 
@@ -58,6 +64,14 @@ def parse_args() -> argparse.Namespace:
     action = parser.add_mutually_exclusive_group()
     action.add_argument("--status", action="store_true")
     action.add_argument("--disable", action="store_true")
+    parser.add_argument(
+        "--require-effective",
+        action="store_true",
+        help=(
+            "With --status, return 1 unless the policy is installed, effective, "
+            "client-compatible, complete, and free of unavailable or orphaned roles."
+        ),
+    )
 
     executor = parser.add_mutually_exclusive_group()
     executor.add_argument("--executor-model", help="Exact model ID for direct routing.")
@@ -112,6 +126,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def _validate_args(args: argparse.Namespace) -> None:
+    if args.require_effective and not args.status:
+        raise ConfigurationError("--require-effective requires --status.")
     if args.status and args.apply:
         raise ConfigurationError("--status cannot be combined with --apply.")
     if args.status and any(
@@ -296,7 +312,7 @@ class AppServer:
                     "clientInfo": {
                         "name": "codex_orchestration_installer",
                         "title": "Codex Orchestration Installer",
-                        "version": "0.4.0",
+                        "version": "0.5.0",
                     },
                     "capabilities": {"experimentalApi": True},
                 },
@@ -729,6 +745,54 @@ def _route_summary(route: dict[str, Any]) -> str:
     return f"{route['model']}@{route['effort']}"
 
 
+def _managed_personal_roles(codex_home: Path) -> tuple[dict[str, Path], list[str]]:
+    """Find only collision-resistant v0.4 personal roles owned by this plugin."""
+
+    roles: dict[str, Path] = {}
+    issues: list[str] = []
+    directory = codex_home / "agents"
+    if not directory.exists() and not directory.is_symlink():
+        return roles, issues
+    if directory.is_symlink() or not directory.is_dir():
+        return roles, [f"managed-role directory is unsafe: {directory}"]
+    for path in sorted(directory.glob("*.toml")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            content = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            issues.append(f"could not inspect {path}: {exc}")
+            continue
+        if not content.startswith(CUSTOM_AGENT_MANAGED_MARKER + "\n"):
+            continue
+        try:
+            parsed = tomllib.loads(content)
+        except tomllib.TOMLDecodeError as exc:
+            issues.append(f"managed role is malformed: {path}: {exc}")
+            continue
+        name = parsed.get("name")
+        if not isinstance(name, str) or not PERSONAL_MANAGED_ROLE_RE.fullmatch(name):
+            continue
+        if name in roles:
+            issues.append(f"managed role {name!r} is duplicated")
+            continue
+        roles[name] = path
+    return roles, issues
+
+
+def _referenced_agent_names(state: dict[str, Any] | None) -> set[str]:
+    names: set[str] = set()
+    if not isinstance(state, dict):
+        return names
+    for key in ("executor", "advisor"):
+        route = state.get(key)
+        if isinstance(route, dict) and route.get("kind") == "agent":
+            name = route.get("agent")
+            if isinstance(name, str):
+                names.add(name)
+    return names
+
+
 def _spawn_route(route: dict[str, Any]) -> str:
     if route["kind"] == "agent":
         return f'agent_type = {json.dumps(route["agent"])}'
@@ -883,11 +947,14 @@ def _status(
     target: Path,
     codex_home: Path | None,
     binaries: list[Path],
+    require_effective: bool,
 ) -> int:
+    clients_compatible = True
     for binary in binaries:
         supported, detail = supports_native_policy(binary)
         label = "compatible" if supported else f"incompatible ({detail})"
         print(f"Client: {binary} ({binary_version(binary)}) — {label}")
+        clients_compatible = clients_compatible and supported
     with AppServer(target, codex_home) as app:
         workspace = Path.cwd().resolve()
         read_result = app.request(
@@ -948,16 +1015,39 @@ def _status(
                 )
             except (ConfigurationError, KeyError, TypeError) as exc:
                 print(f"Custom-agent route: unavailable — {exc}")
+                agent_routes_available = False
             else:
+                agent_routes_available = True
                 if verified:
                     print(
                         "Custom-agent route: verified — "
                         + ", ".join(str(path) for path in verified)
                     )
         elif routing_state.startswith("installed"):
+            agent_routes_available = False
             print("Seats: managed policy found; local state is unavailable")
         elif state is not None:
+            agent_routes_available = False
             print("Seats: suppressed because restore state is stale or conflicting")
+        else:
+            agent_routes_available = False
+
+        managed_roles, role_issues = _managed_personal_roles(app.codex_home)
+        referenced_roles = _referenced_agent_names(state if state_matches else None)
+        orphaned_roles = {
+            name: path
+            for name, path in managed_roles.items()
+            if name not in referenced_roles
+        }
+        for issue in role_issues:
+            print(f"Managed custom-agent inspection: unavailable — {issue}")
+        if orphaned_roles:
+            rendered = ", ".join(
+                f"{name} ({path})" for name, path in sorted(orphaned_roles.items())
+            )
+            print(f"Orphaned managed custom agents: {rendered}")
+        else:
+            print("Orphaned managed custom agents: none")
         if effective["metadata"] is False:
             print("V2 spawn metadata setting: visible when a v2 root is selected")
         else:
@@ -966,7 +1056,19 @@ def _status(
             print(f"V2 tool namespace: {ROUTING_TOOL_NAMESPACE}")
         else:
             print("V2 tool namespace: not routed through agents in this workspace")
-    return 0
+        print(
+            "Routing validation: not performed — config compatibility and policy "
+            "effectiveness do not prove route acceptance or the effective child model"
+        )
+        healthy = (
+            clients_compatible
+            and routing_state.startswith("installed and effective")
+            and state_matches
+            and agent_routes_available
+            and not role_issues
+            and not orphaned_roles
+        )
+    return 1 if require_effective and not healthy else 0
 
 
 def _prepare_setup_state(
@@ -1255,7 +1357,12 @@ def main() -> int:
         target = resolve_binary(args.codex_bin)
         binaries = discover_compatibility_binaries(target, args.compat_bin)
         if args.status:
-            return _status(target, args.codex_home, binaries)
+            return _status(
+                target,
+                args.codex_home,
+                binaries,
+                args.require_effective,
+            )
         # Disable must remain available when the policy itself is what makes an
         # older shared-config client incompatible.
         _compatibility_report(
@@ -1339,7 +1446,7 @@ def main() -> int:
                 args.replace_existing_policy,
             )
             print(f"Config: {app.config_path}")
-            print(f"Orchestrator: model selected when each Codex task starts")
+            print("Orchestrator: model selected when each Codex task starts")
             print(f"Executor: {_route_summary(executor)}")
             print(f"Advisor: {_route_summary(advisor) if advisor else 'none'}")
             if verified_agents:
@@ -1389,16 +1496,22 @@ def main() -> int:
                 _write_state(state_path, new_state)
             except (ConfigurationError, OSError) as state_exc:
                 try:
-                    _batch_write(
+                    rollback_result = _batch_write(
                         app,
                         rollback,
                         result.get("version"),
                         reload_user_config=True,
                     )
+                    if rollback_result.get("status") not in {"ok", "okOverridden"}:
+                        raise ConfigurationError(
+                            "unexpected rollback status "
+                            f"{rollback_result.get('status')!r}"
+                        )
                 except ConfigurationError as rollback_exc:
                     raise ConfigurationError(
                         "Config was written but state persistence and automatic rollback "
-                        f"both failed. State error: {state_exc}; rollback: {rollback_exc}"
+                        "both failed; the user config may still contain managed fields. "
+                        f"State error: {state_exc}; rollback: {rollback_exc}"
                     ) from state_exc
                 raise ConfigurationError(
                     f"Could not persist restore state; config write was rolled back: {state_exc}"
@@ -1425,12 +1538,17 @@ def main() -> int:
                 )
             if not effective_matches:
                 try:
-                    _batch_write(
+                    rollback_result = _batch_write(
                         app,
                         rollback,
                         verify_version,
                         reload_user_config=True,
                     )
+                    if rollback_result.get("status") not in {"ok", "okOverridden"}:
+                        raise ConfigurationError(
+                            "unexpected rollback status "
+                            f"{rollback_result.get('status')!r}"
+                        )
                     if state is None:
                         _remove_state(state_path)
                     else:

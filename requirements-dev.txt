@@ -1,0 +1,2 @@
+# Production scripts remain standard-library only. This file is for CI/development.
+ruff==0.15.21

@@ -24,7 +24,7 @@ class PackagingTests(unittest.TestCase):
 
         self.assertEqual(manifest["name"], "codex-orchestration")
         self.assertEqual(manifest["skills"], "./skills/")
-        self.assertEqual(manifest["version"], "0.4.0")
+        self.assertEqual(manifest["version"], "0.5.0")
         self.assertRegex(
             manifest["version"],
             r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$",
@@ -89,7 +89,7 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("@openai/codex@0.144.1", workflow)
         smoke_text = smoke.read_text(encoding="utf-8")
         self.assertIn('OLD_VERSION = "0.3.0"', smoke_text)
-        self.assertIn('NEW_VERSION = "0.4.0"', smoke_text)
+        self.assertIn('NEW_VERSION = "0.5.0"', smoke_text)
         self.assertIn("configure_native_routing.py", smoke_text)
         self.assertIn("configure_orchestration.py", smoke_text)
         self.assertIn('"marketplace",\n                    "upgrade"', smoke_text)
@@ -110,10 +110,10 @@ class PackagingTests(unittest.TestCase):
             encoding="utf-8"
         )
 
-        self.assertIn("Is config alone enough?", readme)
+        self.assertIn("What config can and cannot prove", readme)
         self.assertIn("Neither says “use Luna.”", readme)
         self.assertIn("no global `executor_model = ...`", readme)
-        self.assertIn("Same-provider config routing is strong tool-level guidance", readme)
+        self.assertIn("Same-provider config routing is tool-level policy", readme)
         self.assertIn('sets `tool_namespace = "agents"`', readme)
         self.assertIn("reserved `collaboration.spawn_agent` schema", readme)
         self.assertIn("does **not** force `enabled = true`", readme)

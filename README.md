@@ -1,6 +1,6 @@
 # Codex-Orchestration
 
-Use your strongest model where judgment matters. Let a faster, cheaper model handle the execution work that consumes most of the context and usage.
+Use your strongest model where judgment matters. Let a faster, cheaper model handle eligible execution work that consumes most of the context and usage.
 
 The model you select when you start a Codex task is already the orchestrator. If you start with GPT-5.6 Sol Extra High, Sol plans, delegates, reviews, and answers. You only choose the executor and, if you want one, an advisor.
 
@@ -45,19 +45,20 @@ Then start a new task, select the model you want as orchestrator, and work norma
 Implement the authentication changes and run the relevant tests.
 ```
 
-You do not invoke Codex Orchestration again for ordinary work. The saved policy is already part of Codex's multi-agent flow.
+You do not invoke Codex Orchestration again for ordinary work. The saved policy-guided route is already part of Codex's multi-agent flow.
 
 Useful controls:
 
 ```text
 /codex-orchestration status
+/codex-orchestration status --require-effective
 /codex-orchestration setup executor: GPT-5.6 Terra high
 /codex-orchestration disable
 ```
 
-Running `setup` again changes the default. `disable` restores the values that existed before setup and leaves unrelated Codex settings alone.
+Running `setup` again changes the saved route policy. `disable` restores the values that existed before setup and leaves unrelated Codex settings alone.
 
-`status` distinguishes a policy that is merely installed from one that is effective in the current workspace. It cannot infer the selected task model's multi-agent version, so start the new task with a current v2 root such as Sol or Terra.
+`status` distinguishes a policy that is merely installed from one that is effective in the current workspace. `status --require-effective` is the automation/release gate: it exits nonzero for incompatible clients, conflicts, overrides, incomplete controls, unavailable custom agents, or orphaned managed personal roles. Neither form proves a live child route or infers the selected task model's multi-agent version, so start the new task with a current v2 root such as Sol or Terra.
 
 For one task only, use an inline override without changing the saved default:
 
@@ -104,7 +105,7 @@ For one task only, use an inline override without changing the saved default:
 
 Codex still decides whether a plan is useful, whether to delegate, how many independent slices exist, and what can run safely in parallel. Plan and Goal behavior stay exactly where they already live in Codex.
 
-“Use Luna for execution” means the saved policy supplies the Luna route for every executor that Codex chooses to delegate to. It does not force a subagent for a one-line change, or stop the root from doing tightly coupled work. Forcing every edit through another agent would add overhead and work against Codex's own judgment.
+“Use Luna for execution” means the saved policy tells the root to request the Luna route for every executor that Codex chooses to delegate to. It does not force a subagent for a one-line change, mechanically enforce the request, or stop the root from doing tightly coupled work. Forcing every edit through another agent would add overhead and work against Codex's own judgment.
 
 If you say `no subagents`, that wins.
 
@@ -175,9 +176,9 @@ The setup sets `tool_namespace = "agents"` because the currently validated Deskt
 
 The setup also does **not** force `enabled = true` for a Sol or Terra root. Current Sol and Terra model metadata already selects multi-agent v2. Forcing the feature globally can produce an under-development warning and can conflict with older `agents.max_threads` configuration.
 
-## Is config alone enough?
+## What config can and cannot prove
 
-Yes—the full policy becomes the saved routing default for later tasks that use a v2 root and do not override it with a higher-precedence config layer. Codex still decides whether to delegate, and exact child use is confirmed only by runtime evidence. That is the point of the one-time setup.
+The full policy becomes durable spawn-tool guidance for later tasks that use a v2 root and do not override it with a higher-precedence config layer. Codex still decides whether to delegate and must issue the requested route; exact child use is confirmed only by runtime evidence. This is policy-guided routing, not an engine-level executor selector.
 
 But these two lines alone are not an executor configuration:
 
@@ -191,7 +192,7 @@ Those two lines configure the control surface used by the currently validated De
 
 The full generated policy adds the missing model route, effort, fork mode, root/child boundaries, advisor behavior, and failure rule. The skill is the setup and control plane: it resolves real model IDs, validates compatibility, installs safely, reports status, supports an advisor, handles cross-provider custom agents, and reverses its own changes. It is not consuming tokens in every later task.
 
-One honest boundary remains: Codex has no global `executor_model = ...` engine switch today. Same-provider config routing is strong tool-level guidance plus a runtime-validated `model` argument, not a new hardcoded scheduler. When the spawn tool accepts an exact route, Codex has validated the requested model and effort; call that `route accepted`. Call a model `used and confirmed` only when the client explicitly exposes effective runtime metadata. A namespaced custom agent provides the stronger persistent pin needed for cross-provider routing.
+One hard boundary remains: Codex has no global `executor_model = ...` engine switch today. Same-provider config routing is tool-level policy plus a runtime-validated `model` argument, not a hardcoded scheduler. Setup can prove config parsing and policy effectiveness; it cannot bind the provider of a future root task or prove a future spawn. When the spawn tool accepts an exact route, call that `route accepted`. Call a model `used and confirmed` only when the client explicitly exposes effective runtime metadata. A namespaced custom agent provides the stronger persistent pin needed for cross-provider routing.
 
 ## Current compatibility
 
@@ -203,6 +204,7 @@ One honest boundary remains: Codex has no global `executor_model = ...` engine s
 | Older Codex that rejects `multi_agent_mode_hint_text` | The installer refuses to break its shared config and keeps the per-task skill fallback available. Update that client before enabling the persistent preset. |
 | OpenAI root and OpenAI executor | Direct per-spawn model route; simplest setup. |
 | Different provider for advisor or executor | Use a loaded, namespaced custom agent with an already configured provider. |
+| Windows custom-agent path | New managed roles can be created, but updating or removing existing role files fails closed because inode/metadata-safe replacement is unavailable. Native App Server policy setup is a separate path. |
 
 Desktop and CLI normally share `~/.codex/config.toml`. The setup asks the target binary, the `codex` on your PATH, and the Desktop binary when present to parse the complete four-field preset in an isolated home. That proves config compatibility, not a live child route. Report `route accepted` or `used and confirmed` only from the exact runtime evidence described above; the installer does not guess compatibility from a version number.
 
@@ -245,6 +247,8 @@ The matching role names carry the same stable, `CODEX_HOME`-specific suffix. Tha
 
 It never writes credentials or creates a provider definition. See [Codex custom providers](https://learn.chatgpt.com/docs/config-file/config-advanced#custom-model-providers).
 
+Custom-agent files and the native policy live in separate storage systems, so cross-provider setup is a two-phase operation rather than one atomic commit. If the native phase fails after roles were created, Codex-Orchestration previews and removes only the newly managed roles. After an interruption, run `status --require-effective`; it reports managed personal roles that the native policy does not reference. Edited or user-owned files are never removed automatically.
+
 Project-scoped custom agents remain available for teams that want inspectable role files in a trusted repository. Project roles have higher precedence, so a deliberately duplicated personal role name can shadow a global agent route. Run `status` in the project before relying on a custom-agent preset.
 
 ## Can it save about 65%?
@@ -281,7 +285,7 @@ codex plugin marketplace upgrade codex-orchestration
 codex plugin add codex-orchestration@codex-orchestration
 ```
 
-Start a new task so Codex loads the updated skill. Run `/codex-orchestration status` to inspect an existing native preset; run `setup` again to update its managed policy.
+Start a new task so Codex loads the updated skill. Run `/codex-orchestration status --require-effective` to gate an existing native preset; run `setup` again to update its managed policy.
 
 Custom agents created by versions 0.1–0.3 remain supported. The older backup-first migration command is still available when exact legacy output is detected; edited or user-owned files are never guessed at or deleted.
 
@@ -293,7 +297,7 @@ First disable the persistent policy:
 /codex-orchestration disable
 ```
 
-If you created cross-provider or project custom agents, use `/codex-orchestration remove custom roles personally` or ask it to remove the roles for the current project. It previews the removal and deletes only fully validated namespaced files, including the home-specific v0.4 names when present.
+If you created cross-provider or project custom agents, use `/codex-orchestration remove custom roles personally` or ask it to remove the roles for the current project. It previews the removal and deletes only fully validated namespaced files, including the home-specific v0.4+ names when present. On Windows, existing managed custom-role removal is intentionally unavailable and requires manual review; native policy disable remains separate.
 
 Then remove the plugin:
 
@@ -310,7 +314,7 @@ Uninstalling the plugin does not silently delete a policy or custom-agent file t
 python3 -m unittest discover -s tests -v
 ```
 
-The suite covers the native App Server protocol, capability detection, generated policy contract, setup/status/disable, exact restoration, custom agents, packaging, migration safety, model inspection, and an isolated real-CLI marketplace lifecycle.
+The suite covers the native App Server protocol, capability detection, generated policy contract, setup/status/disable, exact restoration, custom agents, packaging, migration safety, model inspection, and an isolated real-CLI marketplace lifecycle. See the [production-readiness audit](docs/production-readiness-audit.md), [security policy](SECURITY.md), and [release process](RELEASE.md) for the maintained ship gates.
 
 ## Design sources
 

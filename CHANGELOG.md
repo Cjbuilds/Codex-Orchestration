@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.0 — Unreleased
+
+- Add automation-safe native status gating with `--require-effective`.
+- Detect orphaned managed personal roles and distinguish installed policy from live route validation.
+- Fail truthfully when restore-state persistence and config rollback do not both succeed.
+- Exercise direct-model lifecycle setup and add macOS/Windows portability checks.
+- Pin GitHub Actions, add CodeQL and Dependabot, and document secure contribution and release workflows.
+- Clarify policy-guided routing, concurrency, Windows custom-role limitations, and two-phase recovery.
+
 ## 0.4.0 — 2026-07-10
 
 - Make one-time, config-first routing the primary workflow: setup once, then use Codex normally.

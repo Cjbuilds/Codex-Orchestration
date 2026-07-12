@@ -1,6 +1,6 @@
 {
   "name": "codex-orchestration",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Configure Codex once so the selected task model leads while efficient models handle delegated execution.",
   "author": {
     "name": "CJ Zafir",
@@ -23,6 +23,8 @@
     "longDescription": "Keep the selected task model as Codex's orchestrator, optionally add a root-facing plan advisor, and persist an efficient executor route through Codex's own multi-agent configuration.",
     "developerName": "CJ Zafir",
     "category": "Productivity",
+    "websiteURL": "https://github.com/Cjbuilds/Codex-Orchestration",
+    "brandColor": "#C8A951",
     "capabilities": [
       "Persistent model routing",
       "Plan review",
