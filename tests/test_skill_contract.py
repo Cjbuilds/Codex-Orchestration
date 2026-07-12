@@ -111,6 +111,36 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("verify_agent_routes", NATIVE_SCRIPT)
         self.assertIn("same-name project role", SKILL)
 
+    def test_arbitrary_roles_are_native_bounded_and_user_owned(self) -> None:
+        self.assertIn("## Create arbitrary custom roles", SKILL)
+        self.assertIn("<trusted-project>/.codex/agents/<role-name>.toml", SKILL)
+        self.assertIn("`~/.codex/agents/<role-name>.toml`", SKILL)
+        self.assertIn("model_provider", SKILL)
+        self.assertIn("current task permission mode by default", SKILL)
+        self.assertIn("never bypasses the parent task's authority", SKILL)
+        self.assertIn("Refuse symlinked paths", SKILL)
+        self.assertIn("Arbitrary native roles are user-owned", SKILL)
+        self.assertIn("start a new task after creation", SKILL)
+        self.assertIn("root orchestrator owns every handoff", SKILL)
+
+    def test_custom_workflows_preserve_goal_ownership(self) -> None:
+        self.assertIn("researcher -> reviewer -> writer", SKILL)
+        self.assertIn("leave Goal lifecycle and limits under Codex's normal Goal controls", SKILL)
+        self.assertIn("does not silently create, pause, resume, or clear it", SKILL)
+
+    def test_fable_is_a_bundled_root_only_mcp_advisor(self) -> None:
+        self.assertIn("Claude Fable 5 Extra High", SKILL)
+        self.assertIn("--advisor-fable --advisor-effort max", SKILL)
+        self.assertIn("built-in cross-provider advisor exception", SKILL)
+        self.assertIn("All bundled variants are disabled by default", SKILL)
+        self.assertIn("first-party Pro or Max account", SKILL)
+        self.assertIn("never extracts a token", SKILL)
+        self.assertIn("runtime `modelUsage` to confirm `claude-fable-5`", SKILL)
+        self.assertIn("call the configured MCP server's `review_plan` tool", SKILL)
+        self.assertIn("instead of spawning an advisor child", SKILL)
+        self.assertIn("use the exact name `Claude Fable 5`", SKILL)
+        self.assertIn("do not expose or restate Claude account-plan metadata", SKILL)
+
     def test_direct_routes_are_guarded_to_the_root_provider(self) -> None:
         self.assertIn("Direct model overrides keep the root's provider", SKILL)
         self.assertIn("target model is on the same provider", NATIVE_SCRIPT)

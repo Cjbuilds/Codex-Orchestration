@@ -2,6 +2,9 @@
 
 ## 0.5.0 — Unreleased
 
+- Add Claude Fable 5 as an opt-in, root-only advisor through a bundled local MCP bridge to the authenticated Claude Code CLI.
+- Keep every Fable launcher disabled by default, enable only one compatible Python 3.11+ route, and restore prior plugin overrides on disable.
+- Pin `claude-fable-5`, remove provider override variables, disable tools and session persistence, and fail closed unless the plan signal and runtime model are valid.
 - Add automation-safe native status gating with `--require-effective`.
 - Detect orphaned managed personal roles and distinguish installed policy from live route validation.
 - Fail truthfully when restore-state persistence and config rollback do not both succeed.

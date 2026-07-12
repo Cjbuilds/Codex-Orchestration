@@ -1,7 +1,7 @@
 {
   "name": "codex-orchestration",
   "version": "0.5.0",
-  "description": "Configure Codex once so the selected task model leads while efficient models handle delegated execution.",
+  "description": "Bring compatible models into Codex, assign roles, and run them as one guided workflow.",
   "author": {
     "name": "CJ Zafir",
     "url": "https://github.com/Cjbuilds"
@@ -17,23 +17,25 @@
     "usage-limits"
   ],
   "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Codex Orchestration",
-    "shortDescription": "One-time efficient executor routing",
-    "longDescription": "Keep the selected task model as Codex's orchestrator, optionally add a root-facing plan advisor, and persist an efficient executor route through Codex's own multi-agent configuration.",
+    "shortDescription": "Build multi-model Codex workflows",
+    "longDescription": "Assign compatible models to roles such as advisor, executor, or researcher, describe the handoff order, and let Codex orchestrate the work.",
     "developerName": "CJ Zafir",
     "category": "Productivity",
     "websiteURL": "https://github.com/Cjbuilds/Codex-Orchestration",
     "brandColor": "#C8A951",
     "capabilities": [
-      "Persistent model routing",
+      "Multi-model workflows",
+      "Custom agent roles",
       "Plan review",
-      "Subagent workflows"
+      "Efficient execution"
     ],
     "defaultPrompt": [
-      "/codex-orchestration setup executor: GPT-5.6 Luna Extra High",
-      "$codex-orchestration:codex-orchestration status",
-      "$codex-orchestration:codex-orchestration disable"
+      "/codex-orchestration setup executor: GPT-5.6 Luna Extra High, advisor: Claude Fable 5 Extra High",
+      "/codex-orchestration create project role: researcher",
+      "$codex-orchestration:codex-orchestration status"
     ]
   }
 }

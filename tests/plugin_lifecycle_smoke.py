@@ -199,7 +199,11 @@ def main() -> int:
         )
     )
     current_version = manifest.get("version")
-    assert_equal(current_version, NEW_VERSION, "checkout release version")
+    if not isinstance(current_version, str):
+        raise SmokeFailure("checkout release version is not a string")
+    assert_equal(
+        current_version.split("+", 1)[0], NEW_VERSION, "checkout release base version"
+    )
 
     with tempfile.TemporaryDirectory(prefix="codex-orchestration-lifecycle-") as raw:
         temp = Path(raw)

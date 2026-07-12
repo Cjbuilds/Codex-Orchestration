@@ -13,9 +13,10 @@
    ```
 
 4. From a new Desktop task, verify one direct same-provider child route. Record `route accepted`; record `used and confirmed` only if the client exposes effective child model/provider/effort metadata.
-5. Merge only after every protected check passes.
-6. Create a signed annotated tag named `v<manifest-version>` at the reviewed merge commit.
-7. Re-run `python3 scripts/release_check.py --require-tag` and publish a GitHub release from that tag using the matching changelog section.
-8. Install from the public marketplace in a clean Codex home, start a new task, and verify setup, `status --require-effective`, and disable.
+5. If Claude Fable 5 is included in the release, verify setup, status, one `review_plan` call, the exact runtime model metadata, and disable/restore from a first-party Claude login.
+6. Merge only after every protected check passes.
+7. Create a signed annotated tag named `v<manifest-version>` at the reviewed merge commit.
+8. Re-run `python3 scripts/release_check.py --require-tag` and publish a GitHub release from that tag using the matching changelog section.
+9. Install from the public marketplace in a clean Codex home, start a new task, and verify setup, `status --require-effective`, and disable.
 
 Never move a published release tag. If a release is bad, fix forward with a new version and retain the old tag as provenance.

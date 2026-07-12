@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -75,7 +76,24 @@ def version():
     return int(version_file.read_text()) if version_file.exists() else 0
 
 def set_path(root, path, value):
-    parts = path.split(".")
+    parts = []
+    current_part = []
+    quoted = False
+    escaped = False
+    for character in path:
+        if escaped:
+            current_part.append(character)
+            escaped = False
+        elif character == "\\" and quoted:
+            escaped = True
+        elif character == '"':
+            quoted = not quoted
+        elif character == "." and not quoted:
+            parts.append("".join(current_part))
+            current_part = []
+        else:
+            current_part.append(character)
+    parts.append("".join(current_part))
     current = root
     for part in parts[:-1]:
         if not isinstance(current.get(part), dict):
@@ -227,6 +245,32 @@ class NativeRoutingTests(unittest.TestCase):
         self.codex = self.root / "fake-codex"
         self.codex.write_text(textwrap.dedent(FAKE_CODEX), encoding="utf-8")
         self.codex.chmod(0o755)
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        self.claude = self.bin / "claude"
+        self.claude.write_text(
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env python3
+                import json
+                import sys
+                if sys.argv[1:] == ["auth", "status"]:
+                    print(json.dumps({
+                        "loggedIn": True,
+                        "authMethod": "claude.ai",
+                        "apiProvider": "firstParty",
+                        "subscriptionType": "max",
+                    }))
+                    raise SystemExit(0)
+                if sys.argv[1:] == ["--help"]:
+                    print("--model --effort --safe-mode --prompt-suggestions")
+                    raise SystemExit(0)
+                raise SystemExit(2)
+                """
+            ),
+            encoding="utf-8",
+        )
+        self.claude.chmod(0o755)
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -238,6 +282,8 @@ class NativeRoutingTests(unittest.TestCase):
         allow_incompatible: bool = True,
     ) -> subprocess.CompletedProcess[str]:
         compatibility = ["--allow-incompatible-client"] if allow_incompatible else []
+        env = os.environ.copy()
+        env["PATH"] = f"{self.bin}{os.pathsep}{env.get('PATH', '')}"
         result = subprocess.run(
             [
                 sys.executable,
@@ -254,6 +300,7 @@ class NativeRoutingTests(unittest.TestCase):
             stderr=subprocess.PIPE,
             timeout=20,
             check=False,
+            env=env,
         )
         if check and result.returncode != 0:
             self.fail(f"command failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}")
@@ -905,6 +952,65 @@ class NativeRoutingTests(unittest.TestCase):
         usage = feature["usage_hint_text"]
         self.assertIn('agent_type = "codex_orchestration_executor"', usage)
         self.assertIn('agent_type = "codex_orchestration_advisor"', usage)
+
+    def test_fable_setup_status_update_and_disable_restore_mcp_policy(self) -> None:
+        initial = {
+            "features": {
+                "multi_agent_v2": {"max_concurrent_threads_per_session": 5}
+            },
+            "plugins": {
+                NATIVE.PLUGIN_ID: {
+                    "mcp_servers": {
+                        "fable-advisor-python3": {"enabled": False},
+                        "fable-advisor-python": {"enabled": True},
+                    }
+                }
+            },
+            "unrelated": {"keep": True},
+        }
+        (self.home / ".fake-user-config.json").write_text(
+            json.dumps(initial), encoding="utf-8"
+        )
+        setup = self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "xhigh",
+            "--advisor-fable",
+            "--advisor-effort",
+            "max",
+            "--apply",
+        )
+        self.assertIn("Claude Fable 5 Extra High", setup.stdout)
+        config = self.read_fake_config()
+        servers = config["plugins"][NATIVE.PLUGIN_ID]["mcp_servers"]
+        self.assertTrue(servers["fable-advisor-python3"]["enabled"])
+        self.assertFalse(servers["fable-advisor-python"]["enabled"])
+        self.assertNotIn("fable-advisor-py", servers)
+        state = json.loads(
+            (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
+        )
+        self.assertEqual(state["advisor"]["kind"], "fable")
+        self.assertEqual(state["advisor"]["model"], "claude-fable-5")
+        self.assertIn("mcp", state["previous"])
+
+        status = self.run_script("--status")
+        self.assertIn("Claude Fable 5: ready", status.stdout)
+        self.assertIn("no model call made", status.stdout)
+
+        update = self.run_script(
+            "--executor-model",
+            "gpt-5.6-terra",
+            "--executor-effort",
+            "high",
+            "--apply",
+        )
+        self.assertIn("Advisor: none", update.stdout)
+        servers = self.read_fake_config()["plugins"][NATIVE.PLUGIN_ID]["mcp_servers"]
+        self.assertTrue(all(not entry["enabled"] for entry in servers.values()))
+
+        self.run_script("--disable", "--apply")
+        self.assertEqual(self.read_fake_config(), initial)
 
     def test_missing_or_project_shadowed_custom_agent_is_refused(self) -> None:
         missing = self.run_script(

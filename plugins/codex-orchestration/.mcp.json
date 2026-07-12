@@ -1,0 +1,29 @@
+{
+  "mcpServers": {
+    "fable-advisor-python3": {
+      "command": "python3",
+      "args": [
+        "skills/codex-orchestration/scripts/fable_advisor_mcp.py"
+      ],
+      "cwd": ".",
+      "enabled": false
+    },
+    "fable-advisor-python": {
+      "command": "python",
+      "args": [
+        "skills/codex-orchestration/scripts/fable_advisor_mcp.py"
+      ],
+      "cwd": ".",
+      "enabled": false
+    },
+    "fable-advisor-py": {
+      "command": "py",
+      "args": [
+        "-3.11",
+        "skills/codex-orchestration/scripts/fable_advisor_mcp.py"
+      ],
+      "cwd": ".",
+      "enabled": false
+    }
+  }
+}

@@ -1,7 +1,7 @@
 interface:
   display_name: "Codex Orchestration"
-  short_description: "One-time efficient executor routing"
-  default_prompt: "Use $codex-orchestration to set up an efficient executor while the selected task model stays in charge."
+  short_description: "Build multi-model Codex workflows"
+  default_prompt: "Use $codex-orchestration to assign compatible models to roles and configure my workflow."
 
 policy:
   allow_implicit_invocation: false
