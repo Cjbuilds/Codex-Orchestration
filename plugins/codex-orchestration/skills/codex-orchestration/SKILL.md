@@ -1,6 +1,6 @@
 ---
 name: codex-orchestration
-description: Build multi-model Codex workflows by assigning compatible models to roles such as advisor, executor, researcher, reviewer, writer, or supervisor. Use when the user invokes Codex Orchestration to create custom roles, define a workflow, or set up, inspect, change, disable, or temporarily override model routing. Keep the selected task model as root and preserve Codex's planning, Goal, permissions, integration, and verification behavior.
+description: Build multi-model Codex workflows by assigning compatible models to roles such as planner, advisor, executor, researcher, reviewer, writer, or supervisor. Use when the user invokes Codex Orchestration to create custom roles, define a workflow, or set up, inspect, change, disable, or temporarily override model routing. Keep the selected task model as root and preserve Codex's Goal, permissions, integration, and verification behavior.
 ---
 
 # Codex Orchestration
@@ -16,6 +16,7 @@ Support these simple forms:
 ```text
 /codex-orchestration setup executor: GPT-5.6 Luna Extra High
 /codex-orchestration setup executor: GPT-5.6 Luna Extra High, advisor: Claude Fable 5 High
+/codex-orchestration setup planner: Claude Fable 5 High, advisor: GPT-5.6 Sol High, executor: GPT-5.6 Luna Extra High
 /codex-orchestration create project role: researcher
 /codex-orchestration create personal roles: researcher, writer, reviewer
 /codex-orchestration status
@@ -28,31 +29,33 @@ Support these simple forms:
 
 `remove custom roles` cleans only verified plugin-managed advisor/executor files. Arbitrary native roles are user-owned. An invocation with seats and work but no control verb is a current-task override and must not rewrite config.
 
-The executor is required for setup or a task-local override. It is not required for a custom-role creation request. The advisor is optional: if omitted, it means `advisor: none`. Do not ask a separate advisor question unless the user asks for help choosing one.
+The executor is required for setup or a task-local override. It is not required for a custom-role creation request. Planner and advisor are optional: omitted planner means the current root model plans, while omitted advisor means `advisor: none`. Do not ask separate planner or advisor questions unless the user asks for help choosing them.
+
+For both persistent setup and task-local overrides, reject an identical Planner and Advisor route: the same direct model ID, the same custom-agent name, or Claude Fable 5 in both seats. Independent critique is required.
 
 If the executor is missing, ask only:
 
 ```text
-Which executor model and effort should Codex use? You can optionally include an advisor; omission means none.
+Which executor model and effort should Codex use? You can optionally include a planner and advisor; omission uses the root as planner and no advisor.
 ```
 
 Because explicit skills may not reload from a bare reply, include a ready-to-copy line using the exact label shown by the client and preserve the original work:
 
 ```text
-<exact-skill-label> setup executor=<model>@<effort-or-auto>, advisor=<model>@<effort-or-auto>|none
+<exact-skill-label> setup executor=<model>@<effort-or-auto>, planner=<model>@<effort-or-auto>|root, advisor=<model>@<effort-or-auto>|none
 ```
 
 For a task-local request, append `— <original task>`. Keep every supplied modifier. Do not lose the user's task while collecting a model choice.
 
 If an old prompt contains `orchestrator:`, explain that the current task model already owns that role. Ignore that seat instead of switching or persisting it.
 
-Normalize `Extra High` to `xhigh`. For Claude Fable 5, accept `Low`, `Medium`, `High`, `XHigh`, `Max`, or `Ultra`. Omission or `Auto` means `High`; `Ultra` is a user-facing alias for Claude Code's actual `max` setting and must be reported as that mapping. Route Fable with `--advisor-fable --advisor-effort <normalized-effort>`, not through the Codex model catalog. Resolve every other display name to an exact ID only through the executing host's model catalog, picker, a loaded custom agent, or official provider documentation. Never invent an ID. For persistent direct routing, resolve `auto` to the catalog's concrete default.
+Normalize `Extra High` to `xhigh`. For Claude Fable 5, accept `Low`, `Medium`, `High`, `XHigh`, `Max`, or `Ultra`. Omission or `Auto` means `High`; `Ultra` is a user-facing alias for Claude Code's actual `max` setting and must be reported as that mapping. Route Fable with `--planner-fable --planner-effort <normalized-effort>` or `--advisor-fable --advisor-effort <normalized-effort>`, not through the Codex model catalog. Resolve every other display name to an exact ID only through the executing host's model catalog, picker, a loaded custom agent, or official provider documentation. Never invent an ID. For persistent direct routing, resolve `auto` to the catalog's concrete default.
 
 Read [providers-and-models.md](references/providers-and-models.md) before setup, when clients disagree, when a model is absent, when providers differ, or when custom agents or legacy migration are involved.
 
 ## Create arbitrary custom roles
 
-Use native Codex custom-agent files for roles beyond the built-in advisor and executor seats. Examples include researcher, reviewer, writer, supervisor, security auditor, browser debugger, or domain expert.
+Use native Codex custom-agent files for roles beyond the built-in planner, advisor, and executor seats. Examples include researcher, reviewer, writer, supervisor, security auditor, browser debugger, or domain expert.
 
 Use project scope when the user says `project`, `repo`, `workspace`, or `current project`. Write to `<trusted-project>/.codex/agents/<role-name>.toml`. Use personal scope only when explicitly requested and write to `~/.codex/agents/<role-name>.toml`.
 
@@ -78,10 +81,10 @@ If the user combines a workflow with a Codex Goal, leave Goal lifecycle and limi
 
 ## One-time native setup
 
-Use this path for a current same-provider setup such as Sol root to Luna or Terra executors. Claude Fable 5 is the one built-in cross-provider advisor exception because it runs through the bundled read-only MCP bridge and the user's authenticated Claude Code CLI.
+Use this path for a current same-provider setup such as Sol root to Luna or Terra children. Claude Fable 5 is the one built-in cross-provider Planner or Advisor exception because it runs through the bundled read-only MCP bridge and the user's authenticated Claude Code CLI.
 
 1. Identify the Codex binary used by the active host. Do not assume the shell `codex` is the Desktop binary.
-2. Resolve the exact executor and optional advisor IDs and efforts from that host.
+2. Resolve the exact executor and optional Planner and Advisor IDs and efforts from that host.
 3. Run the bundled native configurator from this skill's real directory with Python 3.11 or newer. Use `python3` on typical macOS/Linux hosts; on Windows select an available `py -3.11` or `python` launcher after checking its version. Never use a repository-relative copy from the user's workspace.
 4. Inspect the dry-run output. A literal `setup` request authorizes applying a clean, non-replacement personal policy after that preview.
 5. Start a new task after apply. The user chooses the orchestrator in the normal model picker and no longer needs to invoke this skill for ordinary work.
@@ -103,9 +106,11 @@ python3 <skill-dir>/scripts/configure_native_routing.py \
 
 Add `--advisor-model` and `--advisor-effort` for a same-provider Codex advisor. For Claude Fable 5, use `--advisor-fable`; add `--advisor-effort low|medium|high|xhigh|max` when the user chooses one. Omitting Fable effort defaults to `high`, while user-facing `ultra` is normalized to Claude Code's `max`. The configurator verifies that the installed Claude Code CLI advertises the selected effective effort. It also requires Claude Code to be logged in through a first-party Pro or Max account, chooses an available Python 3.11+ MCP launcher, and performs only an auth/capability check during setup. It never extracts a token, writes a credential, or makes a model call during setup or status. Omission persists `advisor: none`.
 
+Add `--planner-model` and `--planner-effort` for a same-provider Planner. For Claude Fable 5, use `--planner-fable`; add `--planner-effort low|medium|high|xhigh|max` when the user chooses one. Planner omission persists no Planner route and means the root plans. A configured Planner and Advisor must not resolve to the same model or agent route; independent review is required.
+
 The configurator capability-tests the complete four-field preset on the active target, `codex` on PATH when different, the known macOS Desktop binary when present, and every explicit `--compat-bin`. A successful isolated config probe means that client can parse the preset; it is not a live child-model confirmation. Report `route accepted` or `used and confirmed` only from the exact live spawn evidence defined below. Ask about other Codex/IDE installations that share this config only when the environment suggests they exist, and pass their binaries explicitly. If the request or active host indicates a named `--profile`, explain that normal setup manages the default user layer and is not verified for that profile; do not add a routine question for users with no profile signal. If a checked client rejects any managed field, stop before apply. Recommend updating it or using the task-local fallback. `--allow-incompatible-client` requires a separate explicit user decision because it can make the shared config unreadable to that client.
 
-For the current validated v2 direct route, set `tool_namespace = "agents"`. Live testing on Desktop `0.144.0-alpha.4` showed that the default reserved `collaboration.spawn_agent` schema rejected expanded model/effort metadata, while `agents` accepted the same request and spawned Luna at `xhigh`. Treat this as a required control-surface setting for that tested path, not as the executor selection. `usage_hint_text` carries the actual executor/advisor route.
+For the current validated v2 direct route, set `tool_namespace = "agents"`. Live testing on Desktop `0.144.0-alpha.4` showed that the default reserved `collaboration.spawn_agent` schema rejected expanded model/effort metadata, while `agents` accepted the same request and spawned Luna at `xhigh`. Treat this as a required control-surface setting for that tested path, not as the executor selection. `usage_hint_text` carries the actual Planner, Advisor, and Executor routes.
 
 Do not add `enabled = true` for a Sol or Terra root. Their current model metadata selects v2. The configurator intentionally manages these routing fields:
 
@@ -134,7 +139,7 @@ python3 <skill-dir>/scripts/configure_native_routing.py \
   --status --require-effective
 ```
 
-Run status from the target project. The first form is descriptive. Use `--require-effective` for automation and release gates; it returns nonzero for incompatible clients, conflicts, overrides, incomplete controls, an unavailable Fable or custom-agent route, or orphaned v0.4+ personal roles. Report the current task model as the orchestrator, the configured executor and advisor, whether the personal policy is installed and effective in that workspace, whether effective spawn controls are visible, whether the effective tool namespace is `agents`, the target config path, and checked-client compatibility. State that neither status form proves a live route or infers v2 activation for the model selected in a task; current Sol or Terra is the intended root.
+Run status from the target project. The first form is descriptive. Use `--require-effective` for automation and release gates; it returns nonzero for incompatible clients, conflicts, overrides, incomplete controls, an unavailable Fable or custom-agent route, or orphaned v0.4+ personal roles. Report the current task model as the orchestrator, Planner (`root` when omitted), configured Advisor and Executor, whether the personal policy is installed and effective in that workspace, whether effective spawn controls are visible, whether the effective tool namespace is `agents`, the target config path, and checked-client compatibility. State that neither status form proves a live route or infers v2 activation for the model selected in a task; current Sol or Terra is the intended root.
 
 To change seats, run normal `setup` again. The configurator keeps the original restore snapshot rather than treating its own managed values as user settings.
 
@@ -154,7 +159,7 @@ Disable must remain available even if an older client is incompatible with the a
 
 For personal v0.4 custom roles, preview and apply removal with `configure_orchestration.py --scope personal --personal-route-names --remove-saved-roles`. For older fixed-name personal roles, run a separate preview without `--personal-route-names`. Project removal uses `--scope project --root <trusted-project> --remove-saved-roles`. Delete only files that the configurator fully validates as managed; edited or user-owned files require manual review.
 
-## Claude Fable 5 advisor
+## Claude Fable 5 Planner or Advisor
 
 Use this built-in route when the user names Claude Fable 5. Do not create a custom provider or custom-agent file for it.
 
@@ -166,15 +171,19 @@ Prerequisites:
 - `claude auth status` reports a first-party Pro or Max login;
 - a Python 3.11+ launcher is available.
 
-The plugin packages three disabled MCP launcher variants for macOS, Linux, and Windows. Setup enables exactly the compatible variant through the plugin's namespaced config. At review time the MCP server removes API-key and Bedrock/Vertex/Foundry override variables, re-checks first-party login, and invokes `claude -p --model claude-fable-5` with `--safe-mode`, no tools, no session persistence, prompt suggestions disabled, and JSON output. The saved route pins the model and effort; the root cannot replace them through tool arguments.
+The plugin packages three disabled MCP launcher variants for macOS, Linux, and Windows. Setup enables exactly one compatible variant through the plugin's namespaced config when either Fable seat is selected. At planning or review time the MCP server removes API-key and Bedrock/Vertex/Foundry override variables, re-checks first-party login, and invokes `claude -p --model claude-fable-5` with `--safe-mode`, no tools, no session persistence, prompt suggestions disabled, and JSON output. Each saved seat pins its model and effort; the root cannot replace them through tool arguments.
 
 Fable effort is configurable per setup. The default is `high`; supported Claude Code values are `low`, `medium`, `high`, `xhigh`, and `max`. Accept `ultra` as an alias for `max`, save the effective Claude Code value, and disclose the alias mapping in setup output. Existing saved `max` routes remain valid.
 
-The bridge accepts only one self-contained `packet`. It requires `PLAN_APPROVED` or `PLAN_REVISE` as the first non-empty line and requires runtime `modelUsage` to confirm `claude-fable-5`. Any auth, transport, format, or model-confirmation failure is `advisor unavailable`, never approval. It returns no account identifier or credential.
+The bridge exposes only bounded, read-only planning operations. `create_plan` accepts one self-contained packet and requires `PLAN_DRAFT`. `revise_plan` requires the task, canonical current plan, latest critique, and compact findings history, then requires `PLAN_REVISION` plus a findings ledger and revised plan. `review_plan` remains the Advisor operation and requires `PLAN_APPROVED` or `PLAN_REVISE`. Every call uses the same full saved-state validator as native status/disable, then requires runtime `modelUsage` to contain the pinned `claude-fable-5` primary plus only the bridge's explicit exact helper allowlist. Return every observed ID in `used_models`; an unknown additional or missing primary model makes the seat unavailable. Any auth, transport, state, format, or model-confirmation failure makes that seat unavailable; it never counts as approval. The bridge returns no account identifier or credential.
+
+The managed workflow reserves these MCP calls for the root Codex model. Current MCP requests do not carry caller identity, so the bridge cannot independently authenticate root versus child; caller isolation is instruction-enforced. The bridge still mechanically prevents tools, edits, permission prompts, and session persistence. Never describe the caller boundary as engine-enforced.
 
 ## Durable or cross-provider custom agents
 
 Direct `model` routing is same-provider. Except for the built-in Claude Fable 5 MCP route above, a different provider needs an already authenticated Codex-compatible provider and a loaded custom agent that pins `model_provider`.
+
+For a cross-provider Planner, create a bounded personal custom role through the arbitrary-role flow, start a new task so it loads, and pass its exact name with `--planner-agent`. The older standalone managed-role helper below continues to own only its existing Advisor and Executor files; do not expand its migration/removal transaction just to create a Planner.
 
 Use the existing standalone-agent configurator for this extended path. Personal scope is required for machine-local provider IDs and affects all projects, so the user's explicit cross-provider `setup` request must name or confirm the existing provider ID. Never create provider definitions, collect keys in chat, or write credentials.
 
@@ -232,6 +241,7 @@ This skill and its saved policy must never:
 - create or change Goal state;
 - weaken approvals or permissions;
 - create nested executor teams;
+- let a Planner or Advisor contact the other role directly;
 - let an advisor direct executors;
 - parallelize overlapping writes;
 - silently substitute the root model for an unavailable child route.
@@ -250,7 +260,7 @@ fork_turns = "none"
 
 A small positive partial fork is technically valid in Codex, but this skill deliberately requires `none`: it minimizes duplicated context and makes the root send a deliberate self-contained packet. Never use the default `all` with a different route. Full-history forks inherit the root model and Codex rejects the override.
 
-For a direct executor route, pass the exact configured model and concrete effort. For a custom route, pass the exact namespaced `agent_type`. Do not force a service tier; supported children may inherit Fast/priority from the parent, so tell users who prioritize allowance savings not to run the root in Fast mode.
+For a direct Planner, Advisor, or Executor route, pass the exact configured model and concrete effort. For a custom route, pass the exact namespaced `agent_type`. Do not force a service tier; supported children may inherit Fast/priority from the parent, so tell users who prioritize allowance savings not to run the root in Fast mode.
 
 Direct model overrides keep the root's provider. Before a direct spawn, establish that the target model is on the same provider. If it differs or cannot be established, mark the route unavailable and require a custom agent that pins `model_provider`.
 
@@ -262,34 +272,39 @@ After spawning, use the tool result or client metadata to confirm the accepted r
 - `used and confirmed`: use only when the client explicitly exposes effective runtime model/provider/effort metadata;
 - `inherited root — requested child model was not used`;
 - `unavailable`: the requested route cannot run here;
-- `none`: no advisor is configured.
+- `root`: no Planner route is configured, so the root plans;
+- `none`: no Advisor is configured.
 
-Tool acceptance proves the requested route was valid and accepted, not necessarily that the client exposes post-start runtime identity. Child prose claiming a model name is not proof. If an exact route fails, report it to the root. Continue root-owned work only when the user did not make delegation or that seat a hard requirement.
+Tool acceptance proves the requested route was valid and accepted, not necessarily that the client exposes post-start runtime identity. Child prose claiming a model name is not proof. If an exact route fails, report it to the root. An unavailable configured Planner or Advisor halts before Executor work unless the user explicitly made that seat best-effort for the current task; apply the bounded degradation rules below and disclose it. An unavailable Executor may leave work with the root only when the user did not require delegation or that Executor route. Never describe an unavailable route as successful.
 
-## Advisor review
+## Planner and Advisor workflow
 
-Use an advisor only when configured and the root has a non-trivial plan or executor slices worth reviewing. Skip it for simple work.
+Planner is optional. When no Planner route is configured, the root creates and revises the plan. When configured, send the Planner one self-contained packet containing user intent, acceptance criteria, repository facts, constraints, proposed executor slices, risks, and verification. Require `PLAN_DRAFT`. Planner and Advisor report only to the root. They never edit, execute, spawn, contact one another, contact Executors, or release Executor work.
 
-Before executor work, send one advisor a self-contained packet containing:
+Advisor is optional. If none is configured, the root validates the Planner's draft and may continue. For a non-trivial plan with an Advisor, use this bounded approval loop:
 
-- user intent and acceptance criteria;
-- relevant repository facts and constraints;
-- the root's plan and proposed executor slices;
-- dependencies, ownership, and sequencing;
-- material risks and verification checks.
+1. Number the canonical plan version and send it to a fresh, stateless Advisor call.
+2. Require `PLAN_APPROVED` or `PLAN_REVISE` as the first-line signal.
+3. `PLAN_APPROVED` makes that exact version the approved plan. Stop reviewing immediately.
+4. For `PLAN_REVISE`, assign stable IDs to material findings and send the canonical current version, latest critique, and compact cumulative findings ledger back to the same Planner route. If Planner is omitted, the root revises.
+5. Require `PLAN_REVISION`, a complete `FINDINGS_LEDGER`, and the revised plan. Every latest finding must be `INCORPORATED` or `REJECTED` with a concrete reason. Reject stale source versions, missing or duplicated findings, and empty rationales.
+6. Increment the version and send the new current plan plus compact ledger to a fresh Advisor call. Ask it to confirm or contest prior dispositions rather than repeat accepted findings.
+7. Stop early on approval. Never exceed five total Advisor reviews.
 
-Tell the advisor to review only, report only to the root, avoid edits and mutation, never spawn, and never contact executors. Require exactly one first-line signal:
+Carry only the original constraints, current plan, and compact ledger between fresh calls; do not duplicate complete transcripts. The root owns the canonical plan, versions, ledger, round count, semantic validation, and Executor release. Planner and Advisor never contact one another directly.
 
-```text
-PLAN_APPROVED
-PLAN_REVISE
-```
+If review five still returns `PLAN_REVISE`, halt before Executor work. Give the user the latest plan and version, complete ledger, latest unresolved findings, and choices to override, re-scope, or change a route. Never label it approved.
 
-`PLAN_APPROVED` means no material gap was found in the supplied packet, not that success is guaranteed. `PLAN_REVISE` must give prioritized material gaps and a concrete correction for each. Style preferences do not justify revision.
+A configured Planner or Advisor is required by default. Route failure, malformed output, missing context, stale version, or invalid ledger halts before Executor work. Only an explicit current-task best-effort instruction permits degradation:
 
-The root adjudicates every suggestion and owns the revised plan. Allow at most one confirmation pass after a material revision. A configured advisor is a gate for a non-trivial executor plan by default. Transport failure, malformed output, inaccessible routing, or missing context means `advisor unavailable`, never approval; stop before executor work unless the user explicitly made the advisor best-effort.
+- if the configured Planner fails, disclose it and let the root assume Planner duties for the remaining rounds without resetting the five-review budget;
+- if the Advisor fails, disclose it, end the loop, and label the latest validated plan `NOT_ADVISOR_APPROVED` before any allowed continuation.
 
-For Claude Fable 5, call the configured MCP server's `review_plan` tool instead of spawning an advisor child. It remains root-only and read-only; executors never receive the tool or direct it.
+Do not persist a best-effort flag. An explicit task override applies only to that task.
+
+Reject persistent setup or task-local activation when configured Planner and Advisor routes are identical: the same direct model ID, same custom-agent name, or Fable in both seats. Independent critique is the reason for the Advisor role.
+
+For Fable Planner calls, use the configured MCP server's `create_plan` and `revise_plan` tools. For Fable Advisor calls, use `review_plan`. The policy authorizes only the root to make these read-only calls; Executors must never use or direct them.
 
 ## Executor handoff
 
@@ -324,6 +339,7 @@ Report a compact activation status and continue the included task:
 ```text
 Codex Orchestration
 Orchestrator: <active model or current task model> — active
+Planner: <model>@<effort> — <route state>, or root
 Executor: <model>@<effort> — <route state>
 Advisor: <model>@<effort> — <route state>, or none
 Delegation: Codex decides when it helps; Plan and Goal behavior unchanged
@@ -342,7 +358,7 @@ Never call that 65% fewer raw tokens, a guaranteed five-hour or weekly-limit sav
 ## Resources
 
 - `scripts/configure_native_routing.py`: one-time native setup, status, update, and disable.
-- `scripts/fable_advisor_mcp.py`: fail-closed Claude Fable 5 plan-review bridge.
+- `scripts/fable_advisor_mcp.py`: fail-closed Claude Fable 5 planning and review bridge.
 - `scripts/configure_orchestration.py`: namespaced custom agents, provider pins, safe removal, and legacy migration.
 - `scripts/inspect_models.py`: fallible host-catalog diagnostics.
 - [providers-and-models.md](references/providers-and-models.md): detailed capability, provider, compatibility, persistence, and usage boundaries.

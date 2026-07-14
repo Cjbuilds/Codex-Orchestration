@@ -2,10 +2,16 @@
 
 ## 0.5.0 — Unreleased
 
+- Add an optional Planner route: a configured model drafts and revises the plan, while omission keeps planning with the root Codex model.
+- Let Claude Fable 5 act as Planner through bounded `create_plan` and `revise_plan` tools while preserving its existing Advisor workflow.
+- Run Planner and Advisor through a root-mediated approval loop that stops on `PLAN_APPROVED`, caps review at five rounds, and fails closed before execution when approval or a required route is unavailable.
+- Migrate native routing state to schema 3 while accepting schemas 1 and 2 as root-Planner configurations, and reject identical configured Planner and Advisor routes.
+- Use one shared full-state validator for native setup/status/disable and Fable authorization, enforcing genuine schema/policy pairs, exact nested restore/scalar/MCP contracts, schema-specific fields, and plugin-owned policy markers.
+- Harden Fable seat authorization against malformed, cross-home, legacy-Planner, multi-seat, and launcher-mismatch state, and document that MCP caller isolation is policy-enforced while no-tools execution is mechanical.
 - Make Claude Fable 5 advisor effort configurable, default it to `high`, support `low` through `max`, treat user-facing `ultra` as an explicit alias for Claude Code's `max`, and fail `--require-effective` when the saved Fable route is unavailable.
-- Add Claude Fable 5 as an opt-in, root-only advisor through a bundled local MCP bridge to the authenticated Claude Code CLI.
+- Add Claude Fable 5 as an opt-in, root-directed Advisor through a bundled no-tools local MCP bridge to the authenticated Claude Code CLI.
 - Keep every Fable launcher disabled by default, enable only one compatible Python 3.11+ route, and restore prior plugin overrides on disable.
-- Pin `claude-fable-5`, remove provider override variables, disable tools and session persistence, and fail closed unless the plan signal and runtime model are valid.
+- Pin `claude-fable-5`, allow only its explicitly documented Claude Code helper in runtime usage metadata, remove provider override variables, disable tools and session persistence, and fail closed unless the plan signal and runtime model set are valid.
 - Add automation-safe native status gating with `--require-effective`.
 - Detect orphaned managed personal roles and distinguish installed policy from live route validation.
 - Fail truthfully when restore-state persistence and config rollback do not both succeed.

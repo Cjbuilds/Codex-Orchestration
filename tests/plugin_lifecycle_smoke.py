@@ -79,6 +79,64 @@ def run_json(
         ) from exc
 
 
+def probe_mcp_subprocess(script: Path, *, cwd: Path, env: dict[str, str]) -> None:
+    requests = "\n".join(
+        json.dumps(request)
+        for request in (
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": {"name": "lifecycle-smoke", "version": "1"},
+                },
+            },
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+        )
+    ) + "\n"
+    try:
+        completed = subprocess.run(
+            [sys.executable, str(script)],
+            cwd=cwd,
+            env=env,
+            input=requests,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=COMMAND_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SmokeFailure(f"Installed Fable MCP subprocess failed: {exc}") from exc
+    if completed.returncode != 0:
+        raise SmokeFailure(
+            "Installed Fable MCP subprocess did not shut down cleanly: "
+            f"exit {completed.returncode}; {completed.stderr.strip()}"
+        )
+    try:
+        responses = [json.loads(line) for line in completed.stdout.splitlines()]
+    except json.JSONDecodeError as exc:
+        raise SmokeFailure("Installed Fable MCP returned malformed JSON-RPC") from exc
+    if len(responses) != 2 or [response.get("id") for response in responses] != [1, 2]:
+        raise SmokeFailure(f"Installed Fable MCP returned unexpected responses: {responses!r}")
+    server_info = responses[0].get("result", {}).get("serverInfo", {})
+    assert_equal(
+        server_info.get("name"),
+        "codex-orchestration-fable-advisor",
+        "installed Fable MCP server identity",
+    )
+    tools = responses[1].get("result", {}).get("tools", [])
+    tool_names = {
+        tool.get("name") for tool in tools if isinstance(tool, dict)
+    }
+    assert_equal(
+        tool_names,
+        {"create_plan", "revise_plan", "review_plan", "status"},
+        "installed Fable MCP tool list",
+    )
+
+
 def assert_equal(actual: Any, expected: Any, message: str) -> None:
     if actual != expected:
         raise SmokeFailure(f"{message}: expected {expected!r}, got {actual!r}")
@@ -424,6 +482,15 @@ def main() -> int:
                 file_tree(PLUGIN_ROOT),
                 "installed package contents",
             )
+
+            installed_fable_mcp = (
+                installed_root
+                / "skills"
+                / "codex-orchestration"
+                / "scripts"
+                / "fable_advisor_mcp.py"
+            )
+            probe_mcp_subprocess(installed_fable_mcp, cwd=project, env=env)
 
             native_configurator = (
                 installed_root

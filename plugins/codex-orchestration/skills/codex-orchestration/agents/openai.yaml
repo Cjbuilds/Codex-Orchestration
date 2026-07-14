@@ -1,7 +1,7 @@
 interface:
   display_name: "Codex Orchestration"
-  short_description: "Build multi-model Codex workflows"
-  default_prompt: "Use $codex-orchestration to assign compatible models to roles and configure my workflow."
+  short_description: "Plan, review, and build with multiple models"
+  default_prompt: "Use $codex-orchestration to configure Planner, Advisor, and Executor roles."
 
 policy:
   allow_implicit_invocation: false

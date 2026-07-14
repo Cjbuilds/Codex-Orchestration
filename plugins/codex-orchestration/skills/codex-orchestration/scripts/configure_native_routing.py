@@ -24,24 +24,28 @@ import threading
 import time
 from typing import Any
 
+from routing_state import (
+    FABLE_EFFORTS,
+    FABLE_MODEL,
+    MANAGED_MARKER,
+    ROUTING_TOOL_NAMESPACE,
+    RoutingStateError,
+    validate_routing_state,
+)
+
 try:
     import tomllib
 except ModuleNotFoundError as exc:  # pragma: no cover - Python < 3.11
     raise SystemExit("Python 3.11 or newer is required (missing tomllib).") from exc
 
 
-POLICY_VERSION = 2
-STATE_SCHEMA = 2
-SUPPORTED_STATE_SCHEMAS = {1, 2}
-MANAGED_MARKER = "[codex-orchestration managed-policy v1]"
+POLICY_VERSION = 3
+STATE_SCHEMA = 3
 STATE_FILENAME = ".codex-orchestration-routing.json"
 PROBE_VALUE = "CODEX_ORCHESTRATION_CAPABILITY_PROBE"
-ROUTING_TOOL_NAMESPACE = "agents"
 PLUGIN_ID = "codex-orchestration@codex-orchestration"
-FABLE_MODEL = "claude-fable-5"
 FABLE_DEFAULT_EFFORT = "high"
 FABLE_EFFORT_CHOICES = ("low", "medium", "high", "xhigh", "max")
-FABLE_EFFORTS = set(FABLE_EFFORT_CHOICES)
 FABLE_EFFORT_ALIASES = {"ultra": "max"}
 FABLE_SERVERS = {
     "fable-advisor-python3": ("python3", []),
@@ -54,7 +58,7 @@ MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+/@-]{0,199}$")
 AGENT_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 EFFORT_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 PERSONAL_MANAGED_ROLE_RE = re.compile(
-    r"^codex_orchestration_(?:executor|advisor)_[0-9a-f]{12}$"
+    r"^codex_orchestration_(?:executor|advisor|planner)_[0-9a-f]{12}$"
 )
 CUSTOM_AGENT_MANAGED_MARKER = (
     "# Managed by codex-orchestration. Standalone custom agent v2."
@@ -95,6 +99,20 @@ def parse_args() -> argparse.Namespace:
         "--executor-effort",
         default="auto",
         help="Exact supported effort, or auto (resolved to the catalog default).",
+    )
+
+    planner = parser.add_mutually_exclusive_group()
+    planner.add_argument("--planner-model", help="Optional exact planner model ID.")
+    planner.add_argument("--planner-agent", help="Optional loaded planner agent name.")
+    planner.add_argument(
+        "--planner-fable",
+        action="store_true",
+        help="Use the bundled Claude Fable 5 planner through Claude Code.",
+    )
+    parser.add_argument(
+        "--planner-effort",
+        default="auto",
+        help="Exact supported planner effort, or auto.",
     )
 
     advisor = parser.add_mutually_exclusive_group()
@@ -151,6 +169,9 @@ def _validate_args(args: argparse.Namespace) -> None:
         (
             args.executor_model,
             args.executor_agent,
+            args.planner_model,
+            args.planner_agent,
+            args.planner_fable,
             args.advisor_model,
             args.advisor_agent,
             args.advisor_fable,
@@ -161,6 +182,9 @@ def _validate_args(args: argparse.Namespace) -> None:
         (
             args.executor_model,
             args.executor_agent,
+            args.planner_model,
+            args.planner_agent,
+            args.planner_fable,
             args.advisor_model,
             args.advisor_agent,
             args.advisor_fable,
@@ -177,22 +201,35 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ConfigurationError(
             "A custom executor agent owns its effort; omit --executor-effort."
         )
+    if args.planner_agent and args.planner_effort != "auto":
+        raise ConfigurationError(
+            "A custom planner agent owns its effort; omit --planner-effort."
+        )
     if args.advisor_agent and args.advisor_effort != "auto":
         raise ConfigurationError(
             "A custom advisor agent owns its effort; omit --advisor-effort."
         )
+    if args.planner_fable:
+        normalize_fable_effort(args.planner_effort)
     if args.advisor_fable:
         normalize_fable_effort(args.advisor_effort)
+    if args.planner_fable and args.advisor_fable:
+        raise ConfigurationError(
+            "Planner and Advisor routes must be distinct; both cannot use Claude Fable 5."
+        )
     for label, value, pattern in (
         ("executor model", args.executor_model, MODEL_RE),
+        ("planner model", args.planner_model, MODEL_RE),
         ("advisor model", args.advisor_model, MODEL_RE),
         ("executor agent", args.executor_agent, AGENT_RE),
+        ("planner agent", args.planner_agent, AGENT_RE),
         ("advisor agent", args.advisor_agent, AGENT_RE),
     ):
         if value is not None and not pattern.fullmatch(value):
             raise ConfigurationError(f"Invalid {label}: {value!r}.")
     for label, value in (
         ("executor effort", args.executor_effort),
+        ("planner effort", args.planner_effort),
         ("advisor effort", args.advisor_effort),
     ):
         if value != "auto" and not EFFORT_RE.fullmatch(value):
@@ -523,22 +560,37 @@ def fable_key_path(server: str) -> str:
     )
 
 
-def _valid_snapshot(saved: Any, expected: type | tuple[type, ...]) -> bool:
-    if not (
-        isinstance(saved, dict)
-        and isinstance(saved.get("known"), bool)
-        and isinstance(saved.get("present"), bool)
-    ):
-        return False
-    if saved["known"] and saved["present"]:
-        return "value" in saved and isinstance(saved["value"], expected)
-    return True
+def validate_planning_routes(
+    planner: dict[str, Any] | None,
+    advisor: dict[str, Any] | None,
+) -> None:
+    """Reject routes that cannot provide independent planning and review seats."""
+
+    if planner is None or advisor is None:
+        return
+    planner_kind = planner.get("kind")
+    advisor_kind = advisor.get("kind")
+    identical = (
+        planner_kind == advisor_kind == "model"
+        and planner.get("model") == advisor.get("model")
+    ) or (
+        planner_kind == advisor_kind == "agent"
+        and planner.get("agent") == advisor.get("agent")
+    ) or planner_kind == advisor_kind == "fable"
+    if identical:
+        raise ConfigurationError(
+            "Planner and Advisor routes must be distinct (different direct model IDs, "
+            "different custom-agent names, and at most one Claude Fable 5 seat)."
+        )
 
 
 def _read_state(path: Path) -> dict[str, Any] | None:
-    if not path.exists():
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
         return None
-    info = path.lstat()
+    except OSError as exc:
+        raise ConfigurationError(f"Could not inspect routing state {path}: {exc}") from exc
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
         raise ConfigurationError(f"Routing state is not a regular file: {path}")
     if info.st_nlink != 1:
@@ -547,69 +599,10 @@ def _read_state(path: Path) -> dict[str, Any] | None:
         state = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ConfigurationError(f"Could not read routing state {path}: {exc}") from exc
-    if not isinstance(state, dict) or state.get("schema") not in SUPPORTED_STATE_SCHEMAS:
-        raise ConfigurationError(f"Unknown routing state schema in {path}.")
-    if state.get("managed_by") != "codex-orchestration":
-        raise ConfigurationError(f"Routing state is not owned by this plugin: {path}")
-    managed = state.get("managed")
-    if not (
-        isinstance(managed, dict)
-        and isinstance(managed.get("mode"), str)
-        and isinstance(managed.get("usage"), str)
-        and managed.get("metadata") is False
-        and managed.get("namespace") == ROUTING_TOOL_NAMESPACE
-    ):
-        raise ConfigurationError(f"Routing state has invalid managed values: {path}")
-    for label, route, optional in (
-        ("executor", state.get("executor"), False),
-        ("advisor", state.get("advisor"), True),
-    ):
-        if optional and route is None:
-            continue
-        if not isinstance(route, dict):
-            raise ConfigurationError(f"Routing state has an invalid {label} route: {path}")
-        kind = route.get("kind")
-        valid = (
-            kind == "model"
-            and isinstance(route.get("model"), str)
-            and MODEL_RE.fullmatch(route["model"])
-            and isinstance(route.get("effort"), str)
-            and EFFORT_RE.fullmatch(route["effort"])
-        ) or (
-            kind == "agent"
-            and isinstance(route.get("agent"), str)
-            and AGENT_RE.fullmatch(route["agent"])
-        ) or (
-            label == "advisor"
-            and kind == "fable"
-            and route.get("model") == FABLE_MODEL
-            and route.get("effort") in FABLE_EFFORTS
-            and route.get("server") in FABLE_SERVERS
-        )
-        if not valid:
-            raise ConfigurationError(f"Routing state has an invalid {label} route: {path}")
-    previous = state.get("previous")
-    if not isinstance(previous, dict):
-        raise ConfigurationError(f"Routing state has no restore values: {path}")
-    for key in ("mode", "usage", "metadata", "namespace"):
-        saved = previous.get(key)
-        expected = bool if key == "metadata" else str
-        if not _valid_snapshot(saved, expected):
-            raise ConfigurationError(f"Routing state has invalid {key} restore data: {path}")
-    managed_mcp = managed.get("mcp")
-    previous_mcp = previous.get("mcp")
-    if managed_mcp is not None or previous_mcp is not None:
-        if not (
-            isinstance(managed_mcp, dict)
-            and bool(managed_mcp)
-            and set(managed_mcp).issubset(FABLE_SERVERS)
-            and all(isinstance(value, bool) for value in managed_mcp.values())
-            and isinstance(previous_mcp, dict)
-            and set(previous_mcp) == set(managed_mcp)
-            and all(_valid_snapshot(value, bool) for value in previous_mcp.values())
-        ):
-            raise ConfigurationError(f"Routing state has invalid MCP restore data: {path}")
-    return state
+    try:
+        return validate_routing_state(state)
+    except RoutingStateError as exc:
+        raise ConfigurationError("Saved routing state is invalid.") from exc
 
 
 def _validate_state_config(state: dict[str, Any] | None, config_path: Path) -> None:
@@ -718,13 +711,18 @@ def verify_agent_routes(
     codex_home: Path,
     workspace: Path,
     executor: dict[str, Any],
+    planner: dict[str, Any] | None,
     advisor: dict[str, Any] | None,
 ) -> list[Path]:
     """Require personal role files and reject current-project shadowing."""
 
     verified: list[Path] = []
     personal_agents = codex_home / "agents"
-    for label, route in (("Executor", executor), ("Advisor", advisor)):
+    for label, route in (
+        ("Executor", executor),
+        ("Planner", planner),
+        ("Advisor", advisor),
+    ):
         if route is None or route.get("kind") != "agent":
             continue
         name = route.get("agent")
@@ -926,7 +924,7 @@ def _referenced_agent_names(state: dict[str, Any] | None) -> set[str]:
     names: set[str] = set()
     if not isinstance(state, dict):
         return names
-    for key in ("executor", "advisor"):
+    for key in ("executor", "planner", "advisor"):
         route = state.get(key)
         if isinstance(route, dict) and route.get("kind") == "agent":
             name = route.get("agent")
@@ -945,9 +943,13 @@ def _spawn_route(route: dict[str, Any]) -> str:
 
 
 def build_policy(
-    executor: dict[str, Any], advisor: dict[str, Any] | None
+    executor: dict[str, Any],
+    planner: dict[str, Any] | None,
+    advisor: dict[str, Any] | None,
 ) -> tuple[str, str]:
     has_direct_route = executor["kind"] == "model" or (
+        planner is not None and planner["kind"] == "model"
+    ) or (
         advisor is not None and advisor["kind"] == "model"
     )
     provider_guard = (
@@ -956,37 +958,75 @@ def build_policy(
         "root. If providers differ or cannot be established, report the route "
         "unavailable and require a custom agent that pins model_provider."
         if has_direct_route
-        else "The configured custom agents own their model-provider routes."
+        else "Configured custom agents and MCP seats own their provider routes."
+    )
+    planner_mode = (
+        "When a plan is needed, the configured Planner drafts it and handles any "
+        "Advisor-requested revision. The root supplies a self-contained packet, owns "
+        "the canonical plan and version, validates every result, and decides whether "
+        "the work is simple enough not to require a plan."
+        if planner is not None
+        else "No Planner is configured. The root drafts and revises every plan."
     )
     advisor_mode = (
-        "For a non-trivial plan, send one self-contained review packet to the "
-        "configured advisor before executor work. The advisor reports only to the "
-        "root. Treat PLAN_APPROVED as no material gap found and PLAN_REVISE as "
-        "actionable gaps; the root adjudicates and revises. Skip advisor review for "
-        "simple work. Advisor failure or unavailability is not approval; do not "
-        "release executor work unless the user made advisor review best-effort."
+        "For a non-trivial plan, the root sends a fresh self-contained review call "
+        "to the configured Advisor before Executor work. PLAN_APPROVED ends review "
+        "early. PLAN_REVISE returns the canonical current plan and version, the "
+        "latest critique, and the cumulative findings ledger to the same configured "
+        "Planner route, or to the root when Planner is omitted, then reviews the "
+        "revised plan again. There may be at most five total Advisor reviews."
         if advisor is not None
-        else "No advisor is configured. Do not create an advisor review step."
+        else (
+            "No Advisor is configured. Do not create a review loop; after a configured "
+            "Planner drafts, the root validates the plan before releasing Executor work."
+            if planner is not None
+            else "No Advisor is configured. Do not create an Advisor review step."
+        )
     )
     mode = f"""{MANAGED_MARKER}
 This adds model routing to Codex's existing multi-agent flow; it is not a second scheduler.
 
 If you are the root task model, you are the orchestrator. Own intent, planning, architecture, decomposition, delegation, integration, review, final verification, and the user-facing answer. Codex still decides whether a plan or subagent helps, how many independent slices exist, and what can run safely in parallel. Keep simple, tightly coupled, context-heavy, or root-owned work with the root. Do not delegate merely to prove the policy is active.
 
+{planner_mode}
+
 {advisor_mode}
+
+The root owns the plan version, cumulative findings ledger, review count, validation, adjudication, and release to Executor. There is no Finalizer seat. For Advisor rounds two through five, send only the current plan and version plus a compact cumulative ledger, not prior transcripts. Ask the Advisor to confirm or contest dispositions without blindly repeating accepted findings. Reject a stale plan version or an invalid or incomplete ledger and halt before Executor.
+
+On PLAN_REVISE, record the latest finding IDs before revision. After the Planner returns, validate and merge each INCORPORATED or reasoned REJECTED disposition into the cumulative ledger before another Advisor call. A round-five PLAN_REVISE halts before Executor and produces a non-approval artifact containing the latest plan and version, full ledger, latest findings, and choices available to the user. It must not claim approval. Any required Planner or Advisor route failure also halts before Executor. Only an explicit current-task best-effort instruction changes failure handling: Planner failure permits the root to take over planning for the remaining rounds; Advisor failure may proceed only with the result labeled NOT_ADVISOR_APPROVED. No best-effort setting is persisted.
 
 When executor delegation materially improves speed, cost, quality, or context isolation, use only the configured executor route. Give each executor one bounded, self-contained packet with objective, relevant facts, constraints, owned files or read-only scope, dependencies, acceptance criteria, verification, and handoff format. Inspect every handoff, integrate it, and run final checks yourself.
 
-Explicit user instructions win, including no-subagents and task-local seat overrides. This policy does not create or change a Goal, weaken approvals, alter permissions, or force a worker count.
+Explicit user instructions win, including no-subagents and task-local seat overrides. Persistent and task-local Planner and Advisor routes must remain distinct: reject the same direct model ID, the same custom-agent name, or Fable in both seats. This policy does not create or change a Goal, weaken approvals, alter permissions, or force a worker count.
 
-If you are a spawned child, stay inside the supplied packet, report only to the root, and never spawn descendants. An advisor reviews only the root's packet and never contacts executors. An executor never redesigns the root plan or contacts the advisor.
+Planner and Advisor are policy-isolated, root-directed seats: they cannot contact each other or Executors, spawn descendants, edit files, execute work, or release Executor. They return only to the root. Fable MCP requests do not carry caller identity, so caller isolation is instruction-enforced even though the bridge itself disables tools and persistence. If you are a spawned child, stay inside the supplied packet, report only to the root, never call planning tools, and never spawn descendants. An Executor never redesigns the root plan or contacts Planner or Advisor.
 """
+    if planner is not None and planner["kind"] == "fable":
+        planner_hint = (
+            "For the initial Planner draft, call `create_plan` from MCP server "
+            f"{json.dumps(planner['server'])}; after PLAN_REVISE, call `revise_plan` "
+            "from that server. These are root tool calls. Require PLAN_DRAFT from "
+            "creation, then assign the canonical version. Require PLAN_REVISION, "
+            "FINDINGS_LEDGER, and REVISED_PLAN from each revision."
+        )
+    elif planner is not None:
+        planner_hint = (
+            "For each Planner draft or revision, call this tool with "
+            f"{_spawn_route(planner)}, fork_turns = \"none\". Send the complete "
+            "self-contained packet for that round. Require PLAN_DRAFT initially; "
+            "require PLAN_REVISION, the source version, complete findings ledger, "
+            "and full revised plan after PLAN_REVISE."
+        )
+    else:
+        planner_hint = "No Planner route is configured; the root drafts and revises."
     if advisor is not None and advisor["kind"] == "fable":
         advisor_hint = (
             "For an advisor review, call `review_plan` from MCP server "
-            f"{json.dumps(advisor['server'])} with one complete packet. This is a "
-            "read-only root tool call, not a spawned child. Require PLAN_APPROVED or "
-            "PLAN_REVISE and fail closed if the tool is unavailable."
+            f"{json.dumps(advisor['server'])} with the round's self-contained packet. "
+            "This is a read-only root tool call, not a spawned child. Require "
+            "PLAN_APPROVED or PLAN_REVISE and fail closed unless the user explicitly "
+            "made Advisor failure best-effort for the current task."
         )
     elif advisor is not None:
         advisor_hint = (
@@ -1001,11 +1041,13 @@ If you are the root task model, you are the orchestrator. Apply these routes onl
 
 For delegated executor work, call this tool with {_spawn_route(executor)}, fork_turns = "none". Send a self-contained task packet.
 
+{planner_hint}
+
 {advisor_hint}
 
 {provider_guard}
 
-Never use fork_turns = "all" with model, reasoning_effort, or agent_type: a full-history fork inherits the root route and rejects those overrides. Never silently substitute the root model when an exact child route is unavailable. Report the unavailable route to the root. A user's explicit current-task model, effort, agent, or no-subagents instruction overrides this saved default.
+Never use fork_turns = "all" with model, reasoning_effort, or agent_type: a full-history fork inherits the root route and rejects those overrides. Never silently substitute the root model when an exact child route is unavailable. Report the unavailable route to the root. A user's explicit current-task model, effort, agent, or no-subagents instruction overrides this saved default, but a task-local Planner and Advisor must still be distinct: reject the same direct model ID, the same custom-agent name, or Fable in both seats.
 
 If you are a spawned child, do not call this tool or create descendants. Finish only your assigned packet and return to the root.
 """
@@ -1173,11 +1215,18 @@ def _status(
         fable_available = True
         if state_matches:
             print(f"Executor: {_route_summary(state['executor'])}")
+            planner = state.get("planner")
             advisor = state.get("advisor")
+            print(f"Planner: {_route_summary(planner) if planner else 'root'}")
             print(f"Advisor: {_route_summary(advisor) if advisor else 'none'}")
-            if isinstance(advisor, dict) and advisor.get("kind") == "fable":
+            fable_routes = [
+                route
+                for route in (planner, advisor)
+                if isinstance(route, dict) and route.get("kind") == "fable"
+            ]
+            for route in fable_routes:
                 try:
-                    verify_fable_prerequisites(advisor["effort"])
+                    verify_fable_prerequisites(route["effort"])
                 except ConfigurationError as exc:
                     fable_available = False
                     print(f"Claude Fable 5: unavailable — {exc}")
@@ -1190,6 +1239,7 @@ def _status(
                     app.codex_home,
                     workspace,
                     state["executor"],
+                    planner,
                     advisor,
                 )
             except (ConfigurationError, KeyError, TypeError) as exc:
@@ -1257,6 +1307,7 @@ def _prepare_setup_state(
     mode: str,
     usage: str,
     executor: dict[str, Any],
+    planner: dict[str, Any] | None,
     advisor: dict[str, Any] | None,
     config_path: Path,
     replace_existing: bool,
@@ -1417,8 +1468,10 @@ def _prepare_setup_state(
 
     existing_managed = existing_state.get("managed", {}) if existing_state else {}
     manage_mcp = (
-        isinstance(advisor, dict)
-        and advisor.get("kind") == "fable"
+        any(
+            isinstance(route, dict) and route.get("kind") == "fable"
+            for route in (planner, advisor)
+        )
         or isinstance(existing_managed, dict)
         and isinstance(existing_managed.get("mcp"), dict)
     )
@@ -1427,7 +1480,15 @@ def _prepare_setup_state(
         previous_mcp = previous.get("mcp")
         if not isinstance(previous_mcp, dict):
             previous_mcp = {}
-        selected = advisor.get("server") if isinstance(advisor, dict) else None
+        fable_route = next(
+            (
+                route
+                for route in (planner, advisor)
+                if isinstance(route, dict) and route.get("kind") == "fable"
+            ),
+            None,
+        )
+        selected = fable_route.get("server") if fable_route is not None else None
         existing_mcp = (
             existing_managed.get("mcp")
             if isinstance(existing_managed, dict)
@@ -1474,6 +1535,7 @@ def _prepare_setup_state(
         "managed_by": "codex-orchestration",
         "config_file": str(config_path),
         "executor": executor,
+        "planner": planner,
         "advisor": advisor,
         "managed": managed,
         "previous": previous,
@@ -1627,7 +1689,7 @@ def main() -> int:
                 return _disable(app, config, version, state, args.apply)
 
             catalog: dict[str, dict[str, Any]] = {}
-            if args.executor_model or args.advisor_model:
+            if args.executor_model or args.planner_model or args.advisor_model:
                 try:
                     catalog = load_models(app)
                 except ConfigurationError:
@@ -1650,8 +1712,37 @@ def main() -> int:
             else:
                 executor = {"kind": "agent", "agent": args.executor_agent}
 
+            planner: dict[str, Any] | None = None
             advisor: dict[str, Any] | None = None
             fable_auth: dict[str, str] | None = None
+            fable_server = (
+                select_fable_server()
+                if args.planner_fable or args.advisor_fable
+                else None
+            )
+            if args.planner_model:
+                planner_effort = resolve_model_effort(
+                    "Planner",
+                    args.planner_model,
+                    args.planner_effort,
+                    catalog,
+                    args.confirm_unlisted_models,
+                )
+                planner = {
+                    "kind": "model",
+                    "model": args.planner_model,
+                    "effort": planner_effort,
+                }
+            elif args.planner_agent:
+                planner = {"kind": "agent", "agent": args.planner_agent}
+            elif args.planner_fable:
+                planner = {
+                    "kind": "fable",
+                    "model": FABLE_MODEL,
+                    "effort": normalize_fable_effort(args.planner_effort),
+                    "server": fable_server,
+                }
+
             if args.advisor_model:
                 advisor_effort = resolve_model_effort(
                     "Advisor",
@@ -1668,29 +1759,37 @@ def main() -> int:
             elif args.advisor_agent:
                 advisor = {"kind": "agent", "agent": args.advisor_agent}
             elif args.advisor_fable:
-                server = select_fable_server()
-                fable_effort = normalize_fable_effort(args.advisor_effort)
-                fable_auth = verify_fable_prerequisites(fable_effort)
                 advisor = {
                     "kind": "fable",
                     "model": FABLE_MODEL,
-                    "effort": fable_effort,
-                    "server": server,
+                    "effort": normalize_fable_effort(args.advisor_effort),
+                    "server": fable_server,
                 }
+
+            validate_planning_routes(planner, advisor)
+            fable_efforts = {
+                route["effort"]
+                for route in (planner, advisor)
+                if isinstance(route, dict) and route.get("kind") == "fable"
+            }
+            for effort in sorted(fable_efforts):
+                fable_auth = verify_fable_prerequisites(effort)
 
             verified_agents = verify_agent_routes(
                 app.codex_home,
                 workspace,
                 executor,
+                planner,
                 advisor,
             )
-            mode, usage = build_policy(executor, advisor)
+            mode, usage = build_policy(executor, planner, advisor)
             new_state, edits, rollback = _prepare_setup_state(
                 config,
                 state,
                 mode,
                 usage,
                 executor,
+                planner,
                 advisor,
                 app.config_path,
                 args.replace_existing_policy,
@@ -1698,7 +1797,13 @@ def main() -> int:
             print(f"Config: {app.config_path}")
             print("Orchestrator: model selected when each Codex task starts")
             print(f"Executor: {_route_summary(executor)}")
+            print(f"Planner: {_route_summary(planner) if planner else 'root'}")
             print(f"Advisor: {_route_summary(advisor) if advisor else 'none'}")
+            if args.planner_fable and args.planner_effort in FABLE_EFFORT_ALIASES:
+                print(
+                    f"Planner effort alias: {args.planner_effort} -> "
+                    f"{planner['effort']} (Claude Code effective value)"
+                )
             if args.advisor_fable and args.advisor_effort in FABLE_EFFORT_ALIASES:
                 print(
                     f"Advisor effort alias: {args.advisor_effort} -> "
