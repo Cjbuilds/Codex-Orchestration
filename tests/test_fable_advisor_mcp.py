@@ -36,7 +36,7 @@ class FableAdvisorMcpTests(unittest.TestCase):
                     "advisor": {
                         "kind": "fable",
                         "model": "claude-fable-5",
-                        "effort": "max",
+                        "effort": "high",
                         "server": "fable-advisor-python3",
                     }
                 }
@@ -99,7 +99,7 @@ class FableAdvisorMcpTests(unittest.TestCase):
         self.assertIn("--safe-mode", review_command)
         self.assertNotIn("--bare", review_command)
         self.assertEqual(review_command[review_command.index("--model") + 1], "claude-fable-5")
-        self.assertEqual(review_command[review_command.index("--effort") + 1], "max")
+        self.assertEqual(review_command[review_command.index("--effort") + 1], "high")
         self.assertEqual(
             review_command[review_command.index("--prompt-suggestions") + 1], "false"
         )
@@ -174,7 +174,7 @@ class FableAdvisorMcpTests(unittest.TestCase):
 
     def test_status_does_not_expose_account_plan_metadata(self) -> None:
         with (
-            mock.patch.object(FABLE, "load_fable_route", return_value={"model": "claude-fable-5", "effort": "max"}),
+            mock.patch.object(FABLE, "load_fable_route", return_value={"model": "claude-fable-5", "effort": "high"}),
             mock.patch.object(
                 FABLE,
                 "check_claude_auth",
@@ -192,6 +192,25 @@ class FableAdvisorMcpTests(unittest.TestCase):
         text = response["result"]["content"][0]["text"]
         self.assertNotIn("subscription", text.lower())
         self.assertNotIn("account_plan", text)
+
+    def test_saved_xhigh_and_legacy_max_efforts_remain_valid(self) -> None:
+        state_path = self.home / FABLE.STATE_FILENAME
+        for effort in ("xhigh", "max"):
+            with self.subTest(effort=effort):
+                state_path.write_text(
+                    json.dumps(
+                        {
+                            "advisor": {
+                                "kind": "fable",
+                                "model": "claude-fable-5",
+                                "effort": effort,
+                                "server": "fable-advisor-python3",
+                            }
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                self.assertEqual(FABLE.load_fable_route(self.home)["effort"], effort)
 
 
 if __name__ == "__main__":

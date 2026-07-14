@@ -39,7 +39,10 @@ PROBE_VALUE = "CODEX_ORCHESTRATION_CAPABILITY_PROBE"
 ROUTING_TOOL_NAMESPACE = "agents"
 PLUGIN_ID = "codex-orchestration@codex-orchestration"
 FABLE_MODEL = "claude-fable-5"
-FABLE_EFFORTS = {"low", "medium", "high", "max"}
+FABLE_DEFAULT_EFFORT = "high"
+FABLE_EFFORT_CHOICES = ("low", "medium", "high", "xhigh", "max")
+FABLE_EFFORTS = set(FABLE_EFFORT_CHOICES)
+FABLE_EFFORT_ALIASES = {"ultra": "max"}
 FABLE_SERVERS = {
     "fable-advisor-python3": ("python3", []),
     "fable-advisor-python": ("python", []),
@@ -179,11 +182,7 @@ def _validate_args(args: argparse.Namespace) -> None:
             "A custom advisor agent owns its effort; omit --advisor-effort."
         )
     if args.advisor_fable:
-        effort = "max" if args.advisor_effort == "auto" else args.advisor_effort
-        if effort not in FABLE_EFFORTS:
-            raise ConfigurationError(
-                "Claude Fable 5 effort must be one of: low, medium, high, max."
-            )
+        normalize_fable_effort(args.advisor_effort)
     for label, value, pattern in (
         ("executor model", args.executor_model, MODEL_RE),
         ("advisor model", args.advisor_model, MODEL_RE),
@@ -198,6 +197,19 @@ def _validate_args(args: argparse.Namespace) -> None:
     ):
         if value != "auto" and not EFFORT_RE.fullmatch(value):
             raise ConfigurationError(f"Invalid {label}: {value!r}.")
+
+
+def normalize_fable_effort(value: str) -> str:
+    """Return the Claude CLI effort for a user-facing Fable effort label."""
+
+    requested = FABLE_DEFAULT_EFFORT if value == "auto" else value
+    effective = FABLE_EFFORT_ALIASES.get(requested, requested)
+    if effective not in FABLE_EFFORTS:
+        supported = ", ".join((*FABLE_EFFORT_CHOICES, *FABLE_EFFORT_ALIASES))
+        raise ConfigurationError(
+            f"Claude Fable 5 effort must be one of: {supported}."
+        )
+    return effective
 
 
 def resolve_binary(value: str) -> Path:
@@ -812,7 +824,7 @@ def select_fable_server() -> str:
     )
 
 
-def verify_fable_prerequisites() -> dict[str, str]:
+def verify_fable_prerequisites(effort: str) -> dict[str, str]:
     try:
         from fable_advisor_mcp import AdvisorError, check_claude_auth, resolve_claude
     except ImportError as exc:  # pragma: no cover - corrupt package
@@ -849,6 +861,21 @@ def verify_fable_prerequisites() -> dict[str, str]:
         raise ConfigurationError(
             f"Claude Code is too old for the Fable advisor bridge ({detail}); update it."
         )
+    effort_match = re.search(
+        r"--effort\s+<level>.*?\((low[^)]*)\)",
+        help_result.stdout,
+        flags=re.DOTALL,
+    )
+    advertised_efforts = (
+        set(re.findall(r"[a-z]+", effort_match.group(1)))
+        if effort_match is not None
+        else set()
+    )
+    if effort not in advertised_efforts:
+        raise ConfigurationError(
+            f"Claude Code does not advertise Fable effort {effort!r}; "
+            "update Claude Code or choose a supported effort."
+        )
     return {"claude": str(claude), **auth}
 
 
@@ -856,8 +883,7 @@ def _route_summary(route: dict[str, Any]) -> str:
     if route["kind"] == "agent":
         return f"custom agent {route['agent']}"
     if route["kind"] == "fable":
-        effort = "Extra High" if route["effort"] == "max" else route["effort"]
-        return f"Claude Fable 5 {effort}"
+        return f"Claude Fable 5 {route['effort']}"
     return f"{route['model']}@{route['effort']}"
 
 
@@ -1150,7 +1176,7 @@ def _status(
             print(f"Advisor: {_route_summary(advisor) if advisor else 'none'}")
             if isinstance(advisor, dict) and advisor.get("kind") == "fable":
                 try:
-                    verify_fable_prerequisites()
+                    verify_fable_prerequisites(advisor["effort"])
                 except ConfigurationError as exc:
                     print(f"Claude Fable 5: unavailable — {exc}")
                 else:
@@ -1640,13 +1666,12 @@ def main() -> int:
                 advisor = {"kind": "agent", "agent": args.advisor_agent}
             elif args.advisor_fable:
                 server = select_fable_server()
-                fable_auth = verify_fable_prerequisites()
+                fable_effort = normalize_fable_effort(args.advisor_effort)
+                fable_auth = verify_fable_prerequisites(fable_effort)
                 advisor = {
                     "kind": "fable",
                     "model": FABLE_MODEL,
-                    "effort": (
-                        "max" if args.advisor_effort == "auto" else args.advisor_effort
-                    ),
+                    "effort": fable_effort,
                     "server": server,
                 }
 
@@ -1671,6 +1696,11 @@ def main() -> int:
             print("Orchestrator: model selected when each Codex task starts")
             print(f"Executor: {_route_summary(executor)}")
             print(f"Advisor: {_route_summary(advisor) if advisor else 'none'}")
+            if args.advisor_fable and args.advisor_effort in FABLE_EFFORT_ALIASES:
+                print(
+                    f"Advisor effort alias: {args.advisor_effort} -> "
+                    f"{advisor['effort']} (Claude Code effective value)"
+                )
             if fable_auth is not None:
                 print(
                     "Claude Fable 5 login: ready — first-party; "

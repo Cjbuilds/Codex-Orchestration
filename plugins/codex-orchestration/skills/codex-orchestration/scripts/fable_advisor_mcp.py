@@ -14,7 +14,7 @@ from typing import Any
 
 STATE_FILENAME = ".codex-orchestration-routing.json"
 FABLE_MODEL = "claude-fable-5"
-SUPPORTED_EFFORTS = {"low", "medium", "high", "max"}
+SUPPORTED_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 CLAUDE_TIMEOUT_SECONDS = 600
 AUTH_TIMEOUT_SECONDS = 20
 SENSITIVE_ENV = {

@@ -2,6 +2,7 @@
 
 ## 0.5.0 — Unreleased
 
+- Make Claude Fable 5 advisor effort configurable, default it to `high`, support `low` through `max`, and treat user-facing `ultra` as an explicit alias for Claude Code's `max`.
 - Add Claude Fable 5 as an opt-in, root-only advisor through a bundled local MCP bridge to the authenticated Claude Code CLI.
 - Keep every Fable launcher disabled by default, enable only one compatible Python 3.11+ route, and restore prior plugin overrides on disable.
 - Pin `claude-fable-5`, remove provider override variables, disable tools and session persistence, and fail closed unless the plan signal and runtime model are valid.

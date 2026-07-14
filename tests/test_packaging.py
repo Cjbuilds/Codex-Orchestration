@@ -188,6 +188,9 @@ class PackagingTests(unittest.TestCase):
             "advisor: Claude Fable 5 High",
             readme,
         )
+        self.assertIn("Fable defaults to **High**", readme)
+        self.assertIn("**Low**, **Medium**, **High**, **XHigh**, or **Max**", readme)
+        self.assertIn("**Ultra** is also accepted and uses Max", readme)
         self.assertNotIn("advisor: GPT-5.6 Terra", readme)
 
     def test_update_and_uninstall_remove_managed_state_explicitly(self) -> None:

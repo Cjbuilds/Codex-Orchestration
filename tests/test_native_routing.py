@@ -263,7 +263,11 @@ class NativeRoutingTests(unittest.TestCase):
                     }))
                     raise SystemExit(0)
                 if sys.argv[1:] == ["--help"]:
-                    print("--model --effort --safe-mode --prompt-suggestions")
+                    print(
+                        "--model --effort <level> Effort level "
+                        "(low, medium, high, xhigh, max) "
+                        "--safe-mode --prompt-suggestions"
+                    )
                     raise SystemExit(0)
                 raise SystemExit(2)
                 """
@@ -981,7 +985,7 @@ class NativeRoutingTests(unittest.TestCase):
             "max",
             "--apply",
         )
-        self.assertIn("Claude Fable 5 Extra High", setup.stdout)
+        self.assertIn("Claude Fable 5 max", setup.stdout)
         config = self.read_fake_config()
         servers = config["plugins"][NATIVE.PLUGIN_ID]["mcp_servers"]
         self.assertTrue(servers["fable-advisor-python3"]["enabled"])
@@ -1011,6 +1015,85 @@ class NativeRoutingTests(unittest.TestCase):
 
         self.run_script("--disable", "--apply")
         self.assertEqual(self.read_fake_config(), initial)
+
+    def test_fable_effort_defaults_to_high_and_ultra_maps_to_max(self) -> None:
+        setup = self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "xhigh",
+            "--advisor-fable",
+            "--apply",
+        )
+        self.assertIn("Advisor: Claude Fable 5 high", setup.stdout)
+        state = json.loads(
+            (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
+        )
+        self.assertEqual(state["advisor"]["effort"], "high")
+
+        update = self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "xhigh",
+            "--advisor-fable",
+            "--advisor-effort",
+            "ultra",
+            "--apply",
+        )
+        self.assertIn("Advisor: Claude Fable 5 max", update.stdout)
+        self.assertIn("Advisor effort alias: ultra -> max", update.stdout)
+        state = json.loads(
+            (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
+        )
+        self.assertEqual(state["advisor"]["effort"], "max")
+
+    def test_fable_effort_normalization_accepts_every_public_label(self) -> None:
+        expected = {
+            "auto": "high",
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": "max",
+            "ultra": "max",
+        }
+        for requested, effective in expected.items():
+            with self.subTest(requested=requested):
+                self.assertEqual(
+                    NATIVE.normalize_fable_effort(requested), effective
+                )
+
+        with self.assertRaisesRegex(
+            NATIVE.ConfigurationError, "low.*medium.*high.*xhigh.*max.*ultra"
+        ):
+            NATIVE.normalize_fable_effort("extreme")
+
+    def test_fable_setup_rejects_effort_missing_from_installed_claude(self) -> None:
+        self.claude.write_text(
+            self.claude.read_text(encoding="utf-8").replace(
+                "(low, medium, high, xhigh, max)",
+                "(low, medium, high, max)",
+            ),
+            encoding="utf-8",
+        )
+        result = self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "xhigh",
+            "--advisor-fable",
+            "--advisor-effort",
+            "xhigh",
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(
+            "Claude Code does not advertise Fable effort 'xhigh'",
+            result.stderr,
+        )
+        self.assertFalse((self.home / NATIVE.STATE_FILENAME).exists())
 
     def test_missing_or_project_shadowed_custom_agent_is_refused(self) -> None:
         missing = self.run_script(

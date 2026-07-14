@@ -129,8 +129,10 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("does not silently create, pause, resume, or clear it", SKILL)
 
     def test_fable_is_a_bundled_root_only_mcp_advisor(self) -> None:
-        self.assertIn("Claude Fable 5 Extra High", SKILL)
-        self.assertIn("--advisor-fable --advisor-effort max", SKILL)
+        self.assertIn("advisor: Claude Fable 5 High", SKILL)
+        self.assertIn("Omission or `Auto` means `High`", SKILL)
+        self.assertIn("`Ultra` is a user-facing alias", SKILL)
+        self.assertIn("--advisor-fable --advisor-effort <normalized-effort>", SKILL)
         self.assertIn("built-in cross-provider advisor exception", SKILL)
         self.assertIn("All bundled variants are disabled by default", SKILL)
         self.assertIn("first-party Pro or Max account", SKILL)

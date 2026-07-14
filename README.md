@@ -75,6 +75,8 @@ Select the model you want to lead the task, then run:
 /codex-orchestration setup executor: GPT-5.6 Luna Extra High, advisor: Claude Fable 5 High
 ```
 
+Fable defaults to **High**. You can choose **Low**, **Medium**, **High**, **XHigh**, or **Max**. **Ultra** is also accepted and uses Max because Claude Code does not expose a separate Ultra effort.
+
 This creates the default workflow:
 
 ```text
