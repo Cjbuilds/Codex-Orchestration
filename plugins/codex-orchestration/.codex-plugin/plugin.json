@@ -1,7 +1,7 @@
 {
   "name": "codex-orchestration",
   "version": "0.5.0",
-  "description": "Bring compatible models into Codex, assign roles, and run them as one guided workflow.",
+  "description": "Bring models like Claude Fable 5 into Codex as Planner, Advisor, or Executor.",
   "author": {
     "name": "CJ Zafir",
     "url": "https://github.com/Cjbuilds"
@@ -20,8 +20,8 @@
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Codex Orchestration",
-    "shortDescription": "Build multi-model Codex workflows",
-    "longDescription": "Assign compatible models to roles such as advisor, executor, or researcher, describe the handoff order, and let Codex orchestrate the work.",
+    "shortDescription": "Plan, review, and build with multiple models",
+    "longDescription": "Bring Fable 5 and compatible models into Codex as Planner, Advisor, or Executor, then let Codex coordinate the workflow.",
     "developerName": "CJ Zafir",
     "category": "Productivity",
     "websiteURL": "https://github.com/Cjbuilds/Codex-Orchestration",
@@ -29,11 +29,12 @@
     "capabilities": [
       "Multi-model workflows",
       "Custom agent roles",
+      "Model planning",
       "Plan review",
       "Efficient execution"
     ],
     "defaultPrompt": [
-      "/codex-orchestration setup executor: GPT-5.6 Luna Extra High, advisor: Claude Fable 5 High",
+      "/codex-orchestration setup planner: Claude Fable 5 High, advisor: GPT-5.6 Sol High, executor: GPT-5.6 Luna Extra High",
       "/codex-orchestration create project role: researcher",
       "$codex-orchestration:codex-orchestration status"
     ]

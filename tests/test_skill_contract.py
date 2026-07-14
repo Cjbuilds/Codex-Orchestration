@@ -24,6 +24,7 @@ NATIVE_SCRIPT = (
 class SkillContractTests(unittest.TestCase):
     def test_public_controls_are_simple_and_setup_is_persistent(self) -> None:
         self.assertIn("setup executor: GPT-5.6 Luna Extra High", SKILL)
+        self.assertIn("setup planner: Claude Fable 5 High", SKILL)
         self.assertIn("/codex-orchestration status", SKILL)
         self.assertIn("/codex-orchestration disable", SKILL)
         self.assertIn("current-task override", SKILL)
@@ -37,10 +38,15 @@ class SkillContractTests(unittest.TestCase):
         self.assertNotIn("--orchestrator-model", SKILL)
 
     def test_advisor_omission_means_none(self) -> None:
-        self.assertIn("if omitted, it means `advisor: none`", SKILL)
-        self.assertIn("Do not ask a separate advisor question", SKILL)
+        self.assertIn("omitted advisor means `advisor: none`", SKILL)
+        self.assertIn("Do not ask separate planner or advisor questions", SKILL)
         self.assertIn("Omission persists `advisor: none`", SKILL)
-        self.assertIn("No advisor is configured", NATIVE_SCRIPT)
+        self.assertIn("Advisor omission means none", NATIVE_SCRIPT)
+
+    def test_planner_omission_means_root(self) -> None:
+        self.assertIn("omitted planner means the current root model plans", SKILL)
+        self.assertIn("Planner omission persists no Planner route", SKILL)
+        self.assertIn("no Planner route is configured, so the root plans", SKILL)
 
     def test_codex_still_decides_when_to_delegate(self) -> None:
         self.assertIn("Codex decides whether a plan helps", SKILL)
@@ -128,20 +134,25 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("leave Goal lifecycle and limits under Codex's normal Goal controls", SKILL)
         self.assertIn("does not silently create, pause, resume, or clear it", SKILL)
 
-    def test_fable_is_a_bundled_root_only_mcp_advisor(self) -> None:
+    def test_fable_is_a_bundled_root_only_planner_or_advisor(self) -> None:
         self.assertIn("advisor: Claude Fable 5 High", SKILL)
+        self.assertIn("planner: Claude Fable 5 High", SKILL)
         self.assertIn("Omission or `Auto` means `High`", SKILL)
         self.assertIn("`Ultra` is a user-facing alias", SKILL)
         self.assertIn("--advisor-fable --advisor-effort <normalized-effort>", SKILL)
-        self.assertIn("built-in cross-provider advisor exception", SKILL)
+        self.assertIn("--planner-fable --planner-effort <normalized-effort>", SKILL)
+        self.assertIn("built-in cross-provider Planner or Advisor exception", SKILL)
         self.assertIn("All bundled variants are disabled by default", SKILL)
         self.assertIn("first-party Pro or Max account", SKILL)
         self.assertIn("never extracts a token", SKILL)
         self.assertIn("runtime `modelUsage` to confirm `claude-fable-5`", SKILL)
-        self.assertIn("call the configured MCP server's `review_plan` tool", SKILL)
-        self.assertIn("instead of spawning an advisor child", SKILL)
+        self.assertIn("`create_plan`", SKILL)
+        self.assertIn("`revise_plan`", SKILL)
+        self.assertIn("`review_plan`", SKILL)
         self.assertIn("use the exact name `Claude Fable 5`", SKILL)
         self.assertIn("do not expose or restate Claude account-plan metadata", SKILL)
+        self.assertIn("MCP requests do not carry caller identity", SKILL)
+        self.assertIn("Never describe the caller boundary as engine-enforced", SKILL)
 
     def test_direct_routes_are_guarded_to_the_root_provider(self) -> None:
         self.assertIn("Direct model overrides keep the root's provider", SKILL)
@@ -152,9 +163,22 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("PLAN_APPROVED", SKILL)
         self.assertIn("PLAN_REVISE", SKILL)
         self.assertIn("report only to the root", SKILL)
-        self.assertIn("never contact executors", SKILL)
-        self.assertIn("`advisor unavailable`, never approval", SKILL)
-        self.assertIn("at most one confirmation pass", SKILL)
+        self.assertIn("contact Executors", SKILL)
+        self.assertIn("it never counts as approval", SKILL)
+        self.assertIn("Never exceed five total Advisor reviews", SKILL)
+        self.assertIn("NOT_ADVISOR_APPROVED", SKILL)
+        self.assertNotIn("at most one confirmation pass", SKILL)
+
+    def test_planner_advisor_loop_is_versioned_and_fail_closed(self) -> None:
+        self.assertIn("canonical plan version", SKILL)
+        self.assertIn("stable IDs", SKILL)
+        self.assertIn("compact cumulative findings ledger", SKILL)
+        self.assertIn("Reject stale source versions", SKILL)
+        self.assertIn("same direct model ID", SKILL)
+        self.assertIn("For both persistent setup and task-local overrides", SKILL)
+        self.assertIn("explicitly made that seat best-effort", SKILL)
+        self.assertIn("An unavailable Executor may leave work with the root", SKILL)
+        self.assertIn("Planner and Advisor never contact one another directly", SKILL)
 
     def test_route_reporting_is_truthful(self) -> None:
         self.assertIn("native policy installed", SKILL)

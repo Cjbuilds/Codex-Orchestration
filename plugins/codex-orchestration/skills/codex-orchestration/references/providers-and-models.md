@@ -6,12 +6,12 @@ Use this reference for setup, client compatibility, custom providers, or a route
 
 1. The model selected for the Codex task is the root orchestrator.
 2. A current Sol or Terra root uses multi-agent v2.
-3. The saved policy tells the root which exact route to request for every delegated executor and optional advisor.
+3. The saved policy tells the root which exact route to request for an optional Planner, optional Advisor, and delegated Executors.
 4. Codex still decides whether a spawn helps.
 5. Every different-model, different-effort, or custom-agent child uses `fork_turns = "none"` and a self-contained packet.
 6. The root reviews and verifies all child work.
 
-The policy tells Codex which route to request for **delegated executor work**. It does not force every task to delegate or add a second scheduler.
+The policy tells Codex which routes to request for configured planning, review, and delegated execution. It does not force every task to delegate or add a second scheduler.
 
 ## Current capability matrix
 
@@ -24,9 +24,9 @@ These facts were source-checked and runtime-tested on July 10, 2026. Always capa
 | Luna model metadata | `multi_agent_version = v1` | Luna is suitable as a v2 child, but a Luna root does not activate this v2 policy. |
 | `hide_spawn_agent_metadata = false` | Shows `agent_type`, `model`, `reasoning_effort`, and `service_tier` on v2 spawn | Required for direct route control; it does not select a route alone. |
 | `tool_namespace = "agents"` | On live-tested Desktop `0.144.0-alpha.4`, the default `collaboration` namespace rejected expanded model/effort metadata; `agents` accepted it and spawned Luna at `xhigh`. | Required for this validated direct-routing path. It changes the callable namespace but does not select Luna. |
-| `usage_hint_text` | Appended to the spawn tool description | Carries the exact executor/advisor route where the root chooses children. |
+| `usage_hint_text` | Appended to the spawn tool description | Carries the exact Planner/Advisor/Executor routes where the root chooses children. |
 | `multi_agent_mode_hint_text` | Replaces the default proactive/explicit mode hint and is sent to root and child tasks | Must contain both root and child boundaries. |
-| Claude Fable 5 MCP route | Root-only `review_plan` tool invokes the authenticated Claude Code CLI headlessly | Built-in cross-provider advisor exception; no custom Codex provider or advisor child. |
+| Claude Fable 5 MCP route | Root-directed `create_plan`, `revise_plan`, and `review_plan` tools invoke the authenticated Claude Code CLI headlessly with no model tools | Built-in cross-provider Planner or Advisor exception; current MCP requests do not provide caller identity, so caller isolation is policy-enforced. |
 | `fork_turns` default | `all` | Different model/effort/role overrides are rejected unless the call uses `none` or a positive partial fork. |
 | Effective concurrency | Determined by the active Codex version and `agents.max_threads` configuration | This plugin never changes the limit or forces a worker count. |
 | Older CLI 0.142.5 | Rejects `multi_agent_mode_hint_text` as an unknown feature-table field | Never write the global native policy without checking every known shared-config client. |
@@ -52,13 +52,14 @@ The control surface and the route are separate:
 - `hide_spawn_agent_metadata = false` exposes the model, effort, agent-type, and service-tier spawn inputs;
 - `tool_namespace = "agents"` makes the expanded route callable on the currently validated Desktop build;
 - `multi_agent_mode_hint_text` carries the root/child behavior and safety boundaries;
-- `usage_hint_text` carries the exact executor and optional advisor route.
+- `usage_hint_text` carries the exact optional Planner, optional Advisor, and required Executor routes.
 
 `multi_agent_mode_hint_text` describes the policy:
 
 - current task model is the one root orchestrator;
 - Codex decides whether delegation is useful;
-- optional advisor is root-only and reviews before executor work;
+- optional Planner drafts and revises through the root; omitted Planner means the root plans;
+- optional Advisor is directed through the root and reviews through a five-round bounded approval loop before Executor work;
 - executor packets are bounded and self-contained;
 - children do not create descendants;
 - user overrides and `no subagents` win;
@@ -67,8 +68,9 @@ The control surface and the route are separate:
 `usage_hint_text` attaches the route to the spawn tool itself:
 
 ```text
-executor -> model="gpt-5.6-luna", reasoning_effort="xhigh", fork_turns="none"
+planner  -> model="gpt-5.6-sol", reasoning_effort="high", fork_turns="none"
 advisor  -> model="gpt-5.6-terra", reasoning_effort="high", fork_turns="none"
+executor -> model="gpt-5.6-luna", reasoning_effort="xhigh", fork_turns="none"
 ```
 
 For a durable custom-agent route it uses:
@@ -78,7 +80,7 @@ agent_type="codex_orchestration_executor", fork_turns="none"
 agent_type="codex_orchestration_advisor", fork_turns="none"
 ```
 
-For Claude Fable 5 it names the enabled bundled MCP server and tells the root to call its `review_plan` tool. This is a root tool call, not `spawn_agent`, so `fork_turns` does not apply.
+For Claude Fable 5 it names the enabled bundled MCP server and tells the root to use `create_plan`/`revise_plan` for the Planner seat or `review_plan` for the Advisor seat. These are root tool calls, not `spawn_agent`, so `fork_turns` does not apply.
 
 The custom mode text is visible in spawned children too. That is why it says: if root, orchestrate; if child, stay within the packet and never spawn.
 
@@ -151,7 +153,7 @@ Restore state lives at:
 ~/.codex/.codex-orchestration-routing.json
 ```
 
-It contains the prior and managed values of the four routing fields, chosen seat IDs, schema/version markers, scalar-conversion metadata when needed, and config path. When Claude Fable 5 is selected, it also records only the plugin-scoped MCP launcher overrides that setup touched. It never copies provider definitions, auth stores, account identifiers, or credentials. A normal clean setup contains generated policy text, the namespace value, seat IDs, and restoration metadata. Explicit replacement must retain the user's exact old hint text so disable can restore it; routing hints must never contain credentials. State is written with a same-directory atomic replacement and restrictive file mode where supported. If persistence fails after config apply, the configurator rolls the config back using the returned version.
+It contains the prior and managed values of the four routing fields, chosen Planner/Advisor/Executor routes, schema/version markers, scalar-conversion metadata when needed, and config path. When Claude Fable 5 is selected for either planning seat, it also records only the plugin-scoped MCP launcher overrides that setup touched. It never copies provider definitions, auth stores, account identifiers, or credentials. A normal clean setup contains generated policy text, the namespace value, seat IDs, and restoration metadata. Explicit replacement must retain the user's exact old hint text so disable can restore it; routing hints must never contain credentials. State is written with a same-directory atomic replacement and restrictive file mode where supported. If persistence fails after config apply, the configurator rolls the config back using the returned version.
 
 Disable compares every current managed value before restoration. If the user edited a managed field after setup, it stops instead of erasing that work. Without state, each surviving marker proves ownership only of that hint string. Disable may safely remove the marked string or strings, but it leaves metadata visibility and the tool namespace unchanged because their previous values are unknown.
 
@@ -213,9 +215,11 @@ On Windows, the custom-agent configurator can create a new role but refuses in-p
 
 Direct v2 `model` overrides retain the parent's provider. They are the simplest route for an OpenAI root and OpenAI Luna/Terra child.
 
-Claude Fable 5 is the explicit built-in exception. The plugin does not pretend it is a Codex model or translate Anthropic into the Responses protocol. Instead, a disabled-by-default local MCP server invokes the official `claude` CLI with the user's first-party Pro or Max login. Setup enables one Python 3.11+ launcher variant, and disable restores every prior plugin override value. Codex's TOML editor can retain an inert empty table header after its final key is deleted; the configurator does not risk a broad TOML rewrite for cosmetic cleanup.
+Claude Fable 5 is the explicit built-in exception for Planner or Advisor. The plugin does not pretend it is a Codex model or translate Anthropic into the Responses protocol. Instead, a disabled-by-default local MCP server invokes the official `claude` CLI with the user's first-party Pro or Max login. Setup enables one Python 3.11+ launcher variant, and disable restores every prior plugin override value. Codex's TOML editor can retain an inert empty table header after its final key is deleted; the configurator does not risk a broad TOML rewrite for cosmetic cleanup.
 
 The bridge removes `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and Bedrock/Vertex/Foundry selection variables from the child environment. It re-checks `claude auth status`, pins `claude-fable-5` and the saved effort, disables tools and session persistence, disables prompt suggestions, and requires JSON runtime metadata to confirm the model. Setup and status never make a model call.
+
+The saved policy authorizes the root to call these planning tools and prohibits children from doing so. Current MCP requests provide no caller identity to the server, so that specific caller boundary is instruction-enforced, not server-authenticated. The bridge does mechanically validate the authorization-critical saved routing state, restrict the operation surface, and run Fable without tools or persistence.
 
 Fable setup defaults to `high`. It accepts the Claude Code effort values `low`, `medium`, `high`, `xhigh`, and `max`; the user-facing label `ultra` normalizes to the effective Claude Code value `max` because the CLI has no separate Ultra setting. Setup checks the installed CLI's advertised choices before persisting the route. The bridge reads only the normalized saved value, so tool callers cannot raise the effort at review time. Existing saved `max` routes remain compatible.
 
@@ -230,15 +234,17 @@ Never create provider definitions, request keys in chat, write credentials, or i
 
 Codex custom providers currently use the Responses wire protocol. An Anthropic Messages endpoint is not automatically compatible. Use a supported integration that the user has configured and tested, such as an appropriate Amazon Bedrock route where available.
 
-## Advisor permissions
+## Planner and Advisor permissions
 
-A task-local advisor is review-only by instruction. Do not claim it is mechanically read-only unless the effective child sandbox confirms that.
+A task-local Planner or Advisor is planning-only by instruction. Do not claim it is mechanically read-only unless the effective child sandbox confirms that.
 
 A saved advisor requests `sandbox_mode = "read-only"`, but live parent permission overrides may be reapplied to children. Keep the behavioral prohibition on edits and mutation even with the requested sandbox.
 
-The Claude Fable 5 advisor is mechanically narrower than a child: the MCP tool accepts only a review packet, launches Claude with safe mode and no tools, and exposes no edit or shell operation. It still has open-world model access, so the packet must be deliberate and self-contained.
+The Claude Fable 5 bridge is mechanically narrower than a child: its tools accept only bounded plan or review inputs, launch Claude with safe mode and no tools, and expose no edit or shell operation. It still has open-world model access, so every call must be deliberate and self-contained.
 
-Advisor failure is never approval. A configured advisor is required for a non-trivial executor plan unless the user explicitly marks it best-effort. Transport failure, malformed output, missing context, or wrong route becomes `advisor unavailable`; stop before executor work by default, or disclose and continue under the root only in best-effort mode.
+Planner or Advisor failure is never approval. Configured seats are required for a non-trivial Executor plan unless the user explicitly marks one best-effort for the current task. Transport failure, malformed output, missing context, stale plan versions, or wrong routes stop Executor work by default.
+
+Every Advisor call is fresh and stateless. The root carries the canonical current plan, numbered version, and compact cumulative findings ledger. `PLAN_REVISE` returns to the same Planner route; `PLAN_APPROVED` stops the loop. The root allows at most five Advisor reviews. Review five without approval halts with the current plan, ledger, and unresolved findings instead of silently executing.
 
 ## Goals and task lifetime
 
