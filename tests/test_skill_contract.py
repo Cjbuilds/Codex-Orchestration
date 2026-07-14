@@ -51,6 +51,18 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("Planner omission persists no Planner route", SKILL)
         self.assertIn("no Planner route is configured, so the root plans", SKILL)
 
+    def test_explicit_seat_labels_cannot_be_reinterpreted(self) -> None:
+        self.assertIn("Explicit seat labels are authoritative", SKILL)
+        self.assertIn(
+            "never reinterpret a supplied `planner:` model as an Advisor", SKILL
+        )
+        self.assertIn("`planner:` configures only Planner", SKILL)
+        self.assertIn("`advisor:` configures only Advisor", SKILL)
+        self.assertIn("`executor:` configures only Executor", SKILL)
+        self.assertIn("Fable Planner uses `create_plan` and `revise_plan`", SKILL)
+        self.assertIn("Fable Advisor uses `review_plan`", SKILL)
+        self.assertIn("Advisor: none", SKILL)
+
     def test_codex_still_decides_when_to_delegate(self) -> None:
         self.assertIn("Codex decides whether a plan helps", SKILL)
         self.assertIn("force a spawn or fixed worker count", SKILL)

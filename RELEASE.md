@@ -1,7 +1,7 @@
 # Release process
 
 1. Replace `Unreleased` in `CHANGELOG.md` with the release date.
-2. Confirm `.codex-plugin/plugin.json`, the changelog, the installed package, and lifecycle fixture all use the same semantic version.
+2. Confirm `.codex-plugin/plugin.json`, the changelog, the installed package, and lifecycle fixture all use the same new semantic version. Never publish different plugin behavior under a version already used by another bundle; fix forward with a new version so Codex cannot reuse the old cache identity.
 3. Run:
 
    ```bash
@@ -17,7 +17,7 @@
 6. Merge only after every protected check passes.
 7. Create a signed annotated tag named `v<manifest-version>` at the reviewed merge commit.
 8. Re-run `python3 scripts/release_check.py --require-tag` and publish a GitHub release from that tag using the matching changelog section.
-9. Install from the public marketplace in a clean Codex home, start a new task, and verify setup, `status --require-effective`, and disable.
+9. Upgrade from the previous public version in a clean Codex home, reinstall the plugin, and verify the installed version and skill contents changed before starting a new task. Then verify setup, `status --require-effective`, and disable.
 
 Never move a published release tag. If a release is bad, fix forward with a new version and retain the old tag as provenance.
 

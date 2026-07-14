@@ -96,6 +96,8 @@ Fable 5 uses the official Claude Code CLI and a compatible first-party Claude lo
 - `executor` is required.
 - Planner and Advisor must use different configured model routes so the review is independent.
 
+Role labels are literal. A model after `planner:` plans; a model after `advisor:` reviews; a model after `executor:` implements. Codex must never move a model to a different role because that model was used differently in an older plugin version. If you specify Planner and Executor but omit Advisor, the workflow has no Advisor.
+
 Examples:
 
 ```text
@@ -160,7 +162,11 @@ codex plugin marketplace upgrade codex-orchestration
 codex plugin add codex-orchestration@codex-orchestration
 ```
 
-Start a new task after updating. Before downgrading to a version older than Planner support, run `/codex-orchestration disable` with the current version first.
+Version **0.5.1 or newer** is required for reliable Planner assignment. It has a distinct release identity so Codex replaces the affected Advisor-only `0.5.0` cache instead of reusing it. After the two update commands, confirm `codex plugin list --json` reports `0.5.1` or newer, then start a new task; a task that already loaded the old skill cannot refresh its instructions in place.
+
+If the version stays old or `marketplaceSource.sourceType` is `local`, Codex is pointed at a local checkout rather than the GitHub marketplace. Run `/codex-orchestration disable` first if a saved policy is active, then remove the plugin and that marketplace registration, add `Cjbuilds/Codex-Orchestration` again, and reinstall. This does not delete the local source checkout.
+
+Before downgrading to a version older than Planner support, run `/codex-orchestration disable` with the current version first.
 
 ## Uninstall
 

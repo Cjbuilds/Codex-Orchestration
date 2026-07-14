@@ -1,7 +1,9 @@
 # Changelog
 
-## 0.5.0 — Unreleased
+## 0.5.1 — Unreleased
 
+- Preserve explicit role labels exactly: a model supplied as `planner:` can never be reinterpreted as an Advisor, and Fable Planner uses only the Planner operations.
+- Give Planner support a new plugin version so marketplace upgrade and reinstall replace the affected Advisor-only `0.5.0` cache instead of reusing it.
 - Add an optional Planner route: a configured model drafts and revises the plan, while omission keeps planning with the root Codex model.
 - Let Claude Fable 5 act as Planner through bounded `create_plan` and `revise_plan` tools while preserving its existing Advisor workflow.
 - Run Planner and Advisor through a root-mediated approval loop that stops on `PLAN_APPROVED`, caps review at five rounds, and fails closed before execution when approval or a required route is unavailable.

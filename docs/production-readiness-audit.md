@@ -4,7 +4,7 @@ Audit date: 2026-07-12. Baseline: `a674a81` (`0.4.0`).
 
 ## Release blockers found
 
-| Severity | Shortcoming | Resolution in 0.5.0 |
+| Severity | Shortcoming | Resolution |
 | --- | --- | --- |
 | High | The README led with internal routing details and did not explain the product's general multi-model role workflow. | Lead with a plain-language definition, a provider-neutral workflow diagram, the value proposition, and then installation and examples. |
 | High | Claude Fable 5 was developed separately, so the launch branch could not truthfully advertise the requested advisor workflow. | Integrate the opt-in, root-directed Fable bridge, disabled by default, with login checks, runtime-model confirmation, and fail-closed review decisions. |
@@ -13,12 +13,13 @@ Audit date: 2026-07-12. Baseline: `a674a81` (`0.4.0`).
 | Medium | Restore-state persistence failure ignored the config rollback status and could report false success. | Validate rollback status and report that managed fields may remain whenever rollback is not proven. |
 | Medium | Duplicated partial state validation accepted impossible schema/policy, nested restore, and scalar-conversion combinations that could make disable replace unrelated configuration. | Use one shared full-state validator for native and Fable paths, with exact schema-specific keys, snapshots, scalar/MCP relationships, routes, and marker-owned policy strings. |
 | Medium | Fable runtime confirmation accepted any extra model as long as `claude-fable-5` also appeared. | Require the pinned Fable primary and an exact allowlist of observed Claude Code helper models; reject every unknown additional model. |
+| Medium | Planner support reused the same `0.5.0` identity as an earlier Advisor-only bundle, allowing a stale marketplace/cache to keep role-obsolete instructions. | Release the complete Planner contract as `0.5.1`, treat explicit seat labels as authoritative, and lifecycle-test upgrade from the exact affected bundle into an installed Planner-capable package. |
 | Medium | Status always exited zero for conflicts, overrides, incomplete controls, or unavailable roles. | Add `--require-effective` and negative-path coverage. |
 | Medium | Cross-provider setup spans separate role-file and native-policy transactions. | Detect orphaned managed roles, require bounded cleanup on phase-two failure, and document interruption recovery. |
 | Medium | The skill explained only fixed advisor/executor seats, leaving arbitrary project roles, workflow ordering, Goal behavior, and permissions ambiguous. | Add native custom-role creation rules, project and personal scopes, user ownership, provider checks, bounded handoffs, and explicit Goal/permission boundaries. |
 | Medium | GitHub Actions used mutable major tags and the repository did not require SHA pinning. | Pin actions to full reviewed SHAs, restrict Actions, and add Dependabot updates. |
 | Medium | Windows support was claimed without CI or the custom-role update/removal limitation. | Add Windows/macOS portability checks and document the Windows fail-closed boundary. |
-| Medium | Released version `0.4.0` had no immutable tag or GitHub release. | Add a tag/version release gate; `0.5.0` must ship from a signed `v0.5.0` tag and matching GitHub release. |
+| Medium | Released version `0.4.0` had no immutable tag or GitHub release. | Add a tag/version release gate; `0.5.1` must ship from a signed `v0.5.1` tag and matching GitHub release. |
 | Low | Code scanning, dependency alerts, private vulnerability reporting, ownership, contribution, and release policies were absent. | Add CodeQL, Dependabot, `SECURITY.md`, `CODEOWNERS`, `CONTRIBUTING.md`, and `RELEASE.md`; enable repository security features. |
 | Low | CI had no static-quality baseline. | Add a pinned Ruff check and Dependabot updates for the development tool. |
 | Low | The documented fixed v2 concurrency count was stale. | Defer to the effective Codex/config limit instead of hard-coding a count. |

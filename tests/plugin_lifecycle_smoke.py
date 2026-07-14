@@ -2,9 +2,10 @@
 """Exercise a real Codex plugin install, Git upgrade, and both setup routes.
 
 A disposable bare Git marketplace is served over loopback HTTP. The real Codex
-CLI installs 0.3.0, runs its documented marketplace-upgrade command after 0.5.0
-is pushed to that Git remote, installs the refreshed package, verifies its cache,
-and runs native-policy plus custom-agent setup/status/cleanup in isolation.
+CLI installs the affected Advisor-only 0.5.0 bundle, runs its documented
+marketplace-upgrade command after 0.5.1 is pushed to that Git remote, installs
+the refreshed package, verifies the new cache and Planner contract, and runs
+native-policy plus custom-agent setup/status/cleanup in isolation.
 """
 
 from __future__ import annotations
@@ -28,9 +29,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_ROOT = REPO_ROOT / "plugins" / "codex-orchestration"
 PLUGIN_ID = "codex-orchestration@codex-orchestration"
 MARKETPLACE_NAME = "codex-orchestration"
-OLD_RELEASE = "d93b86e735a12a9fefcfd35b0b35199ce3e9a2a7"
-OLD_VERSION = "0.3.0"
-NEW_VERSION = "0.5.0"
+OLD_RELEASE = "a1d9c546665c3253cdcaa8fe5c0c060199a6126c"
+OLD_VERSION = "0.5.0"
+NEW_VERSION = "0.5.1"
 COMMAND_TIMEOUT_SECONDS = 60
 
 
@@ -371,6 +372,17 @@ def main() -> int:
             assert_equal(
                 old_install.get("version"), OLD_VERSION, "initial install version"
             )
+            old_installed_root = Path(old_install["installedPath"]).resolve()
+            old_skill = (
+                old_installed_root
+                / "skills"
+                / "codex-orchestration"
+                / "SKILL.md"
+            ).read_text(encoding="utf-8")
+            if "setup planner: Claude Fable 5 High" in old_skill:
+                raise SmokeFailure("old Advisor-only cache unexpectedly supports Planner")
+            if "built-in advisor label" not in old_skill:
+                raise SmokeFailure("old release fixture is not the affected Advisor-only cache")
 
             old_discovery = run_json(
                 [codex, "plugin", "list", "--json"], cwd=project, env=env
@@ -475,13 +487,40 @@ def main() -> int:
                 entry.get("version"), current_version, "discovered new version"
             )
             assert_equal(entry.get("enabled"), True, "new plugin enabled state")
+            refreshed_source = entry.get("marketplaceSource") or {}
+            assert_equal(
+                refreshed_source.get("sourceType"),
+                "git",
+                "refreshed marketplace source type",
+            )
+            assert_equal(
+                refreshed_source.get("source"),
+                marketplace_url,
+                "refreshed marketplace URL",
+            )
 
             installed_root = Path(new_install["installedPath"]).resolve()
+            if installed_root == old_installed_root:
+                raise SmokeFailure(
+                    "0.5.1 reused the Advisor-only 0.5.0 cache directory"
+                )
             assert_equal(
                 file_tree(installed_root),
                 file_tree(PLUGIN_ROOT),
                 "installed package contents",
             )
+            installed_skill = (
+                installed_root / "skills" / "codex-orchestration" / "SKILL.md"
+            ).read_text(encoding="utf-8")
+            for expected in (
+                "Explicit seat labels are authoritative",
+                "never reinterpret a supplied `planner:` model as an Advisor",
+                "Fable Planner uses `create_plan` and `revise_plan`",
+            ):
+                if expected not in installed_skill:
+                    raise SmokeFailure(
+                        f"Upgraded installed skill is missing Planner contract {expected!r}"
+                    )
 
             installed_fable_mcp = (
                 installed_root

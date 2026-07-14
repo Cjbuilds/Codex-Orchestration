@@ -29,6 +29,8 @@ Support these simple forms:
 
 `remove custom roles` cleans only verified plugin-managed advisor/executor files. Arbitrary native roles are user-owned. An invocation with seats and work but no control verb is a current-task override and must not rewrite config.
 
+Explicit seat labels are authoritative. `planner:` configures only Planner, `advisor:` configures only Advisor, and `executor:` configures only Executor. Never infer or change a seat from a model's historical use, default role, cached description, or provider; in particular, never reinterpret a supplied `planner:` model as an Advisor. Saved defaults may fill only omitted seats and never override a seat supplied in the current invocation.
+
 The executor is required for setup or a task-local override. It is not required for a custom-role creation request. Planner and advisor are optional: omitted planner means the current root model plans, while omitted advisor means `advisor: none`. Do not ask separate planner or advisor questions unless the user asks for help choosing them.
 
 For both persistent setup and task-local overrides, reject an identical Planner and Advisor route: the same direct model ID, the same custom-agent name, or Claude Fable 5 in both seats. Independent critique is required.
@@ -46,6 +48,8 @@ Because explicit skills may not reload from a bare reply, include a ready-to-cop
 ```
 
 For a task-local request, append `— <original task>`. Keep every supplied modifier. Do not lose the user's task while collecting a model choice.
+
+Before applying setup or starting task-local work, report the normalized mapping as `Planner`, `Advisor`, and `Executor` in that order. Compare it with the user's explicit labels. If an exact seat cannot run, report that seat as unavailable and stop under the required-route rules; never move its model to another seat. When the user supplies Planner and Executor but omits Advisor, report `Advisor: none`.
 
 If an old prompt contains `orchestrator:`, explain that the current task model already owns that role. Ignore that seat instead of switching or persisting it.
 
@@ -304,7 +308,7 @@ Do not persist a best-effort flag. An explicit task override applies only to tha
 
 Reject persistent setup or task-local activation when configured Planner and Advisor routes are identical: the same direct model ID, same custom-agent name, or Fable in both seats. Independent critique is the reason for the Advisor role.
 
-For Fable Planner calls, use the configured MCP server's `create_plan` and `revise_plan` tools. For Fable Advisor calls, use `review_plan`. The policy authorizes only the root to make these read-only calls; Executors must never use or direct them.
+Fable Planner uses `create_plan` and `revise_plan`; Fable Advisor uses `review_plan`. These operations are seat-bound: never send a supplied Fable Planner to `review_plan`, and never use an Advisor route to create or revise the plan. The policy authorizes only the root to make these read-only calls; Executors must never use or direct them.
 
 ## Executor handoff
 
