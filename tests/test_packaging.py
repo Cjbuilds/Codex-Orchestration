@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
+import subprocess
 import unittest
 
 
@@ -11,6 +13,171 @@ SKILL_ROOT = PLUGIN_ROOT / "skills" / "codex-orchestration"
 
 
 class PackagingTests(unittest.TestCase):
+    def test_pull_request_review_attestation_is_strict_json(self) -> None:
+        template = (REPO_ROOT / ".github/pull_request_template.md").read_text(
+            encoding="utf-8"
+        )
+        start = "<!-- codex-review-attestation:start -->"
+        end = "<!-- codex-review-attestation:end -->"
+        self.assertEqual(template.count(start), 1)
+        self.assertEqual(template.count(end), 1)
+        attestation = json.loads(template.split(start, 1)[1].split(end, 1)[0])
+
+        self.assertEqual(
+            set(attestation),
+            {
+                "schema",
+                "risk_tier",
+                "repository",
+                "base_branch",
+                "reviewed_head_sha",
+                "reviewer_identity",
+                "reviewer_route",
+                "threat_model",
+                "negative_test_evidence",
+                "findings_disposition",
+            },
+        )
+        self.assertEqual(attestation["schema"], 1)
+        self.assertIn(attestation["risk_tier"], {"docs", "behavior", "security-state"})
+        self.assertEqual(attestation["repository"], "Cjbuilds/Codex-Orchestration")
+        self.assertEqual(attestation["base_branch"], "main")
+        self.assertRegex(attestation["reviewed_head_sha"], r"^[0-9a-f]{40}$")
+        self.assertIsInstance(attestation["negative_test_evidence"], list)
+        self.assertNotIn("proof", template.lower().split(start, 1)[1])
+
+    def test_versioned_hooks_use_the_preflight_source_of_truth(self) -> None:
+        pre_commit = REPO_ROOT / ".githooks/pre-commit"
+        pre_push = REPO_ROOT / ".githooks/pre-push"
+
+        self.assertEqual(
+            pre_commit.read_text(encoding="utf-8"),
+            "#!/bin/sh\nexec python3 scripts/preflight.py quick\n",
+        )
+        self.assertEqual(
+            pre_push.read_text(encoding="utf-8"),
+            "#!/bin/sh\nexec python3 scripts/preflight.py full\n",
+        )
+        for hook in (pre_commit, pre_push):
+            index = subprocess.run(
+                ["git", "ls-files", "--stage", hook.relative_to(REPO_ROOT).as_posix()],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual(index.returncode, 0, index.stderr)
+            self.assertTrue(index.stdout.startswith("100755 "), index.stdout)
+
+    def test_workflow_triggers_and_concurrency_are_bounded(self) -> None:
+        ci = (REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        codeql = (REPO_ROOT / ".github/workflows/codeql.yml").read_text(
+            encoding="utf-8"
+        )
+
+        for workflow in (ci, codeql):
+            trigger_block = workflow.split("permissions:", 1)[0]
+            self.assertRegex(trigger_block, r"(?m)^  push:\n    branches: \[main\]$")
+            self.assertRegex(trigger_block, r"(?m)^  pull_request:")
+            self.assertNotRegex(trigger_block, r"(?m)^    branches:.*feature")
+            self.assertIn("concurrency:", workflow)
+            self.assertIn("github.event.pull_request.number || github.ref", workflow)
+            self.assertIn(
+                "cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
+                workflow,
+            )
+        self.assertIn('cron: "17 4 * * 1"', codeql)
+        self.assertIn("types: [opened, synchronize, reopened, edited]", ci)
+        self.assertNotIn("types: [opened, synchronize, reopened, edited]", codeql)
+
+    def test_seven_ci_contexts_use_strict_targets_and_codeql_stays_native(self) -> None:
+        ci = (REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        codeql = (REPO_ROOT / ".github/workflows/codeql.yml").read_text(
+            encoding="utf-8"
+        )
+
+        expected_targets = {
+            "quality": "quality",
+            "test": "test",
+            "plugin-lifecycle": "lifecycle",
+            "legacy-client-guard": "legacy",
+            "portability": "portability",
+        }
+        for job, target in expected_targets.items():
+            match = re.search(
+                rf"(?ms)^  {re.escape(job)}:\n(.*?)(?=^  [a-z][a-z0-9-]*:|\Z)",
+                ci,
+            )
+            self.assertIsNotNone(match, job)
+            self.assertEqual(
+                match.group(1).count(f"scripts/preflight.py {target} --ci"), 1, job
+            )
+
+        self.assertIn('python-version: ["3.11", "3.13"]', ci)
+        self.assertIn("name: portability (${{ matrix.os }})", ci)
+        self.assertIn("os: [macos-latest, windows-latest]", ci)
+        self.assertIn("name: analyze (python)", codeql)
+        self.assertEqual(codeql.count("github/codeql-action/analyze@"), 1)
+
+    def test_workflow_actions_permissions_and_cli_versions_remain_pinned(self) -> None:
+        ci = (REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        codeql = (REPO_ROOT / ".github/workflows/codeql.yml").read_text(
+            encoding="utf-8"
+        )
+        checkout = "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0"
+        setup_python = (
+            "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1"
+        )
+        setup_node = "actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e"
+        codeql_init = (
+            "github/codeql-action/init@02c5e83432fe5497fd85b873b6c9f16a8578e1d9"
+        )
+        codeql_analyze = (
+            "github/codeql-action/analyze@02c5e83432fe5497fd85b873b6c9f16a8578e1d9"
+        )
+
+        self.assertEqual(ci.count(checkout), 5)
+        self.assertEqual(codeql.count(checkout), 1)
+        self.assertEqual(ci.count(setup_python), 5)
+        self.assertEqual(codeql.count(setup_python), 0)
+        self.assertEqual(ci.count(setup_node), 2)
+        self.assertEqual(codeql.count(codeql_init), 1)
+        self.assertEqual(codeql.count(codeql_analyze), 1)
+        self.assertIn("@openai/codex@0.144.1", ci)
+        self.assertIn("@openai/codex@0.142.5", ci)
+        self.assertRegex(ci, r"(?ms)^permissions:\n  contents: read\n\njobs:")
+        self.assertRegex(
+            codeql,
+            r"(?ms)^permissions:\n  contents: read\n  security-events: write\n\njobs:",
+        )
+
+    def test_quality_uses_immutable_comparison_shas_and_no_replaced_inline_checks(self) -> None:
+        workflow = (REPO_ROOT / ".github/workflows/ci.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("fetch-depth: 0", workflow)
+        self.assertIn("github.event.pull_request.base.sha", workflow)
+        self.assertIn("github.event.pull_request.head.sha", workflow)
+        self.assertIn("github.event.before", workflow)
+        self.assertIn("github.sha", workflow)
+        self.assertIn('--base-sha "$BASE_SHA"', workflow)
+        self.assertIn('--head-sha "$HEAD_SHA"', workflow)
+        self.assertIn('--event-path "$GITHUB_EVENT_PATH"', workflow)
+        self.assertLess(
+            workflow.index("Install pinned development tools"),
+            workflow.index("scripts/preflight.py quality --ci"),
+        )
+        for old_command in (
+            "python -m ruff check plugins tests scripts",
+            "python -m compileall -q plugins tests",
+            "python -m unittest discover -s tests -v",
+            "python tests/plugin_lifecycle_smoke.py",
+            "features.multi_agent_v2.multi_agent_mode_hint_text",
+        ):
+            self.assertNotIn(old_command, workflow)
+
     def test_plugin_marketplace_and_skill_names_are_aligned(self) -> None:
         manifest = json.loads(
             (PLUGIN_ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
@@ -105,7 +272,7 @@ class PackagingTests(unittest.TestCase):
         smoke = REPO_ROOT / "tests" / "plugin_lifecycle_smoke.py"
 
         self.assertTrue(smoke.is_file())
-        self.assertIn("python tests/plugin_lifecycle_smoke.py", workflow)
+        self.assertIn("python scripts/preflight.py lifecycle --ci", workflow)
         self.assertIn("@openai/codex@0.142.5", workflow)
         self.assertIn("@openai/codex@0.144.1", workflow)
         smoke_text = smoke.read_text(encoding="utf-8")

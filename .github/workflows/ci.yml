@@ -2,7 +2,13 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -14,13 +20,22 @@ jobs:
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.11"
       - name: Install pinned development tools
         run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
-      - name: Lint Python sources
-        run: python -m ruff check plugins tests scripts
+      - name: Run strict quality and release gates
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: >-
+          python scripts/preflight.py quality --ci
+          --base-sha "$BASE_SHA"
+          --head-sha "$HEAD_SHA"
+          --event-path "$GITHUB_EVENT_PATH"
 
   test:
     runs-on: ubuntu-latest
@@ -35,10 +50,8 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Compile Python sources
-        run: python -m compileall -q plugins tests
-      - name: Run tests
-        run: python -m unittest discover -s tests -v
+      - name: Run strict test gate
+        run: python scripts/preflight.py test --ci
 
   plugin-lifecycle:
     runs-on: ubuntu-latest
@@ -56,8 +69,8 @@ jobs:
           node-version: "22"
       - name: Install the Codex CLI used by the lifecycle test
         run: npm install --global @openai/codex@0.144.1
-      - name: Smoke-test install, upgrade, native routing, and custom agents
-        run: python tests/plugin_lifecycle_smoke.py
+      - name: Run strict plugin lifecycle gate
+        run: python scripts/preflight.py lifecycle --ci
 
   legacy-client-guard:
     runs-on: ubuntu-latest
@@ -65,17 +78,16 @@ jobs:
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11"
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: "22"
       - name: Install the older shared-config client
         run: npm install --global @openai/codex@0.142.5
-      - name: Confirm the installer must use its compatibility fallback
-        run: |
-          if codex -c 'features.multi_agent_v2.multi_agent_mode_hint_text="PROBE"' features list; then
-            echo "Expected Codex 0.142.5 to reject the newer structured policy field"
-            exit 1
-          fi
+      - name: Run strict legacy client gate
+        run: python scripts/preflight.py legacy --ci
 
   portability:
     name: portability (${{ matrix.os }})
@@ -91,16 +103,5 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.11"
-      - name: Compile Python sources
-        run: python -m compileall -q plugins tests
-      - name: Run platform-neutral contract tests
-        run: >-
-          python -m unittest -v
-          tests.test_inspect_models
-          tests.test_packaging
-          tests.test_skill_contract
-      - name: Verify Windows custom-agent updates fail closed
-        if: runner.os == 'Windows'
-        run: >-
-          python -m unittest -v
-          tests.test_configure_orchestration.ConfigureOrchestrationTests.test_windows_existing_file_update_fails_closed
+      - name: Run strict portability gate
+        run: python scripts/preflight.py portability --ci
