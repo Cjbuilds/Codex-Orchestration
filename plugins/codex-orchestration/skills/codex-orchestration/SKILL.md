@@ -29,6 +29,29 @@ Support these simple forms:
 
 `remove custom roles` cleans only verified plugin-managed advisor/executor files. Arbitrary native roles are user-owned. An invocation with seats and work but no control verb is a current-task override and must not rewrite config.
 
+### Ordered backup routes
+
+Persistent setup accepts repeatable `--executor-backup`, `--planner-backup`, and
+`--advisor-backup` options. Each value must be exactly `model:<exact-id>@<effort>`,
+`agent:<name>`, or `fable:<effort>` for Planner/Advisor only. There are at most
+two backups per seat; Fable is never an Executor and may occupy only one planning
+position across all chains. Setup previews and status render candidates in order.
+Primary-only setups retain the same behavior and now persist exact empty backup
+arrays in state schema/policy 4. Schemas 1–3 are accepted for status/disable and
+upgrade to schema 4 on the next successful setup while preserving restore data.
+
+Backups are policy-directed failover, never an engine-level automatic scheduler.
+Only a root prompt can advance a cursor after a mechanically classified failure.
+`ELIGIBLE_PRESTART` requires proven local unavailability or explicit spawn
+rejection with no child/agent/task ID. `STARTED` never advances Executor;
+`AMBIGUOUS` and `UNKNOWN` freeze. A valid deliverable, PLAN_REVISE,
+disagreement, refusal, or perceived quality never triggers fallback. A task-local
+primary replaces that seat's full saved chain; omitted seats retain their saved
+chain; backup-only task overrides are invalid. Every activation carries a
+versioned envelope with cursor, canonical identity, episode state, activation IDs,
+started child identities, and superseded attempts. Missing or inconsistent state
+is `STATE_UNKNOWN` and freezes further activation.
+
 Explicit seat labels are authoritative. `planner:` configures only Planner, `advisor:` configures only Advisor, and `executor:` configures only Executor. Never infer or change a seat from a model's historical use, default role, cached description, or provider; in particular, never reinterpret a supplied `planner:` model as an Advisor. Saved defaults may fill only omitted seats and never override a seat supplied in the current invocation.
 
 The executor is required for setup or a task-local override. It is not required for a custom-role creation request. Planner and advisor are optional: omitted planner means the current root model plans, while omitted advisor means `advisor: none`. Do not ask separate planner or advisor questions unless the user asks for help choosing them.
@@ -111,6 +134,26 @@ python3 <skill-dir>/scripts/configure_native_routing.py \
 Add `--advisor-model` and `--advisor-effort` for a same-provider Codex advisor. For Claude Fable 5, use `--advisor-fable`; add `--advisor-effort low|medium|high|xhigh|max` when the user chooses one. Omitting Fable effort defaults to `high`, while user-facing `ultra` is normalized to Claude Code's `max`. The configurator verifies that the installed Claude Code CLI advertises the selected effective effort. It also requires Claude Code to be logged in through a first-party Pro or Max account, chooses an available Python 3.11+ MCP launcher, and performs only an auth/capability check during setup. It never extracts a token, writes a credential, or makes a model call during setup or status. Omission persists `advisor: none`.
 
 Add `--planner-model` and `--planner-effort` for a same-provider Planner. For Claude Fable 5, use `--planner-fable`; add `--planner-effort low|medium|high|xhigh|max` when the user chooses one. Planner omission persists no Planner route and means the root plans. A configured Planner and Advisor must not resolve to the same model or agent route; independent review is required.
+
+For example, a durable ordered chain can be previewed with:
+
+```bash
+python3 <skill-dir>/scripts/configure_native_routing.py \
+  --executor-model gpt-5.6-luna \
+  --executor-backup model:gpt-5.6-sol@high \
+  --executor-backup agent:recovery_worker \
+  --planner-model gpt-5.6-sol \
+  --planner-backup fable:high \
+  --advisor-model gpt-5.6-terra
+```
+
+Direct route identity is `(provider_id, model_id)` and excludes effort. Custom
+agent aliases are resolved from their TOML `model` and `model_provider`; if an
+effective Planner/Advisor identity cannot be proven independent, setup fails
+closed. Direct routes inherit the root provider and must be revalidated at task
+runtime. Route grammar cannot add sandbox, approval, service-tier, Goal, or
+authority extensions; backup activation inherits the root authority cap unchanged
+or narrower.
 
 The configurator capability-tests the complete four-field preset on the active target, `codex` on PATH when different, the known macOS Desktop binary when present, and every explicit `--compat-bin`. A successful isolated config probe means that client can parse the preset; it is not a live child-model confirmation. Report `route accepted` or `used and confirmed` only from the exact live spawn evidence defined below. Ask about other Codex/IDE installations that share this config only when the environment suggests they exist, and pass their binaries explicitly. If the request or active host indicates a named `--profile`, explain that normal setup manages the default user layer and is not verified for that profile; do not add a routine question for users with no profile signal. If a checked client rejects any managed field, stop before apply. Recommend updating it or using the task-local fallback. `--allow-incompatible-client` requires a separate explicit user decision because it can make the shared config unreadable to that client.
 

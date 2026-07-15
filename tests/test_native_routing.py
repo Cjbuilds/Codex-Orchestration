@@ -343,6 +343,36 @@ class NativeRoutingTests(unittest.TestCase):
 
         self.assertIn("root task model, you are the orchestrator", mode)
         self.assertIn("Codex still decides whether a plan or subagent helps", mode)
+        self.assertIn("routing_envelope_version=1", mode)
+        self.assertIn("started_child_ids", mode)
+        fable_backup = {
+            "kind": "fable",
+            "model": NATIVE.FABLE_MODEL,
+            "effort": "high",
+            "server": "fable-advisor-python3",
+        }
+        _, backup_usage = NATIVE.build_policy(
+            executor,
+            planner,
+            advisor,
+            planner_backups=[fable_backup],
+        )
+        self.assertIn(
+            "planner:1:anthropic-claude-code/claude-fable-5@high",
+            backup_usage,
+        )
+        _, executor_backup_usage = NATIVE.build_policy(
+            executor,
+            planner,
+            advisor,
+            executor_backups=[
+                {"kind": "model", "model": "gpt-5.6-terra", "effort": "high"}
+            ],
+        )
+        self.assertIn(
+            "executor candidate 1 => model = \"gpt-5.6-terra\", reasoning_effort = \"high\"",
+            executor_backup_usage,
+        )
         self.assertIn("never spawn descendants", mode)
         self.assertIn("Explicit user instructions win", mode)
         self.assertIn("Persistent and task-local Planner and Advisor routes", mode)
@@ -531,15 +561,75 @@ class NativeRoutingTests(unittest.TestCase):
         state = json.loads(
             (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
         )
-        self.assertEqual(state["schema"], 3)
-        self.assertEqual(state["policy_version"], 3)
+        self.assertEqual(state["schema"], 4)
+        self.assertEqual(state["policy_version"], 4)
+        self.assertEqual(state["backups"], {"executor": [], "planner": [], "advisor": []})
         self.assertEqual(state["planner"]["effort"], "xhigh")
 
         status = self.run_script("--status", "--require-effective")
         self.assertIn("Planner: gpt-5.6-sol@xhigh", status.stdout)
         self.assertEqual(status.returncode, 0)
 
-    def test_legacy_state_schemas_upgrade_to_three_without_losing_restore(self) -> None:
+    def test_ordered_backup_setup_persists_and_renders_each_chain(self) -> None:
+        setup = self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-backup",
+            "model:gpt-5.6-sol@high",
+            "--planner-model",
+            "gpt-5.6-sol",
+            "--planner-backup",
+            "model:gpt-5.6-terra@high",
+            "--advisor-model",
+            "gpt-5.6-luna",
+            "--apply",
+        )
+        self.assertIn("Executor: gpt-5.6-luna@high -> gpt-5.6-sol@high", setup.stdout)
+        state = json.loads((self.home / NATIVE.STATE_FILENAME).read_text())
+        self.assertEqual(state["schema"], 4)
+        self.assertEqual(
+            state["backups"]["executor"],
+            [{"kind": "model", "model": "gpt-5.6-sol", "effort": "high"}],
+        )
+        status = self.run_script("--status")
+        self.assertIn("Executor candidate 1: gpt-5.6-sol@high — READY", status.stdout)
+
+    def test_status_marks_verified_custom_agent_backup_ready(self) -> None:
+        self.write_personal_agent("recovery_worker")
+        self.run_script(
+            "--executor-model",
+            "gpt-5.6-sol",
+            "--executor-backup",
+            "agent:recovery_worker",
+            "--apply",
+        )
+        status = self.run_script("--status", "--require-effective")
+        self.assertEqual(status.returncode, 0)
+        self.assertIn(
+            "Executor candidate 1: custom agent recovery_worker — READY",
+            status.stdout,
+        )
+
+    def test_backup_specs_are_rejected_for_status_disable_and_caps(self) -> None:
+        for action in (("--status",), ("--disable",)):
+            result = self.run_script(*action, "--executor-backup", "model:gpt-5.6-sol@high", check=False)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("does not accept seat settings", result.stderr)
+        result = self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-backup",
+            "model:gpt-5.6-sol@high",
+            "--executor-backup",
+            "model:gpt-5.6-terra@high",
+            "--executor-backup",
+            "model:gpt-5.6-luna@low",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("more than two backups", result.stderr)
+
+    def test_legacy_state_schemas_upgrade_to_four_without_losing_restore(self) -> None:
         for legacy_schema in (1, 2):
             with self.subTest(schema=legacy_schema):
                 setup_arguments = ["--executor-model", "gpt-5.6-luna"]
@@ -553,6 +643,7 @@ class NativeRoutingTests(unittest.TestCase):
                 legacy["schema"] = legacy_schema
                 legacy["policy_version"] = legacy_schema
                 legacy.pop("planner", None)
+                legacy.pop("backups", None)
                 legacy["managed"]["mode"] = (
                     f"{NATIVE.MANAGED_MARKER}\nlegacy schema {legacy_schema} mode"
                 )
@@ -577,8 +668,9 @@ class NativeRoutingTests(unittest.TestCase):
                     "--apply",
                 )
                 upgraded = json.loads(state_path.read_text(encoding="utf-8"))
-                self.assertEqual(upgraded["schema"], 3)
-                self.assertEqual(upgraded["policy_version"], 3)
+                self.assertEqual(upgraded["schema"], 4)
+                self.assertEqual(upgraded["policy_version"], 4)
+                self.assertEqual(upgraded["backups"], {"executor": [], "planner": [], "advisor": []})
                 self.assertEqual(upgraded["previous"], original_previous)
                 self.assertEqual(upgraded["planner"]["model"], "gpt-5.6-sol")
                 if legacy_schema == 2:

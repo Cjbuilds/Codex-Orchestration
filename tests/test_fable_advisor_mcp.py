@@ -341,6 +341,119 @@ class FableAdvisorMcpTests(unittest.TestCase):
         with self.assertRaisesRegex(FABLE.AdvisorError, "state is invalid"):
             FABLE.load_fable_route(self.home)
 
+    def test_backup_candidate_requires_exact_activation_identity(self) -> None:
+        self.write_state(
+            schema=3,
+            planner={"kind": "model", "model": "gpt-5.6-sol", "effort": "high"},
+        )
+        state_path = self.home / FABLE.STATE_FILENAME
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+        payload["schema"] = 4
+        payload["policy_version"] = 4
+        payload["backups"] = {
+            "executor": [],
+            "planner": [
+                {
+                    "kind": "fable",
+                    "model": "claude-fable-5",
+                    "effort": "xhigh",
+                    "server": "fable-advisor-python3",
+                }
+            ],
+            "advisor": [],
+        }
+        payload["managed"]["mcp"] = {"fable-advisor-python3": True}
+        payload["previous"]["mcp"] = {
+            "fable-advisor-python3": {"known": True, "present": False}
+        }
+        state_path.write_text(json.dumps(payload), encoding="utf-8")
+        route = payload["backups"]["planner"][0]
+        activation = FABLE.candidate_activation_id("planner", 1, route)
+        with self.assertRaisesRegex(FABLE.AdvisorError, "activation identity"):
+            FABLE.load_fable_route(
+                self.home,
+                seat="planner",
+                candidate_index=1,
+            )
+        candidate = FABLE.load_fable_route(
+            self.home,
+            seat="planner",
+            candidate_index=1,
+            activation_id=activation,
+        )
+        self.assertEqual(candidate["effort"], "xhigh")
+        self.assertEqual(candidate["activation_id"], activation)
+        self.assertEqual(
+            FABLE.load_fable_route(
+                self.home,
+                seat="planner",
+                candidate_index=1,
+                activation_id=activation,
+            )["activation_id"],
+            activation,
+        )
+        with self.assertRaisesRegex(FABLE.AdvisorError, "activation identity"):
+            FABLE.load_fable_route(
+                self.home,
+                seat="planner",
+                candidate_index=1,
+                activation_id="planner:1:forged",
+            )
+        with (
+            mock.patch.dict(os.environ, {"CODEX_HOME": str(self.home)}),
+            mock.patch.object(
+                FABLE,
+                "check_claude_auth",
+                return_value={
+                    "auth_method": "claude.ai",
+                    "api_provider": "firstParty",
+                },
+            ),
+        ):
+            status = FABLE.status()
+        self.assertEqual(status["seats"]["planner"]["effort"], "xhigh")
+        self.assertEqual(status["seats"]["planner"]["candidate_index"], "1")
+
+    def test_tool_failure_returns_exhaustive_redacted_outcome_provenance(self) -> None:
+        expected_activation = FABLE.candidate_activation_id(
+            "advisor",
+            0,
+            self.route("high"),
+        )
+        timeout = subprocess.TimeoutExpired(["claude"], 600, output="SECRET", stderr="SECRET")
+        with (
+            mock.patch.dict(os.environ, {"CODEX_HOME": str(self.home)}),
+            mock.patch.object(FABLE, "resolve_claude", return_value=Path("/fake/claude")),
+            mock.patch.object(
+                FABLE.subprocess,
+                "run",
+                side_effect=[self.auth_result(), timeout],
+            ),
+        ):
+            response = FABLE.handle_request(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 9,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "review_plan",
+                        "arguments": {
+                            "packet": "review packet",
+                            "activation_id": expected_activation,
+                            "candidate_index": 0,
+                        },
+                    },
+                }
+            )
+        self.assertTrue(response["result"]["isError"])
+        payload = json.loads(response["result"]["content"][0]["text"])
+        self.assertNotIn("SECRET", json.dumps(payload))
+        self.assertEqual(payload["outcome"]["code"], "TRANSPORT_FAILURE")
+        self.assertEqual(payload["outcome"]["state"], "ELIGIBLE_STARTED")
+        self.assertEqual(payload["outcome"]["activation_id"], expected_activation)
+        self.assertEqual(payload["outcome"]["candidate_index"], 0)
+
+
     def test_authorization_state_tampering_fails_before_any_subprocess(self) -> None:
         mutations = {
             "policy version": lambda payload: payload.update(policy_version=2),
