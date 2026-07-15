@@ -4,8 +4,10 @@
 The managed policy reserves stateless Planner and Advisor operations for the
 root; MCP requests do not carry caller identity, so the server cannot enforce
 that caller boundary. Each model call reloads and authorizes its seat from
-routing state, rechecks first-party Claude Code authentication, and uses a fresh
-no-tools/no-persistence process.
+routing state, rechecks Claude authentication (first-party login or managed
+token env), injects optional ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN from
+routing state into the forked process, and uses a fresh no-tools/no-persistence
+process.
 """
 
 from __future__ import annotations
@@ -31,18 +33,24 @@ SUPPORTED_EFFORTS = routing_state.FABLE_EFFORTS
 # some calls. Keep the runtime policy explicit and fail closed if that identity
 # rotates or any other model appears.
 FABLE_HELPER_MODEL = "claude-haiku-4-5-20251001"
-ALLOWED_RUNTIME_MODELS = frozenset({FABLE_MODEL, FABLE_HELPER_MODEL})
+# Always-allowed internal helper alongside the seat-pinned primary model.
+FABLE_HELPER_MODELS = frozenset({FABLE_HELPER_MODEL})
 CLAUDE_TIMEOUT_SECONDS = 600
 AUTH_TIMEOUT_SECONDS = 20
 # Applies to the combined user-controlled text sent by one model operation.
 MAX_INPUT_CHARS = 200_000
+# Parent-process provider overrides that must never leak into the Claude child
+# unless explicitly re-injected from saved routing state (managed keys only).
 SENSITIVE_ENV = {
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
     "CLAUDE_CODE_USE_BEDROCK",
     "CLAUDE_CODE_USE_VERTEX",
     "CLAUDE_CODE_USE_FOUNDRY",
 }
+# Child env keys that may be restored from routing state after sanitization.
+MANAGED_CLAUDE_ENV_KEYS = routing_state.CLAUDE_ENV_KEYS
 
 ADVISOR_SYSTEM_PROMPT = """You are Claude Fable 5 acting only as a plan advisor to Codex's root orchestrator.
 Review the supplied self-contained packet for material correctness, missing constraints, unsafe sequencing, ownership conflicts, and verification gaps. Do not edit files, call tools, spawn agents, contact the Planner or executors, or attempt implementation.
@@ -84,10 +92,38 @@ def codex_home() -> Path:
     return Path(value).expanduser() if value else Path.home() / ".codex"
 
 
-def sanitized_environment() -> dict[str, str]:
+def load_managed_claude_env(home: Path | None = None) -> dict[str, str]:
+    """Return validated Claude env overrides from routing state, or empty."""
+
+    try:
+        payload = _read_routing_state(home)
+    except AdvisorError:
+        return {}
+    raw = payload.get("claude_env")
+    if raw is None:
+        return {}
+    try:
+        return routing_state.validate_claude_env(raw)
+    except routing_state.RoutingStateError as exc:
+        raise AdvisorError("Saved Claude env overrides are invalid.") from exc
+
+
+def sanitized_environment(claude_env: dict[str, str] | None = None) -> dict[str, str]:
+    """Build the Claude child env: strip parent secrets, inject managed overrides.
+
+    Managed ``ANTHROPIC_BASE_URL`` / ``ANTHROPIC_AUTH_TOKEN`` from routing state
+    are applied only after parent values for those names are removed. Other
+    sensitive provider selectors remain stripped.
+    """
+
     env = os.environ.copy()
     for name in SENSITIVE_ENV:
         env.pop(name, None)
+    if claude_env:
+        for key in MANAGED_CLAUDE_ENV_KEYS:
+            value = claude_env.get(key)
+            if value is not None:
+                env[key] = value
     return env
 
 
@@ -106,11 +142,16 @@ def resolve_claude() -> Path:
     raise AdvisorError("Claude Code is not installed or `claude` is not on PATH.")
 
 
-def _run_json(command: list[str], *, timeout: int) -> dict[str, Any]:
+def _run_json(
+    command: list[str],
+    *,
+    timeout: int,
+    claude_env: dict[str, str] | None = None,
+) -> dict[str, Any]:
     try:
         result = subprocess.run(
             command,
-            env=sanitized_environment(),
+            env=sanitized_environment(claude_env),
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -134,9 +175,32 @@ def _run_json(command: list[str], *, timeout: int) -> dict[str, Any]:
     return payload
 
 
-def check_claude_auth(claude: Path | None = None) -> dict[str, str]:
+def check_claude_auth(
+    claude: Path | None = None,
+    *,
+    claude_env: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Verify Claude Code auth, or skip first-party login when token overrides exist.
+
+    When managed ``ANTHROPIC_AUTH_TOKEN`` (optionally with ``ANTHROPIC_BASE_URL``)
+    is configured, authentication is delegated to the Claude CLI via those env
+    vars and first-party Pro/Max login is not required.
+    """
+
     executable = claude or resolve_claude()
-    payload = _run_json([str(executable), "auth", "status"], timeout=AUTH_TIMEOUT_SECONDS)
+    overrides = claude_env if claude_env is not None else load_managed_claude_env()
+    if overrides.get("ANTHROPIC_AUTH_TOKEN"):
+        # Token-backed routes still require a usable CLI binary; auth identity is
+        # established by the injected env, not by claude.ai session state.
+        return {
+            "auth_method": "env_token",
+            "api_provider": "configured",
+        }
+    payload = _run_json(
+        [str(executable), "auth", "status"],
+        timeout=AUTH_TIMEOUT_SECONDS,
+        claude_env=overrides,
+    )
     subscription = payload.get("subscriptionType")
     if not (
         payload.get("loggedIn") is True
@@ -145,8 +209,9 @@ def check_claude_auth(claude: Path | None = None) -> dict[str, str]:
         and subscription in {"pro", "max"}
     ):
         raise AdvisorError(
-            "Claude Code must be logged in through a first-party Pro or Max account; "
-            "run `claude auth login` and try again."
+            "Claude Code must be logged in through a first-party Pro or Max account, "
+            "or setup must provide ANTHROPIC_AUTH_TOKEN; "
+            "run `claude auth login` or re-run setup with --anthropic-auth-token."
         )
     return {"auth_method": "claude.ai", "api_provider": "firstParty"}
 
@@ -190,8 +255,16 @@ def _validate_seat(seat: str) -> Seat:
 
 def _validate_fable_route(route: Any, *, seat: Seat) -> dict[str, str]:
     if not isinstance(route, dict) or route.get("kind") != "fable":
-        raise AdvisorError(f"Claude Fable 5 is not the configured {seat}.")
-    return {"model": route["model"], "effort": route["effort"]}
+        raise AdvisorError(f"Claude Fable is not the configured {seat}.")
+    model = route.get("model")
+    effort = route.get("effort")
+    if not isinstance(model, str) or not model.strip():
+        raise AdvisorError(f"The saved {seat} Fable model is invalid.")
+    if not isinstance(effort, str) or not effort.strip():
+        raise AdvisorError(f"The saved {seat} Fable effort is invalid.")
+    # Prefer the saved model; empty/missing should never reach here after state
+    # validation, but default to FABLE_MODEL for defensive consistency with setup.
+    return {"model": model.strip() or FABLE_MODEL, "effort": effort}
 
 
 def load_fable_route(
@@ -225,18 +298,22 @@ def _first_non_empty_line(response: str) -> str:
     return next((line.strip() for line in response.splitlines() if line.strip()), "")
 
 
-def _validate_runtime_models(usage: Any) -> list[str]:
+def _validate_runtime_models(usage: Any, *, primary_model: str) -> list[str]:
+    """Require the seat-pinned primary plus only the exact helper allowlist."""
+
     raw_models = list(usage) if isinstance(usage, dict) else []
     if not all(isinstance(model, str) for model in raw_models):
         raise AdvisorError(
             "Runtime metadata reported a model outside the allowed Fable runtime policy."
         )
     used_models = sorted(raw_models)
-    if FABLE_MODEL not in used_models:
+    if primary_model not in used_models:
         raise AdvisorError(
-            "Runtime metadata did not confirm the pinned Claude Fable 5 primary model."
+            "Runtime metadata did not confirm the pinned Fable primary model "
+            f"{primary_model!r}."
         )
-    if not set(used_models).issubset(ALLOWED_RUNTIME_MODELS):
+    allowed = frozenset({primary_model}) | FABLE_HELPER_MODELS
+    if not set(used_models).issubset(allowed):
         raise AdvisorError(
             "Runtime metadata reported a model outside the allowed Fable runtime policy."
         )
@@ -255,7 +332,8 @@ def _invoke_fable(
 
     route = load_fable_route(seat=seat)
     claude = resolve_claude()
-    auth = check_claude_auth(claude)
+    claude_env = load_managed_claude_env()
+    auth = check_claude_auth(claude, claude_env=claude_env)
     command = [
         str(claude),
         "-p",
@@ -280,7 +358,7 @@ def _invoke_fable(
         result = subprocess.run(
             command,
             input=prompt,
-            env=sanitized_environment(),
+            env=sanitized_environment(claude_env),
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -303,15 +381,18 @@ def _invoke_fable(
         raise AdvisorError(f"Claude Fable 5 {operation} returned an unexpected response.")
     # Authorize the complete runtime identity set before interpreting or
     # returning any model-authored plan/review content.
-    used_models = _validate_runtime_models(payload.get("modelUsage"))
+    used_models = _validate_runtime_models(
+        payload.get("modelUsage"),
+        primary_model=route["model"],
+    )
     response = payload["result"].strip()
     signal = _first_non_empty_line(response)
     if signal not in allowed_signals:
         if operation == "plan review":
-            raise AdvisorError("Claude Fable 5 omitted the required plan decision.")
+            raise AdvisorError("Claude Fable omitted the required plan decision.")
         expected = " or ".join(sorted(allowed_signals))
         raise AdvisorError(
-            f"Claude Fable 5 {operation} omitted the required {expected} signal."
+            f"Claude Fable {operation} omitted the required {expected} signal."
         )
     return signal, response, route, auth, used_models
 
@@ -322,7 +403,7 @@ def _base_result(
     return {
         # ``model`` is the route's pinned primary identity; ``used_models``
         # preserves every runtime-reported model, including an allowed helper.
-        "model": FABLE_MODEL,
+        "model": route["model"],
         "effort": route["effort"],
         "auth_method": auth["auth_method"],
         "used_models": used_models,
@@ -440,7 +521,8 @@ def _configured_fable_seats() -> dict[str, dict[str, str]]:
 
 def status() -> dict[str, Any]:
     routes = _configured_fable_seats()
-    auth = check_claude_auth()
+    claude_env = load_managed_claude_env()
+    auth = check_claude_auth(claude_env=claude_env)
     seats = {
         seat: {"model": route["model"], "effort": route["effort"]}
         for seat, route in routes.items()
@@ -449,6 +531,7 @@ def status() -> dict[str, Any]:
         "available": True,
         "configured_seats": list(seats),
         "seats": seats,
+        "claude_env_configured": sorted(claude_env),
         **auth,
     }
     # Preserve the unambiguous legacy Advisor status fields.

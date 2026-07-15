@@ -162,6 +162,7 @@ class FableAdvisorMcpTests(unittest.TestCase):
             "CODEX_HOME": str(self.home),
             "ANTHROPIC_API_KEY": "must-not-leak",
             "ANTHROPIC_AUTH_TOKEN": "must-not-leak",
+            "ANTHROPIC_BASE_URL": "https://parent-must-not-leak.example",
             "CLAUDE_CODE_USE_BEDROCK": "1",
         }
         calls: list[tuple[list[str], dict[str, object]]] = []
@@ -223,6 +224,48 @@ class FableAdvisorMcpTests(unittest.TestCase):
             for name in FABLE.SENSITIVE_ENV:
                 self.assertNotIn(name, sanitized)
 
+    def test_managed_claude_env_is_injected_after_parent_strip(self) -> None:
+        self.write_state(
+            advisor=self.route("high"),
+            claude_env={
+                "ANTHROPIC_BASE_URL": "https://proxy.example/v1",
+                "ANTHROPIC_AUTH_TOKEN": "managed-token-value",
+            },
+        )
+        env = {
+            "CODEX_HOME": str(self.home),
+            "ANTHROPIC_API_KEY": "parent-key",
+            "ANTHROPIC_AUTH_TOKEN": "parent-token",
+            "ANTHROPIC_BASE_URL": "https://parent.example",
+        }
+        calls: list[tuple[list[str], dict[str, object]]] = []
+
+        def fake_run(
+            command: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            calls.append((command, kwargs))
+            # Token path skips auth status; only the model invocation runs.
+            return self.model_result("PLAN_APPROVED\nNo material gap found.")
+
+        with (
+            mock.patch.dict(os.environ, env, clear=False),
+            mock.patch.object(
+                FABLE, "resolve_claude", return_value=Path("/fake/claude")
+            ),
+            mock.patch.object(FABLE.subprocess, "run", side_effect=fake_run),
+        ):
+            result = FABLE.review_plan("Review this complete plan.")
+
+        self.assertEqual(result["decision"], "PLAN_APPROVED")
+        self.assertEqual(result["auth_method"], "env_token")
+        self.assertEqual(len(calls), 1)
+        child_env = calls[0][1]["env"]
+        self.assertIsInstance(child_env, dict)
+        self.assertEqual(child_env["ANTHROPIC_BASE_URL"], "https://proxy.example/v1")
+        self.assertEqual(child_env["ANTHROPIC_AUTH_TOKEN"], "managed-token-value")
+        self.assertNotIn("ANTHROPIC_API_KEY", child_env)
+        self.assertNotEqual(child_env.get("ANTHROPIC_AUTH_TOKEN"), "parent-token")
+
     def test_runtime_model_policy_accepts_only_fable_and_exact_allowed_helper(
         self,
     ) -> None:
@@ -259,7 +302,7 @@ class FableAdvisorMcpTests(unittest.TestCase):
             ),
             (
                 {FABLE.FABLE_HELPER_MODEL: {"outputTokens": 1}},
-                "did not confirm the pinned Claude Fable 5 primary model",
+                "did not confirm the pinned Fable primary model",
             ),
         )
         for model_usage, expected_error in rejected_scenarios:
@@ -274,6 +317,66 @@ class FableAdvisorMcpTests(unittest.TestCase):
                         model_usage=model_usage,
                     )
                 self.assertNotIn(secret, str(failure.exception))
+
+    def test_custom_fable_primary_model_is_pinned_and_confirmed(self) -> None:
+        custom = "claude-sonnet-4-20250514"
+        self.write_state(advisor={**self.route("high"), "model": custom})
+        calls: list[tuple[list[str], dict[str, object]]] = []
+
+        def fake_run(
+            command: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            calls.append((command, kwargs))
+            if command[-2:] == ["auth", "status"]:
+                return self.auth_result()
+            return self.model_result(
+                "PLAN_APPROVED\nNo material gap found.",
+                model_usage={
+                    custom: {"outputTokens": 12},
+                    FABLE.FABLE_HELPER_MODEL: {"outputTokens": 1},
+                },
+            )
+
+        with (
+            mock.patch.dict(os.environ, {"CODEX_HOME": str(self.home)}),
+            mock.patch.object(
+                FABLE, "resolve_claude", return_value=Path("/fake/claude")
+            ),
+            mock.patch.object(FABLE.subprocess, "run", side_effect=fake_run),
+        ):
+            result = FABLE.review_plan("Review this complete plan.")
+
+        self.assertEqual(result["model"], custom)
+        self.assertEqual(
+            result["used_models"],
+            sorted((custom, FABLE.FABLE_HELPER_MODEL)),
+        )
+        review_command = calls[1][0]
+        self.assertEqual(review_command[review_command.index("--model") + 1], custom)
+
+        with self.assertRaisesRegex(
+            FABLE.AdvisorError,
+            "did not confirm the pinned Fable primary model",
+        ):
+            with (
+                mock.patch.dict(os.environ, {"CODEX_HOME": str(self.home)}),
+                mock.patch.object(
+                    FABLE, "resolve_claude", return_value=Path("/fake/claude")
+                ),
+                mock.patch.object(
+                    FABLE.subprocess,
+                    "run",
+                    side_effect=lambda command, **kwargs: (
+                        self.auth_result()
+                        if command[-2:] == ["auth", "status"]
+                        else self.model_result(
+                            "PLAN_APPROVED\nok",
+                            model_usage={FABLE.FABLE_MODEL: {"outputTokens": 1}},
+                        )
+                    ),
+                ),
+            ):
+                FABLE.review_plan("wrong primary")
 
     def test_each_operation_pins_its_authorized_seat_effort(self) -> None:
         self.write_state(planner=self.route("low"))
