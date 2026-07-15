@@ -1319,10 +1319,16 @@ def build_policy(
     ):
         fable_guidance.append("At a Fable Advisor position use review_plan.")
     fable_tool_guidance = " ".join(fable_guidance)
-    has_direct_route = executor["kind"] == "model" or (
-        planner is not None and planner["kind"] == "model"
-    ) or (
-        advisor is not None and advisor["kind"] == "model"
+    has_direct_route = any(
+        isinstance(route, dict) and route.get("kind") == "model"
+        for route in (
+            executor,
+            *executor_backups,
+            planner,
+            *planner_backups,
+            advisor,
+            *advisor_backups,
+        )
     )
     provider_guard = (
         "Direct model overrides retain the root provider. Before using a direct "

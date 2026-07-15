@@ -410,6 +410,26 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertNotIn("tool_namespace", mode + usage)
         self.assertNotIn("enabled = true", mode + usage)
 
+    def test_direct_model_backup_retains_same_provider_guard(self) -> None:
+        executor = {"kind": "agent", "agent": "primary_worker"}
+        direct_backup = {
+            "kind": "model",
+            "model": "gpt-5.6-luna",
+            "effort": "high",
+        }
+        _, usage = NATIVE.build_policy(
+            executor,
+            None,
+            None,
+            executor_backups=[direct_backup],
+        )
+        self.assertIn("Direct model overrides retain the root provider", usage)
+        self.assertIn("verify that the target model is on the same provider", usage)
+        self.assertNotIn(
+            "Configured custom agents and MCP seats own their provider routes",
+            usage,
+        )
+
     def test_policy_root_fallback_planner_without_advisor_and_fable_hints(self) -> None:
         executor = {"kind": "model", "model": "gpt-5.6-luna", "effort": "high"}
         advisor = {"kind": "model", "model": "gpt-5.6-terra", "effort": "high"}
