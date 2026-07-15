@@ -2,3 +2,7 @@
 __pycache__/
 *.py[cod]
 .codex/
+.omc/
+.codex-plugin/
+.mcp.json
+/skills/

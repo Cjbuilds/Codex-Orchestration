@@ -1,7 +1,9 @@
 # Changelog
 
-## 0.5.1 — Unreleased
+## 0.5.2 — Unreleased
 
+- Allow optional Fable Claude child env overrides (`ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN`) via setup flags; persist them in restricted routing state, strip parent-process Anthropic/cloud overrides, and reinject only the managed pair when forking `claude`.
+- Allow optional `--planner-fable-model` / `--advisor-fable-model` to pin the Claude Code primary for a Fable seat; omission still defaults to `claude-fable-5`, and runtime confirmation requires that seat-pinned primary plus only the documented helper allowlist.
 - Preserve explicit role labels exactly: a model supplied as `planner:` can never be reinterpreted as an Advisor, and Fable Planner uses only the Planner operations.
 - Give Planner support a new plugin version so marketplace upgrade and reinstall replace the affected Advisor-only `0.5.0` cache instead of reusing it.
 - Add an optional Planner route: a configured model drafts and revises the plan, while omission keeps planning with the root Codex model.
@@ -13,7 +15,7 @@
 - Make Claude Fable 5 advisor effort configurable, default it to `high`, support `low` through `max`, treat user-facing `ultra` as an explicit alias for Claude Code's `max`, and fail `--require-effective` when the saved Fable route is unavailable.
 - Add Claude Fable 5 as an opt-in, root-directed Advisor through a bundled no-tools local MCP bridge to the authenticated Claude Code CLI.
 - Keep every Fable launcher disabled by default, enable only one compatible Python 3.11+ route, and restore prior plugin overrides on disable.
-- Pin `claude-fable-5`, allow only its explicitly documented Claude Code helper in runtime usage metadata, remove provider override variables, disable tools and session persistence, and fail closed unless the plan signal and runtime model set are valid.
+- Default-pin `claude-fable-5` when no custom Fable primary is configured, allow only its explicitly documented Claude Code helper in runtime usage metadata, remove parent provider override variables, disable tools and session persistence, and fail closed unless the plan signal and runtime model set are valid.
 - Add automation-safe native status gating with `--require-effective`.
 - Detect orphaned managed personal roles and distinguish installed policy from live route validation.
 - Fail truthfully when restore-state persistence and config rollback do not both succeed.

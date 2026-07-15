@@ -83,7 +83,7 @@ After setup, start another new task and use Codex normally. The saved workflow a
 
 Fable defaults to **High**. You can choose **Low**, **Medium**, **High**, **XHigh**, or **Max**. **Ultra** is accepted as an alias for Max because Claude Code does not expose a separate Ultra effort.
 
-Fable 5 uses the official Claude Code CLI and a compatible first-party Claude login. You do not need to add an Anthropic API key to Codex.
+Fable uses the official Claude Code CLI. The default primary model is `claude-fable-5` (product label **Claude Fable 5**). You can pin another Claude Code model ID for a Fable seat during setup. Auth is either a compatible first-party Claude login or optional managed `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` overrides saved only for the Fable child process. You do not need to add an Anthropic API key to Codex for the default first-party path.
 
 ## Choose your roles
 
@@ -125,7 +125,7 @@ job: gather evidence and cite sources
 
 Project roles live in `.codex/agents/`. Personal roles live in `~/.codex/agents/` and can be reused across projects. Codex previews role files before creating them.
 
-Fable 5 is the bundled cross-provider exception and can be used directly as Planner or Advisor. The plugin never creates provider accounts, credentials, or protocol compatibility.
+Fable 5 is the bundled cross-provider exception and can be used directly as Planner or Advisor, optionally with a custom Claude Code primary model. The plugin never creates provider accounts or protocol compatibility. Optional Fable env overrides are user-supplied setup values written only into restricted routing state for Fable forks; they are not Codex provider definitions.
 
 ## Use it with Codex Goals
 
@@ -149,7 +149,8 @@ Create a Codex Goal normally, then tell Codex to use the saved workflow until th
 - The workflow reserves Fable planning tools for the root Codex model by policy. Current MCP calls do not identify their caller, so this caller boundary is instruction-enforced; the bridge itself still disables tools, edits, and session persistence.
 - Advisor approval is a planning gate, not a guarantee that implementation will succeed.
 - Direct model routes inherit the root provider. Other providers must already be configured and authenticated.
-- The plugin never creates credentials or bypasses permissions and approvals.
+- The plugin never creates credentials or bypasses permissions and approvals. Optional Fable `ANTHROPIC_*` overrides, when used, are explicit user input stored in restricted routing state and injected only into the Fable Claude child.
+- A Fable seat may pin a custom Claude Code primary; runtime still requires that exact primary in `modelUsage` plus only the documented helper allowlist.
 - Codex decides when delegation or parallel work is useful.
 - If you say `no subagents`, Codex must not delegate.
 
@@ -162,7 +163,7 @@ codex plugin marketplace upgrade codex-orchestration
 codex plugin add codex-orchestration@codex-orchestration
 ```
 
-Version **0.5.1 or newer** is required for reliable Planner assignment. It has a distinct release identity so Codex replaces the affected Advisor-only `0.5.0` cache instead of reusing it. After the two update commands, confirm `codex plugin list --json` reports `0.5.1` or newer, then start a new task; a task that already loaded the old skill cannot refresh its instructions in place.
+Version **0.5.2 or newer** is required for reliable Planner assignment. It has a distinct release identity so Codex replaces the affected Advisor-only `0.5.0` cache instead of reusing it. After the two update commands, confirm `codex plugin list --json` reports `0.5.2` or newer, then start a new task; a task that already loaded the old skill cannot refresh its instructions in place.
 
 If the version stays old or `marketplaceSource.sourceType` is `local`, Codex is pointed at a local checkout rather than the GitHub marketplace. Run `/codex-orchestration disable` first if a saved policy is active, then remove the plugin and that marketplace registration, add `Cjbuilds/Codex-Orchestration` again, and reinstall. This does not delete the local source checkout.
 
