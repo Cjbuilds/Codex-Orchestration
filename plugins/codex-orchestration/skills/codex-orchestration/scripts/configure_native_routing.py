@@ -391,6 +391,7 @@ class AppServer:
                 stderr=self._stderr,
                 text=True,
                 encoding="utf-8",
+                errors="replace",
                 bufsize=1,
                 env=env,
             )
