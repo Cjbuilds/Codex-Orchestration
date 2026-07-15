@@ -1539,6 +1539,105 @@ class NativeRoutingTests(unittest.TestCase):
         self.run_script("--disable", "--apply")
         self.assertEqual(self.read_fake_config(), initial)
 
+    def test_fable_setup_accepts_custom_primary_model(self) -> None:
+        setup = self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "xhigh",
+            "--advisor-fable",
+            "--advisor-fable-model",
+            "claude-sonnet-4-20250514",
+            "--apply",
+        )
+        self.assertIn("Claude Fable claude-sonnet-4-20250514 high", setup.stdout)
+        state = json.loads(
+            (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
+        )
+        self.assertEqual(state["advisor"]["kind"], "fable")
+        self.assertEqual(state["advisor"]["model"], "claude-sonnet-4-20250514")
+
+        defaulted = self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "xhigh",
+            "--planner-fable",
+            "--apply",
+        )
+        self.assertIn("Claude Fable 5 high", defaulted.stdout)
+        default_state = json.loads(
+            (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
+        )
+        self.assertEqual(default_state["planner"]["model"], NATIVE.FABLE_MODEL)
+
+        refused = self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--advisor-fable-model",
+            "claude-sonnet-4-20250514",
+            "--apply",
+            check=False,
+        )
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn("--advisor-fable-model requires --advisor-fable", refused.stderr)
+
+    def test_fable_setup_persists_and_clears_claude_env_overrides(self) -> None:
+        setup = self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "xhigh",
+            "--advisor-fable",
+            "--anthropic-base-url",
+            "https://proxy.example/v1",
+            "--anthropic-auth-token",
+            "managed-setup-token",
+            "--apply",
+        )
+        self.assertIn("ANTHROPIC_BASE_URL=https://proxy.example/v1", setup.stdout)
+        self.assertIn("ANTHROPIC_AUTH_TOKEN=", setup.stdout)
+        self.assertNotIn("managed-setup-token", setup.stdout)
+        state = json.loads(
+            (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            state["claude_env"],
+            {
+                "ANTHROPIC_BASE_URL": "https://proxy.example/v1",
+                "ANTHROPIC_AUTH_TOKEN": "managed-setup-token",
+            },
+        )
+        status = self.run_script("--status")
+        self.assertIn("Claude env overrides:", status.stdout)
+        self.assertIn("https://proxy.example/v1", status.stdout)
+
+        cleared = self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "xhigh",
+            "--advisor-fable",
+            "--clear-claude-env",
+            "--apply",
+        )
+        self.assertIn("Claude env overrides: none", cleared.stdout)
+        cleared_state = json.loads(
+            (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
+        )
+        self.assertNotIn("claude_env", cleared_state)
+
+        refused = self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--anthropic-auth-token",
+            "tok",
+            "--apply",
+            check=False,
+        )
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn("require --planner-fable or --advisor-fable", refused.stderr)
+
     def test_fable_effort_defaults_to_high_and_ultra_maps_to_max(self) -> None:
         setup = self.run_script(
             "--executor-model",

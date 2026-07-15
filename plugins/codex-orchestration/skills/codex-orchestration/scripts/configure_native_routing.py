@@ -25,11 +25,13 @@ import time
 from typing import Any
 
 from routing_state import (
+    CLAUDE_ENV_KEYS,
     FABLE_EFFORTS,
     FABLE_MODEL,
     MANAGED_MARKER,
     ROUTING_TOOL_NAMESPACE,
     RoutingStateError,
+    validate_claude_env,
     validate_routing_state,
 )
 
@@ -107,12 +109,19 @@ def parse_args() -> argparse.Namespace:
     planner.add_argument(
         "--planner-fable",
         action="store_true",
-        help="Use the bundled Claude Fable 5 planner through Claude Code.",
+        help="Use the bundled Claude Fable planner through Claude Code.",
     )
     parser.add_argument(
         "--planner-effort",
         default="auto",
         help="Exact supported planner effort, or auto.",
+    )
+    parser.add_argument(
+        "--planner-fable-model",
+        help=(
+            "Optional Claude Code model ID for --planner-fable. "
+            f"Default when omitted: {FABLE_MODEL}."
+        ),
     )
 
     advisor = parser.add_mutually_exclusive_group()
@@ -121,12 +130,19 @@ def parse_args() -> argparse.Namespace:
     advisor.add_argument(
         "--advisor-fable",
         action="store_true",
-        help="Use the bundled Claude Fable 5 advisor through Claude Code.",
+        help="Use the bundled Claude Fable advisor through Claude Code.",
     )
     parser.add_argument(
         "--advisor-effort",
         default="auto",
         help="Exact supported advisor effort, or auto.",
+    )
+    parser.add_argument(
+        "--advisor-fable-model",
+        help=(
+            "Optional Claude Code model ID for --advisor-fable. "
+            f"Default when omitted: {FABLE_MODEL}."
+        ),
     )
 
     parser.add_argument("--codex-bin", default="codex")
@@ -156,6 +172,28 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use exact model IDs confirmed by the active host when model/list is unavailable.",
     )
+    parser.add_argument(
+        "--anthropic-base-url",
+        help=(
+            "Optional Claude Fable child env ANTHROPIC_BASE_URL. Requires a Fable seat; "
+            "persisted in routing state and injected when forking `claude`."
+        ),
+    )
+    parser.add_argument(
+        "--anthropic-auth-token",
+        help=(
+            "Optional Claude Fable child env ANTHROPIC_AUTH_TOKEN. Requires a Fable seat; "
+            "persisted in routing state and injected when forking `claude`."
+        ),
+    )
+    parser.add_argument(
+        "--clear-claude-env",
+        action="store_true",
+        help=(
+            "Drop any previously saved Claude env overrides (ANTHROPIC_BASE_URL / "
+            "ANTHROPIC_AUTH_TOKEN) from routing state on this setup."
+        ),
+    )
     parser.add_argument("--apply", action="store_true", help="Apply after preview.")
     return parser.parse_args()
 
@@ -172,9 +210,14 @@ def _validate_args(args: argparse.Namespace) -> None:
             args.planner_model,
             args.planner_agent,
             args.planner_fable,
+            args.planner_fable_model,
             args.advisor_model,
             args.advisor_agent,
             args.advisor_fable,
+            args.advisor_fable_model,
+            args.anthropic_base_url,
+            args.anthropic_auth_token,
+            args.clear_claude_env,
         )
     ):
         raise ConfigurationError("--status does not accept seat settings.")
@@ -185,14 +228,21 @@ def _validate_args(args: argparse.Namespace) -> None:
             args.planner_model,
             args.planner_agent,
             args.planner_fable,
+            args.planner_fable_model,
             args.advisor_model,
             args.advisor_agent,
             args.advisor_fable,
+            args.advisor_fable_model,
+            args.anthropic_base_url,
+            args.anthropic_auth_token,
+            args.clear_claude_env,
         )
     ):
         raise ConfigurationError("--disable does not accept seat settings.")
-    if not args.status and not args.disable and not (
-        args.executor_model or args.executor_agent
+    if (
+        not args.status
+        and not args.disable
+        and not (args.executor_model or args.executor_agent)
     ):
         raise ConfigurationError(
             "Setup requires --executor-model or --executor-agent. Advisor omission means none."
@@ -217,10 +267,32 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ConfigurationError(
             "Planner and Advisor routes must be distinct; both cannot use Claude Fable 5."
         )
+    if args.planner_fable_model is not None and not args.planner_fable:
+        raise ConfigurationError("--planner-fable-model requires --planner-fable.")
+    if args.advisor_fable_model is not None and not args.advisor_fable:
+        raise ConfigurationError("--advisor-fable-model requires --advisor-fable.")
+    if args.clear_claude_env and (
+        args.anthropic_base_url is not None or args.anthropic_auth_token is not None
+    ):
+        raise ConfigurationError(
+            "--clear-claude-env cannot be combined with --anthropic-base-url or "
+            "--anthropic-auth-token."
+        )
+    fable_requested = bool(args.planner_fable or args.advisor_fable)
+    if (
+        args.anthropic_base_url is not None or args.anthropic_auth_token is not None
+    ) and not fable_requested:
+        raise ConfigurationError(
+            "Claude env overrides require --planner-fable or --advisor-fable."
+        )
+    if args.clear_claude_env and (args.status or args.disable):
+        raise ConfigurationError("--clear-claude-env is only valid during setup.")
     for label, value, pattern in (
         ("executor model", args.executor_model, MODEL_RE),
         ("planner model", args.planner_model, MODEL_RE),
         ("advisor model", args.advisor_model, MODEL_RE),
+        ("planner fable model", args.planner_fable_model, MODEL_RE),
+        ("advisor fable model", args.advisor_fable_model, MODEL_RE),
         ("executor agent", args.executor_agent, AGENT_RE),
         ("planner agent", args.planner_agent, AGENT_RE),
         ("advisor agent", args.advisor_agent, AGENT_RE),
@@ -243,10 +315,95 @@ def normalize_fable_effort(value: str) -> str:
     effective = FABLE_EFFORT_ALIASES.get(requested, requested)
     if effective not in FABLE_EFFORTS:
         supported = ", ".join((*FABLE_EFFORT_CHOICES, *FABLE_EFFORT_ALIASES))
-        raise ConfigurationError(
-            f"Claude Fable 5 effort must be one of: {supported}."
-        )
+        raise ConfigurationError(f"Claude Fable 5 effort must be one of: {supported}.")
     return effective
+
+
+def resolve_fable_model(value: str | None) -> str:
+    """Return the Claude Code model ID for a Fable seat.
+
+    Omission uses the plugin default ``FABLE_MODEL``. An explicit value must
+    already match ``MODEL_RE`` (enforced in ``_validate_args``).
+    """
+
+    if value is None:
+        return FABLE_MODEL
+    cleaned = value.strip()
+    if not cleaned or not MODEL_RE.fullmatch(cleaned):
+        raise ConfigurationError(f"Invalid Fable model: {value!r}.")
+    return cleaned
+
+
+def _mask_secret(value: str) -> str:
+    if len(value) <= 8:
+        return "***"
+    return f"{value[:4]}…{value[-4:]} (len={len(value)})"
+
+
+def resolve_claude_env(
+    *,
+    existing_state: dict[str, Any] | None,
+    planner: dict[str, Any] | None,
+    advisor: dict[str, Any] | None,
+    anthropic_base_url: str | None,
+    anthropic_auth_token: str | None,
+    clear_claude_env: bool,
+) -> dict[str, str] | None:
+    """Merge explicit Claude env flags with any previously saved overrides.
+
+    Returns ``None`` when no overrides should be persisted. Status/disable never
+    call this; setup always recomputes from flags plus retained state.
+    """
+
+    fable_present = any(
+        isinstance(route, dict) and route.get("kind") == "fable"
+        for route in (planner, advisor)
+    )
+    if clear_claude_env or not fable_present:
+        return None
+
+    merged: dict[str, str] = {}
+    previous = (
+        existing_state.get("claude_env") if isinstance(existing_state, dict) else None
+    )
+    if isinstance(previous, dict):
+        for key in CLAUDE_ENV_KEYS:
+            value = previous.get(key)
+            if isinstance(value, str) and value.strip():
+                merged[key] = value
+
+    if anthropic_base_url is not None:
+        cleaned = anthropic_base_url.strip()
+        if not cleaned:
+            raise ConfigurationError("--anthropic-base-url must be a non-empty URL.")
+        merged["ANTHROPIC_BASE_URL"] = cleaned
+    if anthropic_auth_token is not None:
+        cleaned = anthropic_auth_token.strip()
+        if not cleaned:
+            raise ConfigurationError(
+                "--anthropic-auth-token must be a non-empty token."
+            )
+        merged["ANTHROPIC_AUTH_TOKEN"] = cleaned
+
+    if not merged:
+        return None
+    try:
+        return validate_claude_env(merged)
+    except RoutingStateError as exc:
+        raise ConfigurationError(f"Invalid Claude env override: {exc}") from exc
+
+
+def _claude_env_summary(claude_env: dict[str, str] | None) -> str:
+    if not claude_env:
+        return "none"
+    parts: list[str] = []
+    if "ANTHROPIC_BASE_URL" in claude_env:
+        parts.append(f"ANTHROPIC_BASE_URL={claude_env['ANTHROPIC_BASE_URL']}")
+    if "ANTHROPIC_AUTH_TOKEN" in claude_env:
+        parts.append(
+            f"ANTHROPIC_AUTH_TOKEN={_mask_secret(claude_env['ANTHROPIC_AUTH_TOKEN'])}"
+        )
+    return ", ".join(parts)
 
 
 def resolve_binary(value: str) -> Path:
@@ -300,10 +457,7 @@ def supports_native_policy(binary: Path) -> tuple[bool, str]:
                         f'"{PROBE_VALUE}"'
                     ),
                     "-c",
-                    (
-                        "features.multi_agent_v2.usage_hint_text="
-                        f'"{PROBE_VALUE}"'
-                    ),
+                    (f'features.multi_agent_v2.usage_hint_text="{PROBE_VALUE}"'),
                     "features",
                     "list",
                 ],
@@ -322,9 +476,7 @@ def supports_native_policy(binary: Path) -> tuple[bool, str]:
     return False, (detail[:240] or f"exit {result.returncode}")
 
 
-def discover_compatibility_binaries(
-    target: Path, explicit: list[str]
-) -> list[Path]:
+def discover_compatibility_binaries(target: Path, explicit: list[str]) -> list[Path]:
     candidates: list[Path] = [target]
     for value in explicit:
         candidates.append(resolve_binary(value))
@@ -365,7 +517,9 @@ class AppServer:
             )
         except OSError as exc:
             self._stderr.close()
-            raise ConfigurationError(f"Could not start Codex App Server: {exc}") from exc
+            raise ConfigurationError(
+                f"Could not start Codex App Server: {exc}"
+            ) from exc
         if self._process.stdin is None or self._process.stdout is None:
             self.close()
             raise ConfigurationError("Codex App Server did not expose stdio.")
@@ -383,7 +537,7 @@ class AppServer:
                     "clientInfo": {
                         "name": "codex_orchestration_installer",
                         "title": "Codex Orchestration Installer",
-                        "version": "0.5.1",
+                        "version": "0.5.2",
                     },
                     "capabilities": {"experimentalApi": True},
                 },
@@ -554,10 +708,7 @@ def snapshot_edit(key_path: str, saved: dict[str, Any]) -> dict[str, Any] | None
 
 
 def fable_key_path(server: str) -> str:
-    return (
-        f"plugins.{json.dumps(PLUGIN_ID)}.mcp_servers."
-        f"{json.dumps(server)}.enabled"
-    )
+    return f"plugins.{json.dumps(PLUGIN_ID)}.mcp_servers.{json.dumps(server)}.enabled"
 
 
 def validate_planning_routes(
@@ -571,12 +722,16 @@ def validate_planning_routes(
     planner_kind = planner.get("kind")
     advisor_kind = advisor.get("kind")
     identical = (
-        planner_kind == advisor_kind == "model"
-        and planner.get("model") == advisor.get("model")
-    ) or (
-        planner_kind == advisor_kind == "agent"
-        and planner.get("agent") == advisor.get("agent")
-    ) or planner_kind == advisor_kind == "fable"
+        (
+            planner_kind == advisor_kind == "model"
+            and planner.get("model") == advisor.get("model")
+        )
+        or (
+            planner_kind == advisor_kind == "agent"
+            and planner.get("agent") == advisor.get("agent")
+        )
+        or planner_kind == advisor_kind == "fable"
+    )
     if identical:
         raise ConfigurationError(
             "Planner and Advisor routes must be distinct (different direct model IDs, "
@@ -590,7 +745,9 @@ def _read_state(path: Path) -> dict[str, Any] | None:
     except FileNotFoundError:
         return None
     except OSError as exc:
-        raise ConfigurationError(f"Could not inspect routing state {path}: {exc}") from exc
+        raise ConfigurationError(
+            f"Could not inspect routing state {path}: {exc}"
+        ) from exc
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
         raise ConfigurationError(f"Routing state is not a regular file: {path}")
     if info.st_nlink != 1:
@@ -679,7 +836,9 @@ def _agent_files_with_name(directory: Path, name: str) -> list[Path]:
         try:
             parsed = tomllib.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
-            raise ConfigurationError(f"Could not inspect custom agent {path}: {exc}") from exc
+            raise ConfigurationError(
+                f"Could not inspect custom agent {path}: {exc}"
+            ) from exc
         if parsed.get("name") == name:
             for field in ("description", "model", "developer_instructions"):
                 if not isinstance(parsed.get(field), str) or not parsed[field]:
@@ -790,7 +949,9 @@ def resolve_model_effort(
     if not isinstance(resolved, str) or not resolved:
         raise ConfigurationError(f"Could not resolve {label} effort for {model!r}.")
     if supported and resolved not in supported:
-        values = ", ".join(sorted(value for value in supported if isinstance(value, str)))
+        values = ", ".join(
+            sorted(value for value in supported if isinstance(value, str))
+        )
         raise ConfigurationError(
             f"{label} effort {resolved!r} is not supported by {model!r}; choose {values}."
         )
@@ -814,7 +975,11 @@ def select_fable_server() -> str:
         except (OSError, subprocess.TimeoutExpired):
             continue
         match = re.search(r"Python\s+(\d+)\.(\d+)", result.stdout)
-        if result.returncode == 0 and match and tuple(map(int, match.groups())) >= (3, 11):
+        if (
+            result.returncode == 0
+            and match
+            and tuple(map(int, match.groups())) >= (3, 11)
+        ):
             return server
     raise ConfigurationError(
         "Claude Fable 5 requires a Python 3.11+ launcher named python3, python, "
@@ -822,28 +987,28 @@ def select_fable_server() -> str:
     )
 
 
-def verify_fable_prerequisites(effort: str) -> dict[str, str]:
+def verify_fable_prerequisites(
+    effort: str,
+    *,
+    claude_env: dict[str, str] | None = None,
+) -> dict[str, str]:
     try:
-        from fable_advisor_mcp import AdvisorError, check_claude_auth, resolve_claude
+        from fable_advisor_mcp import (
+            AdvisorError,
+            check_claude_auth,
+            resolve_claude,
+            sanitized_environment,
+        )
     except ImportError as exc:  # pragma: no cover - corrupt package
-        raise ConfigurationError("The bundled Claude Fable 5 bridge is missing.") from exc
+        raise ConfigurationError(
+            "The bundled Claude Fable 5 bridge is missing."
+        ) from exc
     try:
         claude = resolve_claude()
-        auth = check_claude_auth(claude)
+        auth = check_claude_auth(claude, claude_env=claude_env or {})
         help_result = subprocess.run(
             [str(claude), "--help"],
-            env={
-                key: value
-                for key, value in os.environ.items()
-                if key
-                not in {
-                    "ANTHROPIC_API_KEY",
-                    "ANTHROPIC_AUTH_TOKEN",
-                    "CLAUDE_CODE_USE_BEDROCK",
-                    "CLAUDE_CODE_USE_VERTEX",
-                    "CLAUDE_CODE_USE_FOUNDRY",
-                }
-            },
+            env=sanitized_environment(claude_env),
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -881,7 +1046,10 @@ def _route_summary(route: dict[str, Any]) -> str:
     if route["kind"] == "agent":
         return f"custom agent {route['agent']}"
     if route["kind"] == "fable":
-        return f"Claude Fable 5 {route['effort']}"
+        model = route.get("model", FABLE_MODEL)
+        if model == FABLE_MODEL:
+            return f"Claude Fable 5 {route['effort']}"
+        return f"Claude Fable {model} {route['effort']}"
     return f"{route['model']}@{route['effort']}"
 
 
@@ -935,10 +1103,10 @@ def _referenced_agent_names(state: dict[str, Any] | None) -> set[str]:
 
 def _spawn_route(route: dict[str, Any]) -> str:
     if route["kind"] == "agent":
-        return f'agent_type = {json.dumps(route["agent"])}'
+        return f"agent_type = {json.dumps(route['agent'])}"
     return (
-        f'model = {json.dumps(route["model"])}, '
-        f'reasoning_effort = {json.dumps(route["effort"])}'
+        f"model = {json.dumps(route['model'])}, "
+        f"reasoning_effort = {json.dumps(route['effort'])}"
     )
 
 
@@ -947,10 +1115,10 @@ def build_policy(
     planner: dict[str, Any] | None,
     advisor: dict[str, Any] | None,
 ) -> tuple[str, str]:
-    has_direct_route = executor["kind"] == "model" or (
-        planner is not None and planner["kind"] == "model"
-    ) or (
-        advisor is not None and advisor["kind"] == "model"
+    has_direct_route = (
+        executor["kind"] == "model"
+        or (planner is not None and planner["kind"] == "model")
+        or (advisor is not None and advisor["kind"] == "model")
     )
     provider_guard = (
         "Direct model overrides retain the root provider. Before using a direct "
@@ -1013,7 +1181,7 @@ Planner and Advisor are policy-isolated, root-directed seats: they cannot contac
     elif planner is not None:
         planner_hint = (
             "For each Planner draft or revision, call this tool with "
-            f"{_spawn_route(planner)}, fork_turns = \"none\". Send the complete "
+            f'{_spawn_route(planner)}, fork_turns = "none". Send the complete '
             "self-contained packet for that round. Require PLAN_DRAFT initially; "
             "require PLAN_REVISION, the source version, complete findings ledger, "
             "and full revised plan after PLAN_REVISE."
@@ -1031,7 +1199,7 @@ Planner and Advisor are policy-isolated, root-directed seats: they cannot contac
     elif advisor is not None:
         advisor_hint = (
             "For an advisor review, call this tool with "
-            f"{_spawn_route(advisor)}, fork_turns = \"none\". Send the complete "
+            f'{_spawn_route(advisor)}, fork_turns = "none". Send the complete '
             "review packet and require PLAN_APPROVED or PLAN_REVISE."
         )
     else:
@@ -1090,15 +1258,11 @@ def _current_values(config: dict[str, Any]) -> dict[str, Any]:
         "mode": nested_get(
             config, "features", "multi_agent_v2", "multi_agent_mode_hint_text"
         ),
-        "usage": nested_get(
-            config, "features", "multi_agent_v2", "usage_hint_text"
-        ),
+        "usage": nested_get(config, "features", "multi_agent_v2", "usage_hint_text"),
         "metadata": nested_get(
             config, "features", "multi_agent_v2", "hide_spawn_agent_metadata"
         ),
-        "namespace": nested_get(
-            config, "features", "multi_agent_v2", "tool_namespace"
-        ),
+        "namespace": nested_get(config, "features", "multi_agent_v2", "tool_namespace"),
         "mcp": {
             server: nested_get(
                 config,
@@ -1180,9 +1344,7 @@ def _status(
         state_path = app.codex_home / STATE_FILENAME
         state = _read_state(state_path)
         _validate_state_config(state, app.config_path)
-        managed_pair = _is_managed(current["mode"]) and _is_managed(
-            current["usage"]
-        )
+        managed_pair = _is_managed(current["mode"]) and _is_managed(current["usage"])
         state_matches = state is not None and _managed_matches(state, current)
         if state is not None and managed_pair and not state_matches:
             routing_state = "managed fields conflict with local restore state"
@@ -1192,7 +1354,9 @@ def _status(
                 and current["namespace"] == ROUTING_TOOL_NAMESPACE
             )
             if not controls_ready:
-                routing_state = "managed hints found but routing controls are incomplete"
+                routing_state = (
+                    "managed hints found but routing controls are incomplete"
+                )
             elif (
                 effective["mode"] == current["mode"]
                 and effective["usage"] == current["usage"]
@@ -1224,16 +1388,29 @@ def _status(
                 for route in (planner, advisor)
                 if isinstance(route, dict) and route.get("kind") == "fable"
             ]
+            saved_claude_env = (
+                state.get("claude_env")
+                if isinstance(state.get("claude_env"), dict)
+                else None
+            )
             for route in fable_routes:
                 try:
-                    verify_fable_prerequisites(route["effort"])
+                    fable_auth = verify_fable_prerequisites(
+                        route["effort"],
+                        claude_env=saved_claude_env,
+                    )
                 except ConfigurationError as exc:
                     fable_available = False
                     print(f"Claude Fable 5: unavailable — {exc}")
                 else:
-                    print(
-                        "Claude Fable 5: ready — first-party login; no model call made"
-                    )
+                    if fable_auth.get("auth_method") == "env_token":
+                        print("Claude Fable 5: ready — env token; no model call made")
+                    else:
+                        print(
+                            "Claude Fable 5: ready — first-party login; no model call made"
+                        )
+            if fable_routes:
+                print(f"Claude env overrides: {_claude_env_summary(saved_claude_env)}")
             try:
                 verified = verify_agent_routes(
                     app.codex_home,
@@ -1311,6 +1488,7 @@ def _prepare_setup_state(
     advisor: dict[str, Any] | None,
     config_path: Path,
     replace_existing: bool,
+    claude_env: dict[str, str] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     current = _current_values(config)
     feature = current["feature"]
@@ -1324,7 +1502,9 @@ def _prepare_setup_state(
             )
         previous = existing_state.get("previous")
         if not isinstance(previous, dict):
-            raise ConfigurationError("Managed routing state is missing its restore data.")
+            raise ConfigurationError(
+                "Managed routing state is missing its restore data."
+            )
         previous = dict(previous)
         scalar_origin = existing_state.get("scalar_origin")
         if isinstance(scalar_origin, bool):
@@ -1505,7 +1685,9 @@ def _prepare_setup_state(
             if server not in previous_mcp:
                 previous_mcp[server] = snapshot(current["mcp"][server])
         previous["mcp"] = previous_mcp
-        managed_mcp = {server: server == selected for server in FABLE_SERVERS if server in touched}
+        managed_mcp = {
+            server: server == selected for server in FABLE_SERVERS if server in touched
+        }
         for server, enabled in managed_mcp.items():
             edits.append(
                 {
@@ -1542,6 +1724,8 @@ def _prepare_setup_state(
         "scalar_origin": scalar_origin,
         "managed_feature": managed_feature,
     }
+    if claude_env:
+        state["claude_env"] = dict(claude_env)
     return state, edits, rollback
 
 
@@ -1641,11 +1825,15 @@ def _disable(
             )
         print("Will restore the pre-setup values of every owned routing field.")
     if not apply:
-        print("Dry run only. Re-run with --disable --apply after reviewing this preview.")
+        print(
+            "Dry run only. Re-run with --disable --apply after reviewing this preview."
+        )
         return 0
     result = _batch_write(app, edits, version, reload_user_config=True)
     if result.get("status") not in {"ok", "okOverridden"}:
-        raise ConfigurationError(f"Unexpected config write status: {result.get('status')!r}")
+        raise ConfigurationError(
+            f"Unexpected config write status: {result.get('status')!r}"
+        )
     _remove_state(state_path)
     print("Native routing disabled. Start a new Codex task to clear the loaded policy.")
     return 0
@@ -1738,7 +1926,7 @@ def main() -> int:
             elif args.planner_fable:
                 planner = {
                     "kind": "fable",
-                    "model": FABLE_MODEL,
+                    "model": resolve_fable_model(args.planner_fable_model),
                     "effort": normalize_fable_effort(args.planner_effort),
                     "server": fable_server,
                 }
@@ -1761,19 +1949,27 @@ def main() -> int:
             elif args.advisor_fable:
                 advisor = {
                     "kind": "fable",
-                    "model": FABLE_MODEL,
+                    "model": resolve_fable_model(args.advisor_fable_model),
                     "effort": normalize_fable_effort(args.advisor_effort),
                     "server": fable_server,
                 }
 
             validate_planning_routes(planner, advisor)
+            claude_env = resolve_claude_env(
+                existing_state=state,
+                planner=planner,
+                advisor=advisor,
+                anthropic_base_url=args.anthropic_base_url,
+                anthropic_auth_token=args.anthropic_auth_token,
+                clear_claude_env=args.clear_claude_env,
+            )
             fable_efforts = {
                 route["effort"]
                 for route in (planner, advisor)
                 if isinstance(route, dict) and route.get("kind") == "fable"
             }
             for effort in sorted(fable_efforts):
-                fable_auth = verify_fable_prerequisites(effort)
+                fable_auth = verify_fable_prerequisites(effort, claude_env=claude_env)
 
             verified_agents = verify_agent_routes(
                 app.codex_home,
@@ -1793,6 +1989,7 @@ def main() -> int:
                 advisor,
                 app.config_path,
                 args.replace_existing_policy,
+                claude_env=claude_env,
             )
             print(f"Config: {app.config_path}")
             print("Orchestrator: model selected when each Codex task starts")
@@ -1810,10 +2007,23 @@ def main() -> int:
                     f"{advisor['effort']} (Claude Code effective value)"
                 )
             if fable_auth is not None:
-                print(
-                    "Claude Fable 5 login: ready — first-party; "
-                    "setup makes no model call"
-                )
+                if fable_auth.get("auth_method") == "env_token":
+                    print(
+                        "Claude Fable 5 login: ready — env token; "
+                        "setup makes no model call"
+                    )
+                else:
+                    print(
+                        "Claude Fable 5 login: ready — first-party; "
+                        "setup makes no model call"
+                    )
+            if (
+                args.planner_fable
+                or args.advisor_fable
+                or claude_env
+                or args.clear_claude_env
+            ):
+                print(f"Claude env overrides: {_claude_env_summary(claude_env)}")
             if verified_agents:
                 print(
                     "Custom-agent files: "
