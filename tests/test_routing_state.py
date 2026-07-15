@@ -139,7 +139,8 @@ class RoutingStateTests(unittest.TestCase):
             ("model route bad model", lambda state: state["executor"].update(model="bad model")),
             ("model route bad effort", lambda state: state["executor"].update(effort="bad effort")),
             ("agent route bad name", lambda state: state.__setitem__("executor", {"kind": "agent", "agent": "Bad-Agent"})),
-            ("Fable wrong model", lambda state: state["planner"].update(model="claude-other")),
+            ("Fable bad model", lambda state: state["planner"].update(model="bad model")),
+            ("Fable empty model", lambda state: state["planner"].update(model="")),
             ("Fable wrong effort", lambda state: state["planner"].update(effort="ultra")),
             ("Fable wrong server", lambda state: state["planner"].update(server="future-server")),
             ("Fable extra route key", lambda state: state["planner"].update(future=True)),
@@ -173,6 +174,45 @@ class RoutingStateTests(unittest.TestCase):
                 mutate(state)
                 with self.assertRaises(STATE.RoutingStateError):
                     STATE.validate_routing_state(state)
+
+    def test_fable_route_accepts_custom_primary_model(self) -> None:
+        state = genuine_state(3)
+        state["planner"]["model"] = "claude-sonnet-4-20250514"
+        self.assertIs(STATE.validate_routing_state(state), state)
+
+    def test_claude_env_optional_surface_on_schema_three(self) -> None:
+        state = genuine_state(3)
+        state["claude_env"] = {
+            "ANTHROPIC_BASE_URL": "https://proxy.example/v1",
+            "ANTHROPIC_AUTH_TOKEN": "sk-test-token",
+        }
+        self.assertIs(STATE.validate_routing_state(state), state)
+        url_only = genuine_state(3)
+        url_only["claude_env"] = {"ANTHROPIC_BASE_URL": "https://proxy.example"}
+        self.assertIs(STATE.validate_routing_state(url_only), url_only)
+        token_only = genuine_state(3)
+        token_only["claude_env"] = {"ANTHROPIC_AUTH_TOKEN": "sk-test-token"}
+        self.assertIs(STATE.validate_routing_state(token_only), token_only)
+
+        rejections = [
+            ("empty object", lambda s: s.__setitem__("claude_env", {})),
+            ("unknown key", lambda s: s.__setitem__("claude_env", {"FUTURE": "x"})),
+            ("bad url", lambda s: s.__setitem__("claude_env", {"ANTHROPIC_BASE_URL": "not-a-url"})),
+            ("empty token", lambda s: s.__setitem__("claude_env", {"ANTHROPIC_AUTH_TOKEN": "  "})),
+            ("no fable seat", lambda s: s.update(
+                planner={"kind": "model", "model": "p", "effort": "high"},
+                advisor={"kind": "agent", "agent": "a"},
+                managed={**s["managed"], "mcp": {k: False for k in s["managed"]["mcp"]}},
+                claude_env={"ANTHROPIC_AUTH_TOKEN": "tok"},
+            )),
+            ("schema 2", lambda s: (s.update(schema=2, policy_version=2), s.pop("planner", None), s.__setitem__("claude_env", {"ANTHROPIC_AUTH_TOKEN": "tok"}))),
+        ]
+        for label, mutate in rejections:
+            with self.subTest(label=label):
+                bad = deepcopy(genuine_state(3))
+                mutate(bad)
+                with self.assertRaises(STATE.RoutingStateError):
+                    STATE.validate_routing_state(bad)
 
     def test_schema_one_and_two_reject_future_surfaces(self) -> None:
         scenarios = []

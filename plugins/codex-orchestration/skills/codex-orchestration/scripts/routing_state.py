@@ -43,6 +43,12 @@ _BASE_TOP_LEVEL_KEYS = frozenset(
 )
 _BASE_MANAGED_KEYS = frozenset({"mode", "usage", "metadata", "namespace"})
 _BASE_PREVIOUS_KEYS = frozenset({"mode", "usage", "metadata", "namespace"})
+# Optional schema-3 surface for Claude CLI process overrides. Values are copied
+# into the Fable child environment only; they never appear in routing hints.
+CLAUDE_ENV_KEYS = ("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN")
+_CLAUDE_ENV_KEY_SET = frozenset(CLAUDE_ENV_KEYS)
+_MAX_CLAUDE_ENV_VALUE_CHARS = 4096
+_BASE_URL_RE = re.compile(r"^https?://[^\s\x00]{1,2000}$")
 
 
 class RoutingStateError(ValueError):
@@ -126,7 +132,12 @@ def _validate_route(route: Any, *, seat: str, schema: int) -> str:
             set(route) == {"kind", "model", "effort", "server"},
             f"{seat} Fable route has the wrong shape",
         )
-        _require(route["model"] == FABLE_MODEL, "Fable model is not pinned")
+        # Default primary is FABLE_MODEL; setup may pin any catalog-safe model ID
+        # for the Claude Code CLI. Runtime still requires that exact primary.
+        _require(
+            type(route["model"]) is str and _MODEL_RE.fullmatch(route["model"]) is not None,
+            f"{seat} Fable model is invalid",
+        )
         _require(
             type(route["effort"]) is str and route["effort"] in FABLE_EFFORTS,
             "Fable effort is unsupported",
@@ -153,6 +164,38 @@ def _validate_route_separation(planner: Any, advisor: Any) -> None:
         and planner["agent"] == advisor["agent"]
     ) or planner_kind == advisor_kind == "fable"
     _require(not same_route, "Planner and Advisor routes are not independent")
+
+
+def validate_claude_env(value: Any) -> dict[str, str]:
+    """Validate optional Claude child-process env overrides and return a copy."""
+
+    _require(type(value) is dict, "claude_env must be an object")
+    _require(bool(value), "claude_env must not be empty")
+    _require(
+        set(value).issubset(_CLAUDE_ENV_KEY_SET) and set(value),
+        "claude_env has unsupported or empty keys",
+    )
+    cleaned: dict[str, str] = {}
+    for key in CLAUDE_ENV_KEYS:
+        if key not in value:
+            continue
+        item = value[key]
+        _require(type(item) is str and bool(item.strip()), f"claude_env.{key} must be a non-empty string")
+        _require("\x00" not in item, f"claude_env.{key} contains a null byte")
+        _require(
+            len(item) <= _MAX_CLAUDE_ENV_VALUE_CHARS,
+            f"claude_env.{key} exceeds {_MAX_CLAUDE_ENV_VALUE_CHARS} characters",
+        )
+        if key == "ANTHROPIC_BASE_URL":
+            stripped = item.strip()
+            _require(
+                _BASE_URL_RE.fullmatch(stripped) is not None,
+                "claude_env.ANTHROPIC_BASE_URL must be an http(s) URL",
+            )
+            cleaned[key] = stripped
+        else:
+            cleaned[key] = item
+    return cleaned
 
 
 def _validate_scalar_conversion(state: dict[str, Any], managed: dict[str, Any]) -> None:
@@ -225,6 +268,11 @@ def validate_routing_state(value: Any) -> dict[str, Any]:
     expected_top = set(_BASE_TOP_LEVEL_KEYS)
     if schema == 3:
         expected_top.add("planner")
+    has_claude_env = "claude_env" in value
+    if has_claude_env:
+        # Optional only on schema 3 so legacy restore files stay exact-shape.
+        _require(schema == 3, "claude_env requires schema 3")
+        expected_top.add("claude_env")
     _require(set(value) == expected_top, "top-level state shape is unsupported")
     _require(value["managed_by"] == "codex-orchestration", "state owner is invalid")
     _require(
@@ -242,6 +290,14 @@ def validate_routing_state(value: Any) -> dict[str, Any]:
     if advisor is not None:
         _validate_route(advisor, seat="advisor", schema=schema)
     _validate_route_separation(planner, advisor)
+
+    fable_present = any(
+        type(route) is dict and route.get("kind") == "fable"
+        for route in (planner, advisor)
+    )
+    if has_claude_env:
+        _require(fable_present, "claude_env requires a configured Fable seat")
+        validate_claude_env(value["claude_env"])
 
     managed = value["managed"]
     previous = value["previous"]
