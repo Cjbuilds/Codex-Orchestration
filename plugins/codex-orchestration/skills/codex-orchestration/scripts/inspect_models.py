@@ -44,6 +44,8 @@ def inspect_version(executable: str) -> str:
             [executable, "--version"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=False,
             timeout=15,
         )
@@ -71,6 +73,8 @@ def load_catalog(
             command,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=False,
             timeout=30,
         )
