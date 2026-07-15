@@ -3,7 +3,7 @@
 
 A disposable bare Git marketplace is served over loopback HTTP. The real Codex
 CLI installs the affected Advisor-only 0.5.0 bundle, runs its documented
-marketplace-upgrade command after 0.5.1 is pushed to that Git remote, installs
+marketplace-upgrade command after 0.5.2 is pushed to that Git remote, installs
 the refreshed package, verifies the new cache and Planner contract, and runs
 native-policy plus custom-agent setup/status/cleanup in isolation.
 """
@@ -31,7 +31,7 @@ PLUGIN_ID = "codex-orchestration@codex-orchestration"
 MARKETPLACE_NAME = "codex-orchestration"
 OLD_RELEASE = "a1d9c546665c3253cdcaa8fe5c0c060199a6126c"
 OLD_VERSION = "0.5.0"
-NEW_VERSION = "0.5.1"
+NEW_VERSION = "0.5.2"
 COMMAND_TIMEOUT_SECONDS = 60
 
 
@@ -81,22 +81,25 @@ def run_json(
 
 
 def probe_mcp_subprocess(script: Path, *, cwd: Path, env: dict[str, str]) -> None:
-    requests = "\n".join(
-        json.dumps(request)
-        for request in (
-            {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2025-06-18",
-                    "capabilities": {},
-                    "clientInfo": {"name": "lifecycle-smoke", "version": "1"},
+    requests = (
+        "\n".join(
+            json.dumps(request)
+            for request in (
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2025-06-18",
+                        "capabilities": {},
+                        "clientInfo": {"name": "lifecycle-smoke", "version": "1"},
+                    },
                 },
-            },
-            {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+                {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+            )
         )
-    ) + "\n"
+        + "\n"
+    )
     try:
         completed = subprocess.run(
             [sys.executable, str(script)],
@@ -120,7 +123,9 @@ def probe_mcp_subprocess(script: Path, *, cwd: Path, env: dict[str, str]) -> Non
     except json.JSONDecodeError as exc:
         raise SmokeFailure("Installed Fable MCP returned malformed JSON-RPC") from exc
     if len(responses) != 2 or [response.get("id") for response in responses] != [1, 2]:
-        raise SmokeFailure(f"Installed Fable MCP returned unexpected responses: {responses!r}")
+        raise SmokeFailure(
+            f"Installed Fable MCP returned unexpected responses: {responses!r}"
+        )
     server_info = responses[0].get("result", {}).get("serverInfo", {})
     assert_equal(
         server_info.get("name"),
@@ -128,9 +133,7 @@ def probe_mcp_subprocess(script: Path, *, cwd: Path, env: dict[str, str]) -> Non
         "installed Fable MCP server identity",
     )
     tools = responses[1].get("result", {}).get("tools", [])
-    tool_names = {
-        tool.get("name") for tool in tools if isinstance(tool, dict)
-    }
+    tool_names = {tool.get("name") for tool in tools if isinstance(tool, dict)}
     assert_equal(
         tool_names,
         {"create_plan", "revise_plan", "review_plan", "status"},
@@ -145,9 +148,7 @@ def assert_equal(actual: Any, expected: Any, message: str) -> None:
 
 def ignored(path: Path) -> bool:
     return (
-        "__pycache__" in path.parts
-        or path.suffix == ".pyc"
-        or path.name == ".DS_Store"
+        "__pycache__" in path.parts or path.suffix == ".pyc" or path.name == ".DS_Store"
     )
 
 
@@ -253,9 +254,7 @@ def main() -> int:
         raise SmokeFailure("git executable not found")
 
     manifest = json.loads(
-        (PLUGIN_ROOT / ".codex-plugin" / "plugin.json").read_text(
-            encoding="utf-8"
-        )
+        (PLUGIN_ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
     )
     current_version = manifest.get("version")
     if not isinstance(current_version, str):
@@ -374,15 +373,16 @@ def main() -> int:
             )
             old_installed_root = Path(old_install["installedPath"]).resolve()
             old_skill = (
-                old_installed_root
-                / "skills"
-                / "codex-orchestration"
-                / "SKILL.md"
+                old_installed_root / "skills" / "codex-orchestration" / "SKILL.md"
             ).read_text(encoding="utf-8")
             if "setup planner: Claude Fable 5 High" in old_skill:
-                raise SmokeFailure("old Advisor-only cache unexpectedly supports Planner")
+                raise SmokeFailure(
+                    "old Advisor-only cache unexpectedly supports Planner"
+                )
             if "built-in advisor label" not in old_skill:
-                raise SmokeFailure("old release fixture is not the affected Advisor-only cache")
+                raise SmokeFailure(
+                    "old release fixture is not the affected Advisor-only cache"
+                )
 
             old_discovery = run_json(
                 [codex, "plugin", "list", "--json"], cwd=project, env=env
@@ -502,7 +502,7 @@ def main() -> int:
             installed_root = Path(new_install["installedPath"]).resolve()
             if installed_root == old_installed_root:
                 raise SmokeFailure(
-                    "0.5.1 reused the Advisor-only 0.5.0 cache directory"
+                    "0.5.2 reused the Advisor-only 0.5.0 cache directory"
                 )
             assert_equal(
                 file_tree(installed_root),
@@ -706,9 +706,7 @@ def main() -> int:
             if "Dry run only" not in disable_preview.stdout:
                 raise SmokeFailure("Native disable preview was not non-mutating")
             run([*native_disable, "--apply"], cwd=project, env=env)
-            disabled_config = (codex_home / "config.toml").read_text(
-                encoding="utf-8"
-            )
+            disabled_config = (codex_home / "config.toml").read_text(encoding="utf-8")
             if "[codex-orchestration managed-policy" in disabled_config:
                 raise SmokeFailure("Managed native policy remained after disable")
             if "tool_namespace" in disabled_config:
@@ -729,7 +727,10 @@ def main() -> int:
                 "--remove-saved-roles",
             ]
             remove_preview = run(remove_roles_command, cwd=project, env=env)
-            if "Dry run only" not in remove_preview.stdout or not executor_file.exists():
+            if (
+                "Dry run only" not in remove_preview.stdout
+                or not executor_file.exists()
+            ):
                 raise SmokeFailure("Saved-role removal preview was not non-mutating")
             run([*remove_roles_command, "--apply"], cwd=project, env=env)
             if executor_file.exists():

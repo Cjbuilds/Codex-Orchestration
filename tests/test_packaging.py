@@ -24,7 +24,7 @@ class PackagingTests(unittest.TestCase):
 
         self.assertEqual(manifest["name"], "codex-orchestration")
         self.assertEqual(manifest["skills"], "./skills/")
-        self.assertEqual(manifest["version"], "0.5.1")
+        self.assertEqual(manifest["version"], "0.5.2")
         self.assertEqual(manifest["mcpServers"], "./.mcp.json")
         self.assertRegex(
             manifest["version"],
@@ -45,8 +45,10 @@ class PackagingTests(unittest.TestCase):
         self.assertTrue(custom.is_file())
         self.assertTrue(routing_state.is_file())
         self.assertIn("config/batchWrite", native.read_text(encoding="utf-8"))
-        self.assertIn('"version": "0.5.1"', native.read_text(encoding="utf-8"))
-        self.assertIn("validate_routing_state", routing_state.read_text(encoding="utf-8"))
+        self.assertIn('"version": "0.5.2"', native.read_text(encoding="utf-8"))
+        self.assertIn(
+            "validate_routing_state", routing_state.read_text(encoding="utf-8")
+        )
         self.assertIn("Standalone custom agent", custom.read_text(encoding="utf-8"))
 
     def test_fable_mcp_is_packaged_and_disabled_until_selected(self) -> None:
@@ -77,7 +79,9 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("/codex-orchestration create project role:", readme)
         self.assertIn("/codex-orchestration status", readme)
         self.assertIn("/codex-orchestration disable", readme)
-        self.assertIn("codex plugin add codex-orchestration@codex-orchestration", readme)
+        self.assertIn(
+            "codex plugin add codex-orchestration@codex-orchestration", readme
+        )
 
     def test_starter_prompts_fit_codex_limits(self) -> None:
         manifest = json.loads(
@@ -110,9 +114,13 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("@openai/codex@0.144.1", workflow)
         smoke_text = smoke.read_text(encoding="utf-8")
         self.assertIn('OLD_VERSION = "0.5.0"', smoke_text)
-        self.assertIn('NEW_VERSION = "0.5.1"', smoke_text)
-        self.assertIn("old Advisor-only cache unexpectedly supports Planner", smoke_text)
-        self.assertIn("Upgraded installed skill is missing Planner contract", smoke_text)
+        self.assertIn('NEW_VERSION = "0.5.2"', smoke_text)
+        self.assertIn(
+            "old Advisor-only cache unexpectedly supports Planner", smoke_text
+        )
+        self.assertIn(
+            "Upgraded installed skill is missing Planner contract", smoke_text
+        )
         self.assertIn("reused the Advisor-only 0.5.0 cache directory", smoke_text)
         self.assertIn("configure_native_routing.py", smoke_text)
         self.assertIn("configure_orchestration.py", smoke_text)
@@ -138,9 +146,13 @@ class PackagingTests(unittest.TestCase):
             encoding="utf-8"
         )
 
-        self.assertIn("Other providers must already be configured and authenticated", readme)
+        self.assertIn(
+            "Other providers must already be configured and authenticated", readme
+        )
         self.assertIn("never creates credentials or bypasses permissions", readme)
-        self.assertIn("Codex decides when delegation or parallel work is useful", readme)
+        self.assertIn(
+            "Codex decides when delegation or parallel work is useful", readme
+        )
         self.assertIn("Fable 5 is the bundled cross-provider exception", readme)
         self.assertIn('ROUTING_TOOL_NAMESPACE = "agents"', routing_state)
 
@@ -214,11 +226,13 @@ class PackagingTests(unittest.TestCase):
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
 
         self.assertIn("/codex-orchestration status", readme)
-        self.assertIn("Version **0.5.1 or newer**", readme)
+        self.assertIn("Version **0.5.2 or newer**", readme)
         self.assertIn("`marketplaceSource.sourceType` is `local`", readme)
         self.assertIn("`disable` restores the routing values", readme)
         self.assertIn("does not delete user-owned custom roles", readme)
-        self.assertIn("Review and remove any user-owned custom roles separately", readme)
+        self.assertIn(
+            "Review and remove any user-owned custom roles separately", readme
+        )
 
 
 if __name__ == "__main__":
