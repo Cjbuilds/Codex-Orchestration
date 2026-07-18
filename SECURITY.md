@@ -48,9 +48,10 @@ External provider preparation and removal use exact App Server readback plus a
 content-free recovery journal. Role files and registry state use a recoverable
 multi-file transaction. Recovery rolls forward or back only when every digest and
 ownership check matches; ambiguity becomes `RECOVERY_REQUIRED` without overwriting
-user data. On Windows, replacement stages copy and byte-verify the existing
-self-relative owner/group/DACL security descriptor before publication; inability to
-read, apply, or re-read that descriptor fails closed and rolls the transaction back.
+user data. On Windows, replacement stages copy and canonically verify the existing
+owner, group, DACL, and mandatory integrity label before publication; inability to
+read, apply, or re-read that access-control metadata fails closed and rolls the
+transaction back.
 
 Gate 0 is an explicit, potentially billable, ephemeral `codex exec` probe in an
 isolated temporary `CODEX_HOME`. The pinned CLI must advertise every required flag

@@ -2086,14 +2086,48 @@ multi_agent = true'''
             # Keep the fixture byte-exact on Windows; the production reader uses
             # newline="" so CRLF translation must not mask the intended branch.
             path.write_bytes(b"old\n")
-            before = CONFIGURE._windows_security_descriptor(path)
+            icacls = shutil.which("icacls")
+            self.assertIsNotNone(icacls)
+            protected = subprocess.run(
+                [icacls, str(path), "/inheritance:d"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(protected.returncode, 0, protected.stderr)
+            before = CONFIGURE._windows_security_signature(path)
             self.assertIsNotNone(before)
+            inherited = root / "inherited.toml"
+            inherited.write_bytes(b"fixture\n")
+            self.assertNotEqual(
+                CONFIGURE._windows_security_signature(inherited), before
+            )
             CONFIGURE.apply_changes_transactionally(
                 [(path, "old\n", "new\n")],
                 transaction_root=root,
             )
             self.assertEqual(path.read_text(encoding="utf-8"), "new\n")
-            self.assertEqual(CONFIGURE._windows_security_descriptor(path), before)
+            self.assertEqual(CONFIGURE._windows_security_signature(path), before)
+            self.assertFalse((root / CONFIGURE.TRANSACTION_JOURNAL).exists())
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows security descriptors")
+    def test_windows_security_descriptor_failure_rolls_back(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "agent.toml"
+            path.write_bytes(b"old\n")
+            with mock.patch.object(
+                CONFIGURE,
+                "_set_windows_security_descriptor",
+                side_effect=CONFIGURE.ConfigurationError("injected descriptor failure"),
+            ):
+                with self.assertRaisesRegex(
+                    CONFIGURE.ConfigurationError, "injected descriptor failure"
+                ):
+                    CONFIGURE.apply_changes_transactionally(
+                        [(path, "old\n", "new\n")], transaction_root=root
+                    )
+            self.assertEqual(path.read_text(encoding="utf-8"), "old\n")
             self.assertFalse((root / CONFIGURE.TRANSACTION_JOURNAL).exists())
 
     @unittest.skipUnless(hasattr(os, "fork"), "requires POSIX fork")

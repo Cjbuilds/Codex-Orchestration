@@ -22,9 +22,7 @@ SPEC.loader.exec_module(TRUST)
 class ExternalCliTrustTests(unittest.TestCase):
     def executable(self, root: Path, version: str = "Official CLI 1.2.3") -> Path:
         if os.name == "nt":
-            path = root / "official-cli.exe"
-            shutil.copy2(sys.executable, path)
-            return path
+            return Path(getattr(sys, "_base_executable", sys.executable)).resolve()
         path = root / "official-cli"
         path.write_text(f"#!/bin/sh\nprintf '%s\\n' '{version}'\n", encoding="utf-8")
         path.chmod(0o700)
@@ -47,8 +45,22 @@ class ExternalCliTrustTests(unittest.TestCase):
 
     def test_changed_bytes_or_version_fail_and_require_retrust(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            path = self.executable(Path(directory))
-            record = TRUST.attest(path, publisher="Example, Inc.")
+            root = Path(directory)
+            source = self.executable(root)
+            if os.name == "nt":
+                path = root / "changed-cli.exe"
+                shutil.copy2(source, path)
+                target, digest = TRUST.fingerprint(path)
+                record = {
+                    "path": str(target),
+                    "strategy": "sha256",
+                    "fingerprint": f"sha256:{digest}",
+                    "publisher": "Example, Inc.",
+                    "version": f"Python {platform.python_version()}",
+                }
+            else:
+                path = source
+                record = TRUST.attest(path, publisher="Example, Inc.")
             path.write_bytes(path.read_bytes() + b"changed")
             if os.name == "posix":
                 path.chmod(0o700)
@@ -59,6 +71,10 @@ class ExternalCliTrustTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             path = self.executable(root)
+            if os.name == "nt":
+                copied = root / "official-cli.exe"
+                shutil.copy2(path, copied)
+                path = copied
             (root / "alias").hardlink_to(path)
             with self.assertRaises(TRUST.CliTrustError):
                 TRUST.fingerprint(path)
@@ -78,6 +94,19 @@ class ExternalCliTrustTests(unittest.TestCase):
             alias.symlink_to(path)
             record = TRUST.attest(alias, publisher="Example, Inc.")
             self.assertEqual(record["path"], str(path.resolve()))
+
+    @unittest.skipUnless(os.name == "nt", "Windows executable suffix policy")
+    def test_windows_rejects_script_cli_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for suffix in (".bat", ".cmd", ".py"):
+                with self.subTest(suffix=suffix):
+                    path = root / f"untrusted{suffix}"
+                    path.write_text("untrusted", encoding="utf-8")
+                    with self.assertRaisesRegex(
+                        TRUST.CliTrustError, "native executable"
+                    ):
+                        TRUST.fingerprint(path)
 
     def test_version_errors_withhold_output_and_sensitive_env_is_removed(self) -> None:
         secret = "TOP-SECRET-PROVIDER-OUTPUT"

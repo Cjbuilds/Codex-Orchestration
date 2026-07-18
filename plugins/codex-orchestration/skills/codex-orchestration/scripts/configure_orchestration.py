@@ -1126,15 +1126,16 @@ def _acl_snapshot(path: Path) -> tuple[bytes, ...] | None:
 
 
 def _windows_security_descriptor(path: Path) -> bytes | None:
-    """Read owner, group, and DACL as one self-relative descriptor."""
+    """Read owner, group, DACL, and mandatory label self-relatively."""
 
     if os.name != "nt":
         return None
     import ctypes
     from ctypes import wintypes
 
-    requested = 0x00000001 | 0x00000002 | 0x00000004
+    requested = 0x00000001 | 0x00000002 | 0x00000004 | 0x00000010
     error_insufficient_buffer = 122
+    maximum_attempts = 3
     advapi = ctypes.WinDLL("Advapi32.dll", use_last_error=True)
     get_file_security = advapi.GetFileSecurityW
     get_file_security.argtypes = (
@@ -1145,31 +1146,97 @@ def _windows_security_descriptor(path: Path) -> bytes | None:
         ctypes.POINTER(wintypes.DWORD),
     )
     get_file_security.restype = wintypes.BOOL
-    needed = wintypes.DWORD()
-    ctypes.set_last_error(0)
-    first = get_file_security(str(path), requested, None, 0, ctypes.byref(needed))
-    error = ctypes.get_last_error()
-    if first or error != error_insufficient_buffer or needed.value <= 0:
-        raise ConfigurationError(
-            f"Could not size the Windows security descriptor for {path}: {error}."
+    for _ in range(maximum_attempts):
+        needed = wintypes.DWORD()
+        ctypes.set_last_error(0)
+        first = get_file_security(
+            str(path), requested, None, 0, ctypes.byref(needed)
         )
-    buffer = ctypes.create_string_buffer(needed.value)
-    if not get_file_security(
-        str(path),
-        requested,
+        error = ctypes.get_last_error()
+        if first:
+            raise ConfigurationError(
+                f"Windows returned a descriptor without a sizing buffer for {path}."
+            )
+        if error != error_insufficient_buffer or needed.value <= 0:
+            raise ConfigurationError(
+                f"Could not size the Windows security descriptor for {path}: {error}."
+            )
+        allocated = needed.value
+        buffer = ctypes.create_string_buffer(allocated)
+        ctypes.set_last_error(0)
+        if get_file_security(
+            str(path),
+            requested,
+            ctypes.cast(buffer, ctypes.c_void_p),
+            allocated,
+            ctypes.byref(needed),
+        ):
+            return bytes(buffer.raw[: needed.value])
+        error = ctypes.get_last_error()
+        if error != error_insufficient_buffer:
+            raise ConfigurationError(
+                f"Could not read the Windows security descriptor for {path}: {error}."
+            )
+    raise ConfigurationError(
+        f"Windows security descriptor changed repeatedly while reading {path}."
+    )
+
+
+def _windows_security_sddl(descriptor: bytes | None) -> str | None:
+    """Canonicalize the selected descriptor components as SDDL."""
+
+    if descriptor is None:
+        return None
+    if os.name != "nt":
+        raise ConfigurationError("Windows security metadata was supplied off Windows.")
+    import ctypes
+    from ctypes import wintypes
+
+    requested = 0x00000001 | 0x00000002 | 0x00000004 | 0x00000010
+    sddl_revision_1 = 1
+    advapi = ctypes.WinDLL("Advapi32.dll", use_last_error=True)
+    convert = advapi.ConvertSecurityDescriptorToStringSecurityDescriptorW
+    convert.argtypes = (
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.LPWSTR),
+        ctypes.POINTER(wintypes.ULONG),
+    )
+    convert.restype = wintypes.BOOL
+    kernel32 = ctypes.WinDLL("Kernel32.dll", use_last_error=True)
+    kernel32.LocalFree.argtypes = (ctypes.c_void_p,)
+    kernel32.LocalFree.restype = ctypes.c_void_p
+    buffer = ctypes.create_string_buffer(descriptor)
+    rendered = wintypes.LPWSTR()
+    length = wintypes.ULONG()
+    if not convert(
         ctypes.cast(buffer, ctypes.c_void_p),
-        needed.value,
-        ctypes.byref(needed),
+        sddl_revision_1,
+        requested,
+        ctypes.byref(rendered),
+        ctypes.byref(length),
     ):
         error = ctypes.get_last_error()
         raise ConfigurationError(
-            f"Could not read the Windows security descriptor for {path}: {error}."
+            f"Could not canonicalize a Windows security descriptor: {error}."
         )
-    return bytes(buffer.raw[: needed.value])
+    try:
+        if not rendered:
+            raise ConfigurationError(
+                "Windows security descriptor canonicalization returned no text."
+            )
+        return rendered.value
+    finally:
+        kernel32.LocalFree(ctypes.cast(rendered, ctypes.c_void_p))
+
+
+def _windows_security_signature(path: Path) -> str | None:
+    return _windows_security_sddl(_windows_security_descriptor(path))
 
 
 def _set_windows_security_descriptor(path: Path, descriptor: bytes | None) -> None:
-    """Apply and byte-verify owner, group, and DACL on one staged file."""
+    """Apply and canonically verify access-control metadata on one staged file."""
 
     if descriptor is None:
         return
@@ -1178,7 +1245,8 @@ def _set_windows_security_descriptor(path: Path, descriptor: bytes | None) -> No
     import ctypes
     from ctypes import wintypes
 
-    requested = 0x00000001 | 0x00000002 | 0x00000004
+    requested = 0x00000001 | 0x00000002 | 0x00000004 | 0x00000010
+    expected = _windows_security_sddl(descriptor)
     advapi = ctypes.WinDLL("Advapi32.dll", use_last_error=True)
     set_file_security = advapi.SetFileSecurityW
     set_file_security.argtypes = (
@@ -1195,7 +1263,7 @@ def _set_windows_security_descriptor(path: Path, descriptor: bytes | None) -> No
         raise ConfigurationError(
             f"Could not apply the Windows security descriptor for {path}: {error}."
         )
-    if _windows_security_descriptor(path) != descriptor:
+    if _windows_security_signature(path) != expected:
         raise ConfigurationError(
             f"Windows security descriptor verification failed for {path}."
         )
@@ -1211,7 +1279,7 @@ def _metadata_signature(path: Path) -> tuple[Any, ...]:
         current.st_mtime_ns,
         _xattr_snapshot(path),
         _acl_snapshot(path),
-        _windows_security_descriptor(path),
+        _windows_security_signature(path),
     )
 
 

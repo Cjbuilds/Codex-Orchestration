@@ -26,7 +26,7 @@
 - Verify Gate 0 CLI controls before any billable command and read only Codex's
   bounded `--output-last-message` artifact, never decorated process output. The
   Windows portability job performs a real temporary Credential Manager round trip
-  and verifies transactional owner/group/DACL preservation across file replacement;
+  and verifies transactional owner/group/DACL/integrity-label preservation across file replacement;
   those hosted gates must pass before 0.6.0 is released and are not reproducible on
   a non-Windows local preflight.
 

@@ -92,6 +92,10 @@ class ExternalConfiguratorTests(unittest.TestCase):
                     helper, "openrouter"
                 ),
             )
+            self.assertEqual(
+                command[-3:], ["enroll", "--provider", "openrouter"]
+            )
+            self.assertIn(str(helper), command[:-3])
             provider = backend.providers["openrouter"]
             self.assertEqual(set(provider), {"name", "base_url", "wire_api", "auth"})
             self.assertNotIn("model", provider)
