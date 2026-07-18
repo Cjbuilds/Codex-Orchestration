@@ -1235,6 +1235,32 @@ def _windows_security_signature(path: Path) -> str | None:
     return _windows_security_sddl(_windows_security_descriptor(path))
 
 
+def _windows_descriptor_for_apply(descriptor: bytes) -> bytes:
+    """Request kernel auto-inheritance when reapplying inherited ACLs."""
+
+    import struct
+
+    security_descriptor_relative_size = 20
+    control_offset = 2
+    se_self_relative = 0x8000
+    se_dacl_auto_inherit_req = 0x0100
+    se_sacl_auto_inherit_req = 0x0200
+    se_dacl_auto_inherited = 0x0400
+    se_sacl_auto_inherited = 0x0800
+    if len(descriptor) < security_descriptor_relative_size:
+        raise ConfigurationError("Windows security descriptor is truncated.")
+    mutable = bytearray(descriptor)
+    control = struct.unpack_from("<H", mutable, control_offset)[0]
+    if not control & se_self_relative:
+        raise ConfigurationError("Windows security descriptor is not self-relative.")
+    if control & se_dacl_auto_inherited:
+        control |= se_dacl_auto_inherit_req
+    if control & se_sacl_auto_inherited:
+        control |= se_sacl_auto_inherit_req
+    struct.pack_into("<H", mutable, control_offset, control)
+    return bytes(mutable)
+
+
 def _set_windows_security_descriptor(path: Path, descriptor: bytes | None) -> None:
     """Apply and canonically verify access-control metadata on one staged file."""
 
@@ -1255,7 +1281,8 @@ def _set_windows_security_descriptor(path: Path, descriptor: bytes | None) -> No
         ctypes.c_void_p,
     )
     set_file_security.restype = wintypes.BOOL
-    buffer = ctypes.create_string_buffer(descriptor)
+    applied_descriptor = _windows_descriptor_for_apply(descriptor)
+    buffer = ctypes.create_string_buffer(applied_descriptor)
     if not set_file_security(
         str(path), requested, ctypes.cast(buffer, ctypes.c_void_p)
     ):

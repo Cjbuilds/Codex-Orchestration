@@ -2110,6 +2110,64 @@ multi_agent = true'''
             self.assertEqual(CONFIGURE._windows_security_signature(path), before)
             self.assertFalse((root / CONFIGURE.TRANSACTION_JOURNAL).exists())
 
+    def test_windows_apply_descriptor_sets_auto_inherit_request_bits(self) -> None:
+        import struct
+
+        descriptor = bytearray(20)
+        original_control = 0x8000 | 0x0400 | 0x0800
+        struct.pack_into("<H", descriptor, 2, original_control)
+
+        applied = CONFIGURE._windows_descriptor_for_apply(bytes(descriptor))
+        applied_control = struct.unpack_from("<H", applied, 2)[0]
+
+        self.assertEqual(applied_control & 0x0300, 0x0300)
+        self.assertEqual(applied_control & 0x0C00, 0x0C00)
+        self.assertEqual(struct.unpack_from("<H", descriptor, 2)[0], original_control)
+        with self.assertRaisesRegex(CONFIGURE.ConfigurationError, "truncated"):
+            CONFIGURE._windows_descriptor_for_apply(b"short")
+        with self.assertRaisesRegex(CONFIGURE.ConfigurationError, "self-relative"):
+            CONFIGURE._windows_descriptor_for_apply(bytes(20))
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows security descriptors")
+    def test_windows_inherited_dacl_survives_existing_file_update(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            inherited_root = root / "inherited"
+            inherited_root.mkdir()
+            icacls = shutil.which("icacls")
+            self.assertIsNotNone(icacls)
+            prepared = subprocess.run(
+                [
+                    icacls,
+                    str(inherited_root),
+                    "/inheritance:r",
+                    "/grant:r",
+                    f"{getpass.getuser()}:(OI)(CI)F",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(prepared.returncode, 0, prepared.stderr)
+            path = inherited_root / "agent.toml"
+            path.write_bytes(b"old\n")
+            before = CONFIGURE._windows_security_signature(path)
+            self.assertIsNotNone(before)
+            assert before is not None
+            self.assertIn("D:AI", before)
+            self.assertIn("ID", before)
+
+            CONFIGURE.apply_changes_transactionally(
+                [(path, "old\n", "new\n")],
+                transaction_root=inherited_root,
+            )
+
+            self.assertEqual(path.read_text(encoding="utf-8"), "new\n")
+            self.assertEqual(CONFIGURE._windows_security_signature(path), before)
+            self.assertFalse(
+                (inherited_root / CONFIGURE.TRANSACTION_JOURNAL).exists()
+            )
+
     @unittest.skipUnless(os.name == "nt", "requires Windows security descriptors")
     def test_windows_security_descriptor_failure_rolls_back(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
