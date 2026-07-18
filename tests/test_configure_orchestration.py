@@ -2125,6 +2125,21 @@ multi_agent = true'''
             base | 0x00000010 | 0x80000000 | 0x40000000,
         )
 
+    def test_windows_sddl_mismatch_summary_withholds_acl_contents(self) -> None:
+        expected = "O:S-1-5-21-111G:S-1-5-21-222D:AI(A;ID;FA;;;S-1-5-21-333)"
+        actual = "O:S-1-5-21-111G:S-1-5-21-222D:ARAI(A;ID;FA;;;S-1-5-21-444)"
+
+        summary = CONFIGURE._windows_sddl_mismatch_summary(expected, actual)
+
+        self.assertIn("owner_equal=True", summary)
+        self.assertIn("group_equal=True", summary)
+        self.assertIn("dacl_equal=False", summary)
+        self.assertIn("expected_dacl_flags=AI", summary)
+        self.assertIn("actual_dacl_flags=ARAI", summary)
+        self.assertIn("expected_dacl_aces=1", summary)
+        self.assertIn("actual_dacl_aces=1", summary)
+        self.assertNotIn("S-1-5-21", summary)
+
     @unittest.skipUnless(os.name == "nt", "requires Windows security descriptors")
     def test_windows_inherited_dacl_survives_existing_file_update(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

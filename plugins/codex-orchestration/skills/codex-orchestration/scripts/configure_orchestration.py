@@ -1235,6 +1235,45 @@ def _windows_security_signature(path: Path) -> str | None:
     return _windows_security_sddl(_windows_security_descriptor(path))
 
 
+def _windows_sddl_mismatch_summary(expected: str, actual: str) -> str:
+    """Describe an SDDL mismatch without exposing SIDs or ACL contents."""
+
+    def components(value: str) -> dict[str, str]:
+        matches = list(re.finditer(r"([OGDS]):", value))
+        return {
+            match.group(1): value[match.start() : matches[index + 1].start()]
+            if index + 1 < len(matches)
+            else value[match.start() :]
+            for index, match in enumerate(matches)
+        }
+
+    def digest(value: str) -> str:
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+
+    def acl_flags(value: str) -> str:
+        return value[2:].split("(", 1)[0] if value else "missing"
+
+    expected_parts = components(expected)
+    actual_parts = components(actual)
+    details = []
+    for marker, label in (("O", "owner"), ("G", "group"), ("D", "dacl"), ("S", "sacl")):
+        before = expected_parts.get(marker, "")
+        after = actual_parts.get(marker, "")
+        details.append(f"{label}_equal={before == after}")
+        if marker in {"D", "S"}:
+            details.extend(
+                (
+                    f"expected_{label}_flags={acl_flags(before)}",
+                    f"actual_{label}_flags={acl_flags(after)}",
+                    f"expected_{label}_aces={before.count('(')}",
+                    f"actual_{label}_aces={after.count('(')}",
+                    f"expected_{label}_hash={digest(before)}",
+                    f"actual_{label}_hash={digest(after)}",
+                )
+            )
+    return ", ".join(details)
+
+
 def _windows_named_security_information(control: int, *, has_label: bool) -> int:
     """Select exact access-control components for SetNamedSecurityInfoW."""
 
@@ -1380,9 +1419,12 @@ def _set_windows_security_descriptor(path: Path, descriptor: bytes | None) -> No
         raise ConfigurationError(
             f"Could not apply the Windows security descriptor for {path}: {result}."
         )
-    if _windows_security_signature(path) != expected:
+    actual = _windows_security_signature(path)
+    if actual != expected:
+        assert expected is not None and actual is not None
         raise ConfigurationError(
-            f"Windows security descriptor verification failed for {path}."
+            f"Windows security descriptor verification failed for {path}: "
+            f"{_windows_sddl_mismatch_summary(expected, actual)}."
         )
 
 
@@ -1467,7 +1509,7 @@ def stage_existing_file(
             )
         shutil.copystat(path, staged, follow_symlinks=False)
         _set_windows_security_descriptor(staged, windows_security)
-        with staged.open("rb") as handle:
+        with staged.open("r+b") as handle:
             os.fsync(handle.fileno())
         if _metadata_signature(staged) != _metadata_signature(path):
             raise ConfigurationError(
