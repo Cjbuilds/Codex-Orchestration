@@ -2247,12 +2247,13 @@ multi_agent = true'''
             path = root / "read-only.toml"
             path.write_bytes(b"old\n")
             path.chmod(0o400)
+            expected_mode = path.stat().st_mode & 0o777
             try:
                 CONFIGURE.apply_changes_transactionally(
                     [(path, "old\n", "new\n")], transaction_root=root
                 )
                 self.assertEqual(path.read_text(encoding="utf-8"), "new\n")
-                self.assertEqual(path.stat().st_mode & 0o777, 0o400)
+                self.assertEqual(path.stat().st_mode & 0o777, expected_mode)
                 self.assertFalse((root / CONFIGURE.TRANSACTION_JOURNAL).exists())
             finally:
                 path.chmod(0o600)
