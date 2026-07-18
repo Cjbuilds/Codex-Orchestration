@@ -303,7 +303,13 @@ def recover_provider_transaction(home: Path, backend: ConfigBackend) -> bool:
                 return True
         if not present and registry_digest == journal["registry_before_sha256"]:
             after = deepcopy(registry)
-            _require(not after["roles"], "cannot recover provider removal while roles remain")
+            _require(
+                not any(
+                    role["provider"] == provider_id
+                    for role in after["roles"].values()
+                ),
+                "cannot recover provider removal while dependent roles remain",
+            )
             after["providers"].pop(provider_id, None)
             after["cli_trust"].pop(provider_id, None)
             _require(
@@ -498,13 +504,7 @@ def _gate0_config(provider: dict[str, Any], config: dict[str, Any], model: str, 
 
 
 def _gate0_environment(isolated_home: Path) -> dict[str, str]:
-    environment = {
-        key: value
-        for key, value in os.environ.items()
-        if not key.upper().endswith(
-            ("_API_KEY", "_AUTH_TOKEN", "_ACCESS_TOKEN", "_SECRET")
-        )
-    }
+    environment = external_cli_trust.sanitized_environment()
     environment["CODEX_HOME"] = os.fspath(isolated_home)
     return environment
 

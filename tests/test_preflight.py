@@ -273,6 +273,39 @@ class PreflightTests(unittest.TestCase):
             PREFLIGHT.quick_checks(REPO_ROOT, base_sha="base", head_sha=None)
         self.assertNotIn("tests.test_preflight", captured[0])
 
+    def test_portability_runs_every_external_security_module(self) -> None:
+        captured: list[list[str]] = []
+
+        def fake_unittest(
+            root: Path,
+            name: str,
+            modules: list[str] | None = None,
+            **_kwargs: object,
+        ) -> PREFLIGHT.CheckResult:
+            captured.append(modules or [])
+            return PREFLIGHT.CheckResult(name, "PASS")
+
+        with (
+            mock.patch.object(
+                PREFLIGHT,
+                "compile_check",
+                return_value=PREFLIGHT.CheckResult("compile", "PASS"),
+            ),
+            mock.patch.object(
+                PREFLIGHT, "unittest_check", side_effect=fake_unittest
+            ),
+        ):
+            PREFLIGHT.ci_checks(
+                "portability", REPO_ROOT, base_sha=None, head_sha=None
+            )
+
+        expected = {
+            f"tests.{path.stem}"
+            for path in (REPO_ROOT / "tests").glob("test_external_*.py")
+        }
+        self.assertTrue(expected)
+        self.assertTrue(expected.issubset(set(captured[0])))
+
 
 if __name__ == "__main__":
     unittest.main()

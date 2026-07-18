@@ -34,6 +34,11 @@ changed helper or CLI bytes. A user-supplied helper is executable code and must 
 explicitly trusted; byte drift changes its status to `CLI_CHANGED` and requires
 re-trust.
 
+The command-backed helper necessarily returns the credential over captured stdout
+to the local readiness check or Codex provider process that invoked it. Those are
+trusted recipients; the value is kept in memory only, discarded immediately, and
+never included in diagnostics, model prompts, state files, or decorated output.
+
 Role resolution is a fresh authorization check, not a registry lookup: it compares
 the bundled adapter version and capability declaration, live App Server provider
 table, qualification/readiness state, credential-helper identity, credential

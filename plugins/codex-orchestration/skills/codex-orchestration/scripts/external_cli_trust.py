@@ -13,7 +13,23 @@ from typing import Any
 
 VERSION_TIMEOUT_SECONDS = 10
 MAX_VERSION_CHARS = 512
-SENSITIVE_SUFFIXES = ("_API_KEY", "_AUTH_TOKEN", "_ACCESS_TOKEN", "_SECRET")
+SENSITIVE_ENV_EXACT_NAMES = frozenset(
+    {"API_KEY", "TOKEN", "SECRET", "PASSWORD", "PASSPHRASE"}
+)
+SENSITIVE_ENV_SUFFIXES = (
+    "_API_KEY",
+    "_AUTH_TOKEN",
+    "_ACCESS_TOKEN",
+    "_ACCESS_KEY",
+    "_TOKEN",
+    "_SECRET",
+    "_CLIENT_SECRET",
+    "_PRIVATE_KEY",
+    "_PASSWORD",
+    "_PASSPHRASE",
+    "_CREDENTIAL",
+    "_CREDENTIALS",
+)
 
 
 class CliTrustError(RuntimeError):
@@ -77,7 +93,8 @@ def sanitized_environment() -> dict[str, str]:
     return {
         key: value
         for key, value in os.environ.items()
-        if not key.upper().endswith(SENSITIVE_SUFFIXES)
+        if key.upper() not in SENSITIVE_ENV_EXACT_NAMES
+        and not key.upper().endswith(SENSITIVE_ENV_SUFFIXES)
     }
 
 

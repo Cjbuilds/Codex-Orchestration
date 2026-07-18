@@ -556,6 +556,77 @@ class ExternalConfiguratorTests(unittest.TestCase):
             self.assertEqual(recovered["providers"], {})
             self.assertFalse(CONFIG.journal_path(home).exists())
 
+    def test_remove_recovery_preserves_roles_for_other_providers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            backend = FakeBackend()
+            prepared(home, backend)
+            qualify(home)
+            CONFIG.connect_role(
+                home,
+                "kimi_researcher",
+                "Review bounded research packets.",
+                "openrouter",
+                "moonshotai/kimi-k3",
+                "max",
+            )
+            registry, digest = CONFIG.load_registry(home)
+            other = deepcopy(registry["providers"]["openrouter"])
+            other["owned_config_keys"] = [
+                key.replace("model_providers.openrouter.", "model_providers.other.")
+                for key in other["owned_config_keys"]
+            ]
+            registry["providers"]["other"] = other
+            registry["roles"]["kimi_researcher"]["provider"] = "other"
+            CONFIG.external_registry.write_registry(
+                CONFIG.registry_path(home), registry, expected_sha256=digest
+            )
+
+            registry, before_digest = CONFIG.load_registry(home)
+            expected = deepcopy(backend.providers["openrouter"])
+            after = deepcopy(registry)
+            after["providers"].pop("openrouter")
+            journal = {
+                "schema": 1,
+                "managed_by": "codex-orchestration",
+                "action": "remove_provider",
+                "phase": "provider_removed",
+                "provider": "openrouter",
+                "provider_config_sha256": CONFIG._sha256_json(expected),
+                "registry_before_sha256": before_digest,
+                "registry_after_sha256": CONFIG.hashlib.sha256(
+                    CONFIG.external_registry.canonical_bytes(after)
+                ).hexdigest(),
+            }
+            CONFIG._write_journal(CONFIG.journal_path(home), journal)
+            backend.providers.pop("openrouter")
+
+            self.assertTrue(CONFIG.recover_provider_transaction(home, backend))
+            recovered, _ = CONFIG.load_registry(home)
+            self.assertEqual(set(recovered["providers"]), {"other"})
+            self.assertEqual(
+                recovered["roles"]["kimi_researcher"]["provider"], "other"
+            )
+            self.assertFalse(CONFIG.journal_path(home).exists())
+
+    def test_gate0_environment_uses_central_secret_filter(self) -> None:
+        isolated_home = Path("/safe/isolated-home")
+        with mock.patch.object(
+            CONFIG.external_cli_trust,
+            "sanitized_environment",
+            return_value={"PATH": "/safe/bin", "KEEP_ME": "yes"},
+        ) as sanitized:
+            environment = CONFIG._gate0_environment(isolated_home)
+        sanitized.assert_called_once_with()
+        self.assertEqual(
+            environment,
+            {
+                "PATH": "/safe/bin",
+                "KEEP_ME": "yes",
+                "CODEX_HOME": str(isolated_home),
+            },
+        )
+
     def test_gate0_requires_billing_ack_is_ephemeral_and_withholds_output(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)

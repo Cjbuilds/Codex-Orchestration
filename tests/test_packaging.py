@@ -121,7 +121,16 @@ class PackagingTests(unittest.TestCase):
         self.assertIn('python-version: ["3.11", "3.13"]', ci)
         self.assertIn("name: portability (${{ matrix.os }})", ci)
         self.assertIn("os: [macos-latest, windows-latest]", ci)
-        self.assertIn('"tests.test_external_credentials"', preflight)
+        for module in (
+            "tests.test_external_cli_trust",
+            "tests.test_external_configurator",
+            "tests.test_external_credentials",
+            "tests.test_external_providers",
+            "tests.test_external_readiness",
+            "tests.test_external_registry",
+            "tests.test_external_subscription",
+        ):
+            self.assertIn(f'"{module}"', preflight)
         self.assertIn("name: analyze (python)", codeql)
         self.assertEqual(codeql.count("github/codeql-action/analyze@"), 1)
 
