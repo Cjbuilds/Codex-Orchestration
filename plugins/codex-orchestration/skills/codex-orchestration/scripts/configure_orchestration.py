@@ -1073,6 +1073,234 @@ def _path_identity(path: Path) -> tuple[int, int] | None:
     return current.st_dev, current.st_ino
 
 
+def _windows_open_verified_file(
+    path: Path,
+    expected_identity: tuple[int, int],
+    *,
+    desired_access: int,
+) -> tuple[Any, Any]:
+    """Open one non-reparse file and bind its handle to the expected inode."""
+
+    if os.name != "nt":
+        raise ConfigurationError("Windows file-handle operation requested off Windows.")
+    import ctypes
+    from ctypes import wintypes
+
+    class ByHandleFileInformation(ctypes.Structure):
+        _fields_ = (
+            ("file_attributes", wintypes.DWORD),
+            ("creation_time", wintypes.FILETIME),
+            ("last_access_time", wintypes.FILETIME),
+            ("last_write_time", wintypes.FILETIME),
+            ("volume_serial_number", wintypes.DWORD),
+            ("file_size_high", wintypes.DWORD),
+            ("file_size_low", wintypes.DWORD),
+            ("number_of_links", wintypes.DWORD),
+            ("file_index_high", wintypes.DWORD),
+            ("file_index_low", wintypes.DWORD),
+        )
+
+    kernel32 = ctypes.WinDLL("Kernel32.dll", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    get_information = kernel32.GetFileInformationByHandle
+    get_information.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(ByHandleFileInformation),
+    )
+    get_information.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    file_share_read = 0x00000001
+    file_share_write = 0x00000002
+    file_share_delete = 0x00000004
+    open_existing = 3
+    file_flag_open_reparse_point = 0x00200000
+    ctypes.set_last_error(0)
+    handle = create_file(
+        str(path),
+        desired_access,
+        file_share_read | file_share_write | file_share_delete,
+        None,
+        open_existing,
+        file_flag_open_reparse_point,
+        None,
+    )
+    invalid_handle = ctypes.c_void_p(-1).value
+    if handle == invalid_handle:
+        error = ctypes.get_last_error()
+        raise ConfigurationError(f"Could not open a verified Windows file: {error}.")
+    try:
+        information = ByHandleFileInformation()
+        ctypes.set_last_error(0)
+        if not get_information(handle, ctypes.byref(information)):
+            error = ctypes.get_last_error()
+            raise ConfigurationError(
+                f"Could not identify an opened Windows file: {error}."
+            )
+        file_index = (information.file_index_high << 32) | information.file_index_low
+        if (
+            file_index != expected_identity[1]
+            or _path_identity(path) != expected_identity
+            or path.is_symlink()
+        ):
+            raise ConfigurationError("Windows file identity changed before mutation.")
+        return kernel32, handle
+    except BaseException:
+        kernel32.CloseHandle(handle)
+        raise
+
+
+def _windows_replace_file(
+    staged: Path,
+    destination: Path,
+    staged_identity: tuple[int, int],
+) -> None:
+    """Atomically publish a verified file, including over a read-only target."""
+
+    import ctypes
+    from ctypes import wintypes
+
+    delete_access = 0x00010000
+    file_write_attributes = 0x00000100
+    synchronize = 0x00100000
+    kernel32, handle = _windows_open_verified_file(
+        staged,
+        staged_identity,
+        desired_access=delete_access | file_write_attributes | synchronize,
+    )
+    try:
+        class FileRenameInfo(ctypes.Structure):
+            _fields_ = (
+                ("flags", wintypes.DWORD),
+                ("root_directory", wintypes.HANDLE),
+                ("file_name_length", wintypes.DWORD),
+                ("file_name", wintypes.WCHAR * 1),
+            )
+
+        set_information = kernel32.SetFileInformationByHandle
+        set_information.argtypes = (
+            wintypes.HANDLE,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+        )
+        set_information.restype = wintypes.BOOL
+        destination_bytes = os.path.abspath(destination).encode("utf-16-le")
+        buffer_size = ctypes.sizeof(FileRenameInfo) + len(destination_bytes)
+        buffer = ctypes.create_string_buffer(buffer_size)
+        information = FileRenameInfo.from_buffer(buffer)
+        information.flags = 0x00000001 | 0x00000002 | 0x00000040
+        information.root_directory = None
+        information.file_name_length = len(destination_bytes)
+        ctypes.memmove(
+            ctypes.addressof(buffer) + FileRenameInfo.file_name.offset,
+            destination_bytes,
+            len(destination_bytes),
+        )
+        ctypes.set_last_error(0)
+        if not set_information(
+            handle,
+            22,  # FileRenameInfoEx
+            ctypes.cast(buffer, ctypes.c_void_p),
+            buffer_size,
+        ):
+            error = ctypes.get_last_error()
+            raise ConfigurationError(
+                f"Could not atomically replace a Windows file: {error}."
+            )
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _windows_unlink_exact(path: Path, expected_identity: tuple[int, int]) -> None:
+    """Remove exactly one verified Windows link, even when it is read-only."""
+
+    import ctypes
+    from ctypes import wintypes
+
+    delete_access = 0x00010000
+    file_write_attributes = 0x00000100
+    synchronize = 0x00100000
+    kernel32, handle = _windows_open_verified_file(
+        path,
+        expected_identity,
+        desired_access=delete_access | file_write_attributes | synchronize,
+    )
+    try:
+        set_information = kernel32.SetFileInformationByHandle
+        set_information.argtypes = (
+            wintypes.HANDLE,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+        )
+        set_information.restype = wintypes.BOOL
+        flags = wintypes.DWORD(0x00000001 | 0x00000002 | 0x00000010)
+        ctypes.set_last_error(0)
+        if not set_information(
+            handle,
+            21,  # FileDispositionInfoEx
+            ctypes.byref(flags),
+            ctypes.sizeof(flags),
+        ):
+            error = ctypes.get_last_error()
+            raise ConfigurationError(
+                f"Could not remove a verified Windows temporary: {error}."
+            )
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _unlink_exact(
+    path: Path,
+    expected_identity: tuple[int, int],
+    *,
+    missing_ok: bool = False,
+) -> None:
+    """Unlink only the expected regular-file inode, never a replacement."""
+
+    try:
+        current = path.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        if missing_ok:
+            return
+        raise
+    if (
+        path.is_symlink()
+        or not stat.S_ISREG(current.st_mode)
+        or (current.st_dev, current.st_ino) != expected_identity
+    ):
+        raise ConfigurationError(f"Refusing to remove a changed temporary: {path}.")
+    if os.name == "nt":
+        _windows_unlink_exact(path, expected_identity)
+    else:
+        path.unlink()
+    if _path_identity(path) is not None or path.is_symlink():
+        raise ConfigurationError(f"Verified temporary removal failed: {path}.")
+
+
+def _replace_exact(
+    staged: Path,
+    destination: Path,
+    staged_identity: tuple[int, int],
+) -> None:
+    if os.name == "nt":
+        _windows_replace_file(staged, destination, staged_identity)
+    else:
+        os.replace(staged, destination)
+
+
 def _xattr_snapshot(path: Path) -> dict[str, bytes] | bytes | None:
     if all(hasattr(os, name) for name in ("listxattr", "getxattr")):
         try:
@@ -1400,6 +1628,8 @@ def _set_windows_security_descriptor(path: Path, descriptor: bytes | None) -> No
     from ctypes import wintypes
 
     expected = _windows_security_sddl(descriptor)
+    if _windows_security_signature(path) == expected:
+        return
     advapi = ctypes.WinDLL("Advapi32.dll", use_last_error=True)
     descriptor_buffer = ctypes.create_string_buffer(descriptor)
     descriptor_pointer = ctypes.cast(descriptor_buffer, ctypes.c_void_p)
@@ -1559,6 +1789,9 @@ def stage_existing_file(
 ) -> Path:
     """Clone a live file's security metadata, then stage complete new bytes."""
     staged = stage_text(path, "", 0o600, staged_path)
+    staged_identity = _path_identity(staged)
+    if staged_identity is None:
+        raise ConfigurationError(f"New staging file disappeared: {staged}")
     try:
         windows_security = _windows_security_descriptor(path)
         cp = Path("/bin/cp")
@@ -1583,9 +1816,8 @@ def stage_existing_file(
         else:  # pragma: no cover - non-POSIX fallback
             shutil.copy2(path, staged, follow_symlinks=False)
 
-        staged_identity = _path_identity(staged)
-        if staged_identity is None:
-            raise ConfigurationError(f"Metadata clone disappeared: {staged}")
+        if _path_identity(staged) != staged_identity:
+            raise ConfigurationError(f"Metadata clone identity changed: {staged}")
         staged.chmod(stat.S_IMODE(staged.stat(follow_symlinks=False).st_mode) | stat.S_IWUSR)
         _write_staged_content(staged, content, staged_identity)
         flags = os.O_RDWR
@@ -1617,7 +1849,7 @@ def stage_existing_file(
             )
         return staged
     except BaseException:
-        staged.unlink(missing_ok=True)
+        _unlink_exact(staged, staged_identity, missing_ok=True)
         raise
 
 
@@ -1653,6 +1885,7 @@ def _replace_staged_atomically(
     original_identity: tuple[int, int],
     expected_metadata: tuple[Any, ...],
     expected_content_sha256: str,
+    replacement_content_sha256: str,
 ) -> None:
     staged_stat = staged.stat(follow_symlinks=False)
     if (
@@ -1669,11 +1902,12 @@ def _replace_staged_atomically(
         or _metadata_signature(destination) != expected_metadata
         or _sha256_file(destination) != expected_content_sha256
         or _metadata_signature(staged) != expected_metadata
+        or _sha256_file(staged) != replacement_content_sha256
     ):
         raise ConfigurationError(
             f"Destination metadata changed before publication: {destination}."
         )
-    os.replace(staged, destination)
+    _replace_exact(staged, destination, staged_identity)
     _fsync_directory(destination.parent)
     destination_stat = destination.stat(follow_symlinks=False)
     tombstone_identity = _path_identity(tombstone)
@@ -1721,7 +1955,7 @@ def _move_original_to_tombstone(
         raise ConfigurationError(
             f"Destination changed before atomic deletion: {destination}."
         )
-    os.replace(destination, tombstone)
+    _replace_exact(destination, tombstone, original_identity)
     _fsync_directory(destination.parent)
     tombstone_stat = tombstone.stat(follow_symlinks=False)
     if (
@@ -1770,9 +2004,9 @@ def _restore_original_from_tombstone(
                 f"Original tombstone link topology changed for {destination}."
             )
         if destination_identity == original_identity:
-            tombstone.unlink()
+            _unlink_exact(tombstone, original_identity)
         elif destination_identity in {None, installed_identity}:
-            os.replace(tombstone, destination)
+            _replace_exact(tombstone, destination, original_identity)
         else:
             raise ConfigurationError(
                 f"Cannot restore {destination}; the destination is occupied."
@@ -2253,7 +2487,11 @@ def _cleanup_journal_temporaries(
                 raise ConfigurationError(
                     f"Transaction temporary identity changed: {candidate}."
                 )
-            candidate.unlink()
+            if identity is None:
+                raise ConfigurationError(
+                    f"Transaction temporary disappeared during cleanup: {candidate}."
+                )
+            _unlink_exact(candidate, identity)
             touched.add(candidate.parent)
     for directory in sorted(touched):
         _fsync_directory(directory)
@@ -2428,7 +2666,7 @@ def recover_incomplete_transaction(root: Path) -> bool:
                         raise ConfigurationError(
                             f"Staged recovery copy was modified: {staged_old}."
                         ) from tombstone_error
-                    os.replace(staged_old, destination)
+                    _replace_exact(staged_old, destination, staged_old_identity)
                     used_staged_backup = True
                 destination_stat = destination.stat(follow_symlinks=False)
                 if (
@@ -2518,7 +2756,7 @@ def _apply_changes_transactionally_locked(
         _relative_to_root(path, root)
 
     prepared: list[dict[str, Any]] = []
-    staged_paths: set[Path] = set()
+    staged_paths: dict[Path, tuple[int, int]] = {}
     created_dirs: set[Path] = set()
     attempted: list[dict[str, Any]] = []
     committed = False
@@ -2654,29 +2892,51 @@ def _apply_changes_transactionally_locked(
                         item["staged_new"],
                     )
                 )
-                staged_paths.add(item["staged_new"])
                 item["staged_new_identity"] = _path_identity(item["staged_new"])
+                if item["staged_new_identity"] is None:
+                    raise ConfigurationError(
+                        f"Staged replacement disappeared for {item['path']}."
+                    )
                 item["installed_identity"] = item["staged_new_identity"]
                 item["installed_metadata_sha256"] = _metadata_digest(
                     item["staged_new"]
                 )
+                if _sha256_file(item["staged_new"]) != _sha256_text(item["new"]):
+                    raise ConfigurationError(
+                        f"Staged replacement content mismatch for {item['path']}."
+                    )
+                staged_paths[item["staged_new"]] = item["staged_new_identity"]
             if isinstance(item["staged_old"], Path):
                 item["staged_old"] = stage_existing_file(
                     item["path"], item["old"], item["staged_old"]
                 )
-                staged_paths.add(item["staged_old"])
                 item["staged_old_identity"] = _path_identity(item["staged_old"])
+                if item["staged_old_identity"] is None:
+                    raise ConfigurationError(
+                        f"Staged recovery copy disappeared for {item['path']}."
+                    )
                 item["staged_old_metadata_sha256"] = _metadata_digest(
                     item["staged_old"]
                 )
+                if _sha256_file(item["staged_old"]) != _sha256_text(item["old"]):
+                    raise ConfigurationError(
+                        f"Staged recovery content mismatch for {item['path']}."
+                    )
+                staged_paths[item["staged_old"]] = item["staged_old_identity"]
             if isinstance(item["tombstone"], Path):
                 item["tombstone"] = stage_text(
                     item["path"], "", item["mode"], item["tombstone"]
                 )
-                staged_paths.add(item["tombstone"])
                 item["tombstone_placeholder_identity"] = _path_identity(
                     item["tombstone"]
                 )
+                if item["tombstone_placeholder_identity"] is None:
+                    raise ConfigurationError(
+                        f"Tombstone placeholder disappeared for {item['path']}."
+                    )
+                staged_paths[item["tombstone"]] = item[
+                    "tombstone_placeholder_identity"
+                ]
             if item["existed"]:
                 item["source_metadata"] = _metadata_signature(item["path"])
                 for candidate in (item["staged_new"], item["staged_old"]):
@@ -2740,6 +3000,7 @@ def _apply_changes_transactionally_locked(
                         item["identity"],
                         item["tombstone_placeholder_identity"],
                     )
+                    staged_paths[item["tombstone"]] = item["identity"]
                     _replace_staged_atomically(
                         item["staged_new"],
                         item["path"],
@@ -2748,6 +3009,7 @@ def _apply_changes_transactionally_locked(
                         item["identity"],
                         item["source_metadata"],
                         _sha256_text(item["old"]),
+                        _sha256_text(item["new"]),
                     )
                 else:
                     os.link(
@@ -2760,9 +3022,11 @@ def _apply_changes_transactionally_locked(
                         raise ConfigurationError(
                             f"New destination identity could not be verified: {item['path']}."
                         )
-                    item["staged_new"].unlink()
+                    _unlink_exact(
+                        item["staged_new"], item["staged_new_identity"]
+                    )
                     _fsync_directory(item["path"].parent)
-                staged_paths.discard(item["staged_new"])
+                staged_paths.pop(item["staged_new"], None)
             else:
                 _move_original_to_tombstone(
                     item["path"],
@@ -2772,6 +3036,7 @@ def _apply_changes_transactionally_locked(
                     item["source_metadata"],
                     _sha256_text(item["old"]),
                 )
+                staged_paths[item["tombstone"]] = item["identity"]
 
         for item in prepared:
             if item["new"]:
@@ -2793,8 +3058,13 @@ def _apply_changes_transactionally_locked(
                 raise ConfigurationError(
                     f"Deleted destination reappeared during apply: {item['path']}."
                 )
-            if read_text(item["path"]) != item["new"]:
-                raise ConfigurationError(f"Final readback failed for {item['path']}.")
+            observed = read_text(item["path"])
+            if observed != item["new"]:
+                observed_state = "original" if observed == item["old"] else "other"
+                raise ConfigurationError(
+                    f"Final readback failed for {item['path']}: "
+                    f"observed_state={observed_state}."
+                )
             _fsync_directory(item["path"].parent)
 
         payload["phase"] = "committed"
@@ -2812,9 +3082,9 @@ def _apply_changes_transactionally_locked(
                     raise ConfigurationError(
                         f"Committed tombstone identity changed: {tombstone}."
                     )
-                tombstone.unlink()
+                _unlink_exact(tombstone, item["identity"])
                 _fsync_directory(tombstone.parent)
-                staged_paths.discard(tombstone)
+                staged_paths.pop(tombstone, None)
             except (ConfigurationError, OSError) as cleanup_exc:
                 cleanup_errors.append(f"{tombstone}: {cleanup_exc}")
         if cleanup_errors:
@@ -2824,10 +3094,10 @@ def _apply_changes_transactionally_locked(
                 "the transaction journal was kept for the next run: "
                 + "; ".join(cleanup_errors)
             )
-        for staged in list(staged_paths):
-            staged.unlink(missing_ok=True)
+        for staged, staged_identity in list(staged_paths.items()):
+            _unlink_exact(staged, staged_identity, missing_ok=True)
             _fsync_directory(staged.parent)
-            staged_paths.discard(staged)
+            staged_paths.pop(staged, None)
         _remove_transaction_journal(root)
         journal_active = False
     except BaseException as exc:
@@ -2891,10 +3161,10 @@ def _apply_changes_transactionally_locked(
                 f"{detail}; recovery journal kept at {journal}"
             ) from exc
         try:
-            for staged in list(staged_paths):
-                staged.unlink(missing_ok=True)
+            for staged, staged_identity in list(staged_paths.items()):
+                _unlink_exact(staged, staged_identity, missing_ok=True)
                 _fsync_directory(staged.parent)
-                staged_paths.discard(staged)
+                staged_paths.pop(staged, None)
             if journal_active:
                 _remove_transaction_journal(root)
                 journal_active = False
@@ -2919,8 +3189,8 @@ def _apply_changes_transactionally_locked(
         raise
     finally:
         if not preserve_staged:
-            for staged in list(staged_paths):
-                staged.unlink(missing_ok=True)
+            for staged, staged_identity in list(staged_paths.items()):
+                _unlink_exact(staged, staged_identity, missing_ok=True)
 
 
 def backup_change(path: Path, content: str, base: Path) -> tuple[Path, str, str]:

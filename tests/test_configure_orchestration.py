@@ -1227,6 +1227,7 @@ multi_agent = true'''
                 original_identity: tuple[int, int],
                 expected_metadata: tuple[object, ...],
                 expected_content_sha256: str,
+                replacement_content_sha256: str,
             ) -> None:
                 nonlocal injected
                 if Path(destination) == advisor and not injected:
@@ -1240,6 +1241,7 @@ multi_agent = true'''
                     original_identity,
                     expected_metadata,
                     expected_content_sha256,
+                    replacement_content_sha256,
                 )
 
             with mock.patch.object(
@@ -1313,6 +1315,7 @@ multi_agent = true'''
                 original_identity: tuple[int, int],
                 expected_metadata: tuple[object, ...],
                 expected_content_sha256: str,
+                replacement_content_sha256: str,
             ) -> None:
                 nonlocal second_failed
                 destination_path = Path(destination)
@@ -1327,6 +1330,7 @@ multi_agent = true'''
                     original_identity,
                     expected_metadata,
                     expected_content_sha256,
+                    replacement_content_sha256,
                 )
 
             def fail_first_rollback(
@@ -1407,6 +1411,7 @@ multi_agent = true'''
                 original_identity: tuple[int, int],
                 expected_metadata: tuple[object, ...],
                 expected_content_sha256: str,
+                replacement_content_sha256: str,
             ) -> None:
                 nonlocal interrupted
                 if destination == second and not interrupted:
@@ -1420,6 +1425,7 @@ multi_agent = true'''
                     original_identity,
                     expected_metadata,
                     expected_content_sha256,
+                    replacement_content_sha256,
                 )
 
             with mock.patch.object(
@@ -1898,6 +1904,7 @@ multi_agent = true'''
                 original_identity: tuple[int, int],
                 expected_metadata: tuple[object, ...],
                 expected_content_sha256: str,
+                replacement_content_sha256: str,
             ) -> None:
                 nonlocal injected
                 if not injected:
@@ -1911,6 +1918,7 @@ multi_agent = true'''
                     original_identity,
                     expected_metadata,
                     expected_content_sha256,
+                    replacement_content_sha256,
                 )
 
             with mock.patch.object(
@@ -2077,6 +2085,45 @@ multi_agent = true'''
             self.assertTrue(injected)
             self.assertEqual(path.read_text(encoding="utf-8"), "usr\n")
             self.assertFalse((root / CONFIGURE.TRANSACTION_JOURNAL).exists())
+
+    def test_staged_content_change_is_rejected_before_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "agent.toml"
+            path.write_text("old\n", encoding="utf-8")
+            real_replace = CONFIGURE._replace_staged_atomically
+            injected = False
+
+            def mutate_staged_then_replace(*args: object) -> None:
+                nonlocal injected
+                staged = Path(args[0])
+                if not injected:
+                    before = staged.stat(follow_symlinks=False)
+                    staged.write_text("bad\n", encoding="utf-8", newline="")
+                    os.utime(
+                        staged,
+                        ns=(before.st_atime_ns, before.st_mtime_ns),
+                    )
+                    injected = True
+                real_replace(*args)
+
+            with mock.patch.object(
+                CONFIGURE,
+                "_replace_staged_atomically",
+                side_effect=mutate_staged_then_replace,
+            ):
+                with self.assertRaisesRegex(
+                    CONFIGURE.ConfigurationError,
+                    "metadata changed before publication",
+                ) as raised:
+                    CONFIGURE.apply_changes_transactionally(
+                        [(path, "old\n", "new\n")],
+                        transaction_root=root,
+                    )
+
+            self.assertTrue(injected)
+            self.assertEqual(path.read_text(encoding="utf-8"), "old\n")
+            self.assertNotIn("bad", str(raised.exception))
 
     @unittest.skipUnless(os.name == "nt", "requires Windows security descriptors")
     def test_windows_existing_file_update_preserves_security_descriptor(self) -> None:
@@ -2293,6 +2340,7 @@ multi_agent = true'''
                 original_identity: tuple[int, int],
                 expected_metadata: tuple[object, ...],
                 expected_content_sha256: str,
+                replacement_content_sha256: str,
             ) -> None:
                 nonlocal injected
                 if destination == failing and not injected:
@@ -2306,6 +2354,7 @@ multi_agent = true'''
                     original_identity,
                     expected_metadata,
                     expected_content_sha256,
+                    replacement_content_sha256,
                 )
 
             with mock.patch.object(
