@@ -870,6 +870,7 @@ def resolve_role(
     role_id: str,
     effort: str,
     backend: ConfigBackend,
+    workspace: Path | None = None,
 ) -> dict[str, str]:
     """Resolve a role only after re-attesting every route-time trust boundary."""
 
@@ -948,6 +949,31 @@ def resolve_role(
     )
     _require(info.st_nlink == 1, "role agent must not be hard linked")
     _require(_sha256_text(content) == agent["sha256"], "role agent drifted")
+    target_workspace = (workspace or Path.cwd()).resolve()
+    personal_agents = (home / "agents").resolve()
+    for root in (target_workspace, *target_workspace.parents):
+        directory = root / ".codex" / "agents"
+        if not directory.exists() and not directory.is_symlink():
+            continue
+        _require(
+            not directory.is_symlink() and directory.is_dir(),
+            "project agent directory is unsafe",
+        )
+        if directory.resolve() == personal_agents:
+            continue
+        for candidate in sorted(directory.glob("*.toml")):
+            _require(
+                not candidate.is_symlink() and candidate.is_file(),
+                "project agent path is unsafe",
+            )
+            try:
+                parsed = tomllib.loads(candidate.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+                raise ExternalConfigurationError("project agent is unreadable") from exc
+            _require(
+                parsed.get("name") != agent["name"],
+                f"project agent shadows external role {role_id!r}: {candidate}",
+            )
     return {
         "role": role_id,
         "agent": agent["name"],
@@ -1386,7 +1412,13 @@ def main(argv: list[str] | None = None) -> int:
             elif args.command == "resolve":
                 print(
                     json.dumps(
-                        resolve_role(home, args.role, args.effort, backend),
+                        resolve_role(
+                            home,
+                            args.role,
+                            args.effort,
+                            backend,
+                            Path.cwd().resolve(),
+                        ),
                         sort_keys=True,
                     )
                 )

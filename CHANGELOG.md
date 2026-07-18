@@ -2,11 +2,11 @@
 
 ## 0.7.0 — Unreleased
 
-- Add `/codex-orchestration --update`, a canonical-marketplace-only wrapper around
-  Codex's native plugin upgrade/install commands. It rejects local or unexpected
-  sources, malformed candidates, downgrades, source drift, version drift, and
-  enabled-state drift without removing the plugin or touching routing, credentials,
-  chats, or sessions.
+- Add `/codex-orchestration --update`, a canonical-source-checked orchestration of
+  Codex's native plugin upgrade/install commands. It refuses disabled, local,
+  missing, duplicate, or unexpected sources and verifies final source, version, and
+  enabled state without removing the plugin or touching routing, credentials, chats,
+  or sessions.
 - Add an optional first-class Designer seat with exact direct-model effort,
   bounded root-directed design authority, status and task-local reporting, and
   native routing schema/policy version 4. Cross-provider/custom Designers remain

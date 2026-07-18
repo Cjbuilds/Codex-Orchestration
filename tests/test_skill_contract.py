@@ -25,9 +25,6 @@ NATIVE_SCRIPT = (
 ROUTING_STATE = (SKILL_ROOT / "scripts" / "routing_state.py").read_text(
     encoding="utf-8"
 )
-UPDATE_SCRIPT = (SKILL_ROOT / "scripts" / "update_plugin.py").read_text(
-    encoding="utf-8"
-)
 
 
 class SkillContractTests(unittest.TestCase):
@@ -88,16 +85,15 @@ class SkillContractTests(unittest.TestCase):
     def test_plugin_update_is_canonical_non_destructive_and_restart_bound(self) -> None:
         self.assertIn("## Update the plugin", SKILL)
         self.assertIn("canonical Git marketplace", SKILL)
-        self.assertIn("It never removes", SKILL)
-        self.assertIn("touches routing, chats, or", SKILL)
+        self.assertIn("Never run `plugin remove`", SKILL)
+        self.assertIn("Do not\nwrap these commands in a custom downloader", SKILL)
+        self.assertIn("inspect/touch routing, chats, or sessions", SKILL)
         self.assertIn("restart Codex", SKILL)
         self.assertIn("Desktop and start a new task", SKILL)
-        self.assertIn('PLUGIN_ID = f"{PLUGIN_NAME}@{MARKETPLACE_NAME}"', UPDATE_SCRIPT)
-        self.assertIn("_is_canonical_repository", UPDATE_SCRIPT)
-        self.assertIn("candidate.version", UPDATE_SCRIPT)
-        self.assertIn("after_enabled is not True", UPDATE_SCRIPT)
-        self.assertIn("_rollback", UPDATE_SCRIPT)
-        self.assertNotIn("plugin\", \"remove", UPDATE_SCRIPT)
+        self.assertIn("codex plugin list --json", SKILL)
+        self.assertIn("codex plugin marketplace upgrade", SKILL)
+        self.assertIn("codex plugin add", SKILL)
+        self.assertNotIn("codex plugin remove", SKILL)
 
     def test_codex_still_decides_when_to_delegate(self) -> None:
         self.assertIn("Codex decides whether a plan helps", SKILL)

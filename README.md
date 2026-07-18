@@ -210,13 +210,12 @@ For version 0.7.0 and newer, ask the installed plugin to update itself:
 /codex-orchestration --update
 ```
 
-The updater accepts only the canonical Git marketplace, stages and validates the
-remote release before mutation, skips an already-current version, refuses disabled
-plugins, downgrades, malformed releases, and unexpected sources, and transactionally
-restores the prior snapshot/install after a failed mutation. It does not remove the
-plugin or touch routing, credentials, chats, sessions, or the model picker. Restart
-Codex Desktop and start a new task after an update; the task that launched the
-updater keeps its already loaded instructions.
+The command refuses disabled, local, missing, duplicate, or unexpected sources,
+then delegates refresh and installation only to Codex's native plugin manager and
+verifies the final canonical source, version, and enabled state. It does not remove
+the plugin or touch routing, credentials, chats, sessions, or the model picker.
+Restart Codex Desktop and start a new task after an update; the task that launched
+the updater keeps its already loaded instructions.
 
 To move from version 0.6.x or older to 0.7.0, run the native Codex commands once:
 

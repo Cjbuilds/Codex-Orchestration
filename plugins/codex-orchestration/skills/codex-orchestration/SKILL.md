@@ -63,8 +63,9 @@ Persistent Designer accepts only a direct same-provider model, not a Fable MCP
 or unqualified custom-agent route. Route it with `--designer-model` plus
 `--designer-effort`. A Designer route may share a model with another seat; only
 Planner and Advisor require independent routes. For a cross-provider Designer,
-create and invoke a task-local External Model role named `designer` after validating
-it in the current project. Codex does not yet expose a scope-qualified agent identity,
+create and invoke a task-local External Model role named `designer`; `resolve` must
+reject matching project agents in the current workspace or any ancestor immediately
+before returning its route. Codex does not yet expose a scope-qualified agent identity,
 so persisting an agent name would let a later project's agent shadow it.
 
 Read [providers-and-models.md](references/providers-and-models.md) before setup, when clients disagree, when a model is absent, when providers differ, or when custom agents or legacy migration are involved.
@@ -73,28 +74,27 @@ Read [providers-and-models.md](references/providers-and-models.md) before setup,
 
 Treat `/codex-orchestration --update` as an explicit request to update only this
 plugin. It cannot be combined with setup, status, disable, seat settings, custom
-role operations, or task work. Resolve the Codex binary used by the active host,
-then run `scripts/update_plugin.py` from this skill's real installed directory:
+role operations, or task work. Resolve the absolute Codex binary used by the active
+host. First run `codex plugin list --json` and require exactly one enabled
+`codex-orchestration@codex-orchestration` entry whose marketplace source type is
+`git` and source is the canonical HTTPS GitHub repository. Refuse local, disabled,
+missing, duplicate, or unexpected sources without mutation. Then run only:
 
 ```bash
-python3 <skill-dir>/scripts/update_plugin.py \
-  --codex-bin <active-codex-binary>
+codex plugin marketplace upgrade codex-orchestration --json
+codex plugin add codex-orchestration@codex-orchestration --json
+codex plugin list --json
 ```
 
-Use a Python 3.11+ launcher available on the host. Never run a repository-relative
-copy. The updater accepts only the exact installed
-`codex-orchestration@codex-orchestration` plugin from the canonical
-`https://github.com/Cjbuilds/Codex-Orchestration` Git marketplace. It stages and
-validates the registered branch in an isolated clone before mutation, then uses
-`codex plugin marketplace upgrade` and `codex plugin add` and binds their result to
-the staged commit. It refuses disabled, local, unexpected, malformed, same-version,
-and downgrade states before mutation; any later failure restores the prior managed
-snapshot and prior installed version or reports rollback failure. It runs pinned
-helpers in a minimal no-proxy/no-credential environment with bounded output, time,
-and process-tree termination. It never removes the plugin, rewrites Codex config,
-reads credentials, or touches routing, chats, or sessions. Do not disable routing
-before an ordinary update; a disabled plugin is left unchanged and must be enabled
-through Codex before it can update.
+Use that active absolute binary for all commands and let Codex's native plugin
+manager own transport, process containment, cache writes, and installation. Do not
+wrap these commands in a custom downloader, Git client, script, or credential-bearing
+environment. Require the upgrade result to select only this marketplace with no
+errors, the add result to report a SemVer newer than or equal to the original, and
+the final inventory to retain the exact canonical source and enabled state at that
+version. Never run `plugin remove`, rewrite Codex config, read credentials, or
+inspect/touch routing, chats, or sessions. If a native command or post-check fails,
+report the exact phase as failed and do not claim rollback.
 
 On success, report the old and new versions and tell the user to restart Codex
 Desktop and start a new task. The current task keeps the already loaded skill
@@ -515,7 +515,6 @@ Never call that 65% fewer raw tokens, a guaranteed five-hour or weekly-limit sav
 
 ## Resources
 
-- `scripts/update_plugin.py`: canonical-marketplace-only plugin update and post-install verification.
 - `scripts/configure_native_routing.py`: one-time native setup, status, seat changes, and disable.
 - `scripts/fable_advisor_mcp.py`: fail-closed Claude Fable 5 planning and review bridge.
 - `scripts/configure_orchestration.py`: namespaced custom agents, provider pins, safe removal, and legacy migration.

@@ -122,7 +122,6 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("name: portability (${{ matrix.os }})", ci)
         self.assertIn("os: [macos-latest, windows-latest]", ci)
         for module in (
-            "tests.test_plugin_update",
             "tests.test_external_cli_trust",
             "tests.test_external_configurator",
             "tests.test_external_credentials",
@@ -223,14 +222,12 @@ class PackagingTests(unittest.TestCase):
         native = SKILL_ROOT / "scripts" / "configure_native_routing.py"
         custom = SKILL_ROOT / "scripts" / "configure_orchestration.py"
         routing_state = SKILL_ROOT / "scripts" / "routing_state.py"
-        updater = SKILL_ROOT / "scripts" / "update_plugin.py"
         self.assertTrue(native.is_file())
         self.assertTrue(custom.is_file())
         self.assertTrue(routing_state.is_file())
-        self.assertTrue(updater.is_file())
+        self.assertFalse((SKILL_ROOT / "scripts" / "update_plugin.py").exists())
         self.assertIn("config/batchWrite", native.read_text(encoding="utf-8"))
         self.assertIn('"version": "0.7.0"', native.read_text(encoding="utf-8"))
-        self.assertIn("marketplace", updater.read_text(encoding="utf-8"))
         self.assertIn("validate_routing_state", routing_state.read_text(encoding="utf-8"))
         self.assertIn("Standalone custom agent", custom.read_text(encoding="utf-8"))
 
@@ -333,7 +330,6 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("configure_native_routing.py", smoke_text)
         self.assertIn("configure_orchestration.py", smoke_text)
         self.assertIn("fable_advisor_mcp.py", smoke_text)
-        self.assertIn("update_plugin.py", smoke_text)
         self.assertIn('"method": "initialize"', smoke_text)
         self.assertIn('"method": "tools/list"', smoke_text)
         self.assertIn('"marketplace",\n                    "upgrade"', smoke_text)

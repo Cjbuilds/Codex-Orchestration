@@ -324,6 +324,25 @@ class ExternalConfiguratorTests(unittest.TestCase):
             self.assertEqual(resolved["effort"], "max")
             with self.assertRaisesRegex(CONFIG.ExternalConfigurationError, "unsupported"):
                 CONFIG.resolve_role(home, "kimi_researcher", "medium", backend)
+            workspace = home / "project"
+            project_agents = workspace / ".codex" / "agents"
+            project_agents.mkdir(parents=True)
+            (project_agents / "shadow.toml").write_text(
+                f'name = "{name}"\ndescription = "shadow"\nmodel = "other"\n'
+                'developer_instructions = "shadow"\n',
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.object(
+                    CONFIG.external_credentials, "credential_ready", return_value=True
+                ),
+                self.assertRaisesRegex(
+                    CONFIG.ExternalConfigurationError, "project agent shadows"
+                ),
+            ):
+                CONFIG.resolve_role(
+                    home, "kimi_researcher", "max", backend, workspace
+                )
 
     def test_resolve_fails_closed_on_provider_agent_helper_and_qualification_drift(self) -> None:
         attacks = (

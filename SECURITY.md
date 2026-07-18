@@ -23,25 +23,15 @@ non-secret state under `CODEX_HOME`. External setup never writes top-level `mode
 or `model_provider`, never edits OpenAI authentication, and never reads, migrates,
 or deletes chat/session storage.
 
-Before mutation, the explicit plugin updater requires the exact installed identity,
-canonical HTTPS GitHub marketplace URL, enabled state, expected non-symlinked path,
-and Git remote. It uses pinned absolute interpreters/helpers and an isolated,
-allowlisted environment with no inherited credentials, proxy/CA overrides, runtime
-hooks, arbitrary `CODEX_*` values, or user/system Git config. A shallow temporary
-clone stages the registered branch first; bounded no-follow manifest reads validate
-the canonical identity, immutable commit, and strictly increasing SemVer before
-Codex state changes. Same-version, disabled, local, SSH, redirected, query-bearing,
-unexpected, malformed, and downgrade states stop before marketplace mutation.
-
-The mutation phase uses Codex's native `plugin marketplace upgrade` and `plugin add`
-commands, then binds the refreshed snapshot and installed inventory to the staged
-commit/version, original enabled state, and trusted path. Commands have streaming
-output caps, bounded time, and whole-process-tree termination. On any mutation or
-verification failure, the updater resets only the managed marketplace snapshot to
-its prior commit and, if install began, re-adds and verifies the prior enabled
-version; rollback failure is reported explicitly. It never removes the plugin,
-rewrites Codex config, reads credentials, or reads/writes routing, provider, chat,
-or session state.
+The explicit update control first requires exactly one enabled installed plugin with
+the canonical HTTPS Git marketplace identity. It then delegates refresh, transport,
+process containment, cache mutation, and installation exclusively to Codex's native
+`plugin marketplace upgrade` and `plugin add` commands, followed by a strict native
+inventory check for canonical source, nondecreasing SemVer, and retained enabled
+state. The skill introduces no downloader, Git client, subprocess wrapper, or
+rollback claim and does not construct a credential-bearing environment. It never
+invokes plugin removal, rewrites config, reads credentials, or reads/writes routing,
+provider, chat, or session state.
 
 Provider API keys are accepted only by a hidden local prompt outside chat and are
 stored in the operating-system credential store. Codex retrieves a key at request

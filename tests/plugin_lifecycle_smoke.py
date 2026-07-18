@@ -5,8 +5,8 @@ A disposable bare Git marketplace is served over loopback HTTP. The real Codex
 CLI installs the affected Advisor-only 0.5.0 bundle, runs its documented
 marketplace-upgrade command after the current release is pushed to that Git
 remote, installs the refreshed package, verifies the new cache and routing
-contract, exercises the packaged updater, and runs native-policy plus
-custom-agent setup/status/cleanup in isolation.
+contract, and runs native-policy plus custom-agent setup/status/cleanup in
+isolation.
 """
 
 from __future__ import annotations
@@ -15,7 +15,6 @@ from contextlib import contextmanager
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import hashlib
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -29,7 +28,6 @@ from typing import Any, Iterator
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_ROOT = REPO_ROOT / "plugins" / "codex-orchestration"
-PLUGIN_NAME = "codex-orchestration"
 PLUGIN_ID = "codex-orchestration@codex-orchestration"
 MARKETPLACE_NAME = "codex-orchestration"
 OLD_RELEASE = "a1d9c546665c3253cdcaa8fe5c0c060199a6126c"
@@ -536,152 +534,6 @@ def main() -> int:
             )
             probe_mcp_subprocess(installed_fable_mcp, cwd=project, env=env)
 
-            installed_updater = (
-                installed_root
-                / "skills"
-                / "codex-orchestration"
-                / "scripts"
-                / "update_plugin.py"
-            )
-            updater_text = installed_updater.read_text(encoding="utf-8")
-            for expected in (
-                "https://github.com/Cjbuilds/Codex-Orchestration",
-                '"marketplace"',
-                '"upgrade"',
-                '"plugin", "add", PLUGIN_ID',
-            ):
-                if expected not in updater_text:
-                    raise SmokeFailure(
-                        f"Installed updater is missing trust contract {expected!r}"
-                    )
-
-            updater_spec = importlib.util.spec_from_file_location(
-                "installed_lifecycle_updater", installed_updater
-            )
-            if updater_spec is None or updater_spec.loader is None:
-                raise SmokeFailure("Could not load the installed updater")
-            updater = importlib.util.module_from_spec(updater_spec)
-            updater_spec.loader.exec_module(updater)
-            updater_policy = updater.TrustPolicy(
-                repository_url=marketplace_url,
-                require_canonical_url=False,
-            )
-            updater_command = updater.resolve_command(Path(codex).resolve())
-
-            def disabled_runner(
-                command: tuple[Path, ...],
-                arguments: list[str],
-                environment: dict[str, str],
-            ) -> Any:
-                payload = updater._run_json(command, arguments, environment)
-                if arguments == ["plugin", "list", "--json"]:
-                    disabled = json.loads(json.dumps(payload))
-                    installed_entry(disabled)["enabled"] = False
-                    return disabled
-                return payload
-
-            try:
-                updater.perform_update(
-                    updater_command,
-                    codex_home,
-                    git=Path(git).resolve(),
-                    runner=disabled_runner,
-                    policy=updater_policy,
-                )
-            except updater.UpdateError as exc:
-                if "disabled" not in str(exc):
-                    raise SmokeFailure(
-                        f"Installed updater returned the wrong disabled-state failure: {exc}"
-                    ) from exc
-            else:
-                raise SmokeFailure("Installed updater did not refuse a disabled plugin")
-            assert_equal(
-                git_head(git, marketplace_snapshot, cwd=temp, env=env),
-                published_commit,
-                "disabled updater left marketplace snapshot unchanged",
-            )
-
-            synthetic_version = "0.7.1"
-            synthetic_manifest = (
-                publisher
-                / "plugins"
-                / "codex-orchestration"
-                / ".codex-plugin"
-                / "plugin.json"
-            )
-            synthetic_payload = json.loads(
-                synthetic_manifest.read_text(encoding="utf-8")
-            )
-            synthetic_payload["version"] = synthetic_version
-            synthetic_manifest.write_text(
-                json.dumps(synthetic_payload, indent=2) + "\n", encoding="utf-8"
-            )
-            run([git, "add", "--all"], cwd=publisher, env=env)
-            run(
-                [git, "commit", "--quiet", "-m", "Publish updater lifecycle release"],
-                cwd=publisher,
-                env=env,
-            )
-            synthetic_commit = git_head(git, publisher, cwd=temp, env=env)
-            run([git, "push", "--quiet", "origin", "main"], cwd=publisher, env=env)
-            run(
-                [git, f"--git-dir={remote}", "update-server-info"],
-                cwd=temp,
-                env=env,
-            )
-
-            updater_sentinels = {
-                codex_home / ".codex-orchestration-routing.json": "routing-sentinel",
-                codex_home / "auth.json": "auth-sentinel",
-                codex_home / "sessions" / "keep.jsonl": "chat-sentinel",
-            }
-            for path, value in updater_sentinels.items():
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(value, encoding="utf-8")
-            update_result = updater.perform_update(
-                updater_command,
-                codex_home,
-                git=Path(git).resolve(),
-                policy=updater_policy,
-            )
-            assert_equal(
-                update_result,
-                (current_version, synthetic_version, True),
-                "installed updater result",
-            )
-            assert_equal(
-                git_head(git, marketplace_snapshot, cwd=temp, env=env),
-                synthetic_commit,
-                "installed updater snapshot commit",
-            )
-            updater_discovery = run_json(
-                [codex, "plugin", "list", "--json"], cwd=project, env=env
-            )
-            assert_equal(
-                installed_entry(updater_discovery).get("version"),
-                synthetic_version,
-                "installed updater discovered version",
-            )
-            for path, value in updater_sentinels.items():
-                assert_equal(
-                    path.read_text(encoding="utf-8"),
-                    value,
-                    f"installed updater preserved {path.name}",
-                )
-                path.unlink()
-            installed_root = (
-                codex_home
-                / "plugins"
-                / "cache"
-                / MARKETPLACE_NAME
-                / PLUGIN_NAME
-                / synthetic_version
-            ).resolve()
-            if not installed_root.is_dir():
-                raise SmokeFailure(
-                    "Installed updater did not publish the synthetic cache directory"
-                )
-
             native_configurator = (
                 installed_root
                 / "skills"
@@ -921,8 +773,7 @@ def main() -> int:
 
     print(
         f"PASS: installed {OLD_VERSION}, upgraded to {current_version}, "
-        f"executed packaged updater to {synthetic_version}, preserved sentinels, "
-        "and ran native plus custom setup/status/cleanup"
+        "verified its cache, and ran native plus custom setup/status/cleanup"
     )
     return 0
 
