@@ -649,6 +649,10 @@ class ExternalConfiguratorTests(unittest.TestCase):
             with mock.patch.object(
                 CONFIG.external_credentials, "credential_ready", return_value=True
             ), mock.patch.object(
+                CONFIG.external_cli_trust,
+                "sanitized_environment",
+                return_value={"PATH": "/safe/bin", "KEEP_ME": "yes"},
+            ) as sanitized, mock.patch.object(
                 CONFIG.subprocess,
                 "run",
                 side_effect=[gate0_help_result(), completed],
@@ -663,6 +667,7 @@ class ExternalConfiguratorTests(unittest.TestCase):
                         acknowledge_billing=True,
                     )
             self.assertNotIn("sensitive-test-value", str(failure.exception))
+            sanitized.assert_called_once_with()
             self.assertEqual(run.call_count, 2)
             command = run.call_args.args[0]
             self.assertIn("--ephemeral", command)
@@ -670,8 +675,12 @@ class ExternalConfiguratorTests(unittest.TestCase):
             self.assertEqual(run.call_args.kwargs["stdout"], CONFIG.subprocess.DEVNULL)
             self.assertEqual(run.call_args.kwargs["stderr"], CONFIG.subprocess.DEVNULL)
             self.assertEqual(
-                run.call_args.kwargs["env"]["CODEX_HOME"],
-                os.fspath(run.call_args.kwargs["cwd"]),
+                run.call_args.kwargs["env"],
+                {
+                    "PATH": "/safe/bin",
+                    "KEEP_ME": "yes",
+                    "CODEX_HOME": os.fspath(run.call_args.kwargs["cwd"]),
+                },
             )
             self.assertNotEqual(run.call_args.kwargs["env"]["CODEX_HOME"], str(home))
             registry, _ = CONFIG.load_registry(home)
@@ -861,6 +870,55 @@ class ExternalConfiguratorTests(unittest.TestCase):
             provider = registry["providers"]["openrouter"]
             self.assertFalse(provider["qualified"])
             self.assertNotEqual(provider["state"], "CAPABILITY_VERIFIED")
+
+    def test_gate0_rejects_decorated_and_oversized_last_messages(self) -> None:
+        cases = {
+            "decorated": f"sensitive-artifact {CONFIG.GATE0_SIGNAL} extra",
+            "oversized": (
+                f"sensitive-artifact {CONFIG.GATE0_SIGNAL} "
+                + "x" * CONFIG.GATE0_LAST_MESSAGE_MAX_BYTES
+            ),
+        }
+        for name, artifact in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory)
+                backend = FakeBackend()
+                prepared(home, backend)
+
+                def run_gate0(command, **_kwargs):
+                    if command[-1] == "--help":
+                        return gate0_help_result()
+                    output_index = command.index("--output-last-message") + 1
+                    Path(command[output_index]).write_text(
+                        artifact, encoding="utf-8"
+                    )
+                    return mock.Mock(returncode=0, stdout="", stderr="")
+
+                with mock.patch.object(
+                    CONFIG.external_credentials,
+                    "credential_ready",
+                    return_value=True,
+                ), mock.patch.object(
+                    CONFIG.subprocess, "run", side_effect=run_gate0
+                ) as run:
+                    with self.assertRaises(
+                        CONFIG.ExternalConfigurationError
+                    ) as failure:
+                        CONFIG.run_gate0(
+                            home,
+                            "openrouter",
+                            "moonshotai/kimi-k3",
+                            "max",
+                            Path("/safe/codex"),
+                            acknowledge_billing=True,
+                        )
+
+                self.assertEqual(run.call_count, 2)
+                self.assertNotIn("sensitive-artifact", str(failure.exception))
+                registry, _ = CONFIG.load_registry(home)
+                provider = registry["providers"]["openrouter"]
+                self.assertFalse(provider["qualified"])
+                self.assertNotEqual(provider["state"], "CAPABILITY_VERIFIED")
 
 
 if __name__ == "__main__":

@@ -86,6 +86,14 @@ def event(
 
 
 class ReviewAttestationTests(unittest.TestCase):
+    def test_runtime_probe_path_is_the_packaged_openrouter_manifest(self) -> None:
+        expected = (
+            "plugins/codex-orchestration/skills/codex-orchestration/"
+            "providers/openrouter.json"
+        )
+        self.assertEqual(ATTESTATION.RUNTIME_PROBE_PATH, expected)
+        self.assertTrue((REPO_ROOT / expected).is_file())
+
     def test_valid_security_attestation_is_bound_to_head(self) -> None:
         tier = ATTESTATION.validate_pull_request_event(
             event(body()),
