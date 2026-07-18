@@ -75,6 +75,41 @@ class ExternalCliTrustTests(unittest.TestCase):
             with self.assertRaisesRegex(TRUST.CliTrustError, "CLI_CHANGED"):
                 TRUST.verify(record)
 
+    def test_fingerprint_requests_binary_descriptor_when_available(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.executable(Path(directory))
+            real_open = os.open
+            synthetic_binary_flag = 1 << 29
+            observed_flags: list[int] = []
+
+            def tracked_open(
+                candidate: object,
+                flags: int,
+                mode: int = 0o777,
+                **kwargs: object,
+            ) -> int:
+                observed_flags.append(flags)
+                return real_open(
+                    candidate,
+                    flags & ~synthetic_binary_flag,
+                    mode,
+                    **kwargs,
+                )
+
+            with (
+                mock.patch.object(
+                    TRUST.os,
+                    "O_BINARY",
+                    synthetic_binary_flag,
+                    create=True,
+                ),
+                mock.patch.object(TRUST.os, "open", side_effect=tracked_open),
+            ):
+                TRUST.fingerprint(path)
+
+            self.assertEqual(len(observed_flags), 1)
+            self.assertTrue(observed_flags[0] & synthetic_binary_flag)
+
     def test_hardlinked_nonexecutable_and_missing_targets_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

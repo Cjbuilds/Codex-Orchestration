@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import stat
 import sys
 import tempfile
@@ -79,6 +80,34 @@ def gate0_help_result():
     return mock.Mock(returncode=0, stdout=GATE0_HELP, stderr="")
 
 
+def write_user_helper(home: Path, marker: bytes = b"test-value") -> Path:
+    if os.name == "nt":
+        helper = home / "user-helper.exe"
+        shutil.copy2(Path(getattr(sys, "_base_executable", sys.executable)), helper)
+        with helper.open("ab") as handle:
+            handle.write(marker)
+        return helper
+    helper = home / "user-helper"
+    helper.write_text(
+        "#!/bin/sh\nprintf '" + marker.decode("ascii") + "\\n'\n",
+        encoding="utf-8",
+    )
+    helper.chmod(0o700)
+    return helper
+
+
+def mutate_user_helper(helper: Path, marker: bytes) -> None:
+    if os.name == "nt":
+        with helper.open("ab") as handle:
+            handle.write(marker)
+        return
+    helper.write_text(
+        "#!/bin/sh\nprintf '" + marker.decode("ascii") + "\\n'\n",
+        encoding="utf-8",
+    )
+    helper.chmod(0o700)
+
+
 class ExternalConfiguratorTests(unittest.TestCase):
     def test_prepare_is_additive_nonsecret_and_returns_external_auth_command(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -122,9 +151,7 @@ class ExternalConfiguratorTests(unittest.TestCase):
     def test_user_helper_requires_explicit_trust_and_is_pinned_without_storage(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
-            helper = home / "user-helper"
-            helper.write_text("#!/bin/sh\nprintf 'test-value\\n'\n", encoding="utf-8")
-            helper.chmod(0o700)
+            helper = write_user_helper(home)
             backend = FakeBackend()
             with self.assertRaisesRegex(
                 CONFIG.ExternalConfigurationError, "explicit --trust-user-helper"
@@ -147,8 +174,7 @@ class ExternalConfiguratorTests(unittest.TestCase):
             self.assertEqual(trust["path"], str(helper.resolve()))
             self.assertTrue(trust["fingerprint"].startswith("sha256:"))
             self.assertNotIn("test-value", json.dumps(registry))
-            helper.write_text("#!/bin/sh\nprintf 'changed\\n'\n", encoding="utf-8")
-            helper.chmod(0o700)
+            mutate_user_helper(helper, b"changed")
             status = CONFIG.inspect_status(home, backend)
             self.assertEqual(
                 status["providers"]["openrouter"]["config"], "CONFIG_DRIFT"
@@ -369,9 +395,7 @@ class ExternalConfiguratorTests(unittest.TestCase):
     def test_retrust_dequalifies_an_existing_role_at_resolve_time(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
-            helper = home / "user-helper"
-            helper.write_text("#!/bin/sh\nprintf 'test-value\\n'\n", encoding="utf-8")
-            helper.chmod(0o700)
+            helper = write_user_helper(home)
             backend = FakeBackend()
             CONFIG.prepare_provider(
                 home,
@@ -390,8 +414,7 @@ class ExternalConfiguratorTests(unittest.TestCase):
                 "max",
             )
             CONFIG.mark_role_ready(home, "kimi_researcher")
-            helper.write_text("#!/bin/sh\nprintf 'new-value\\n'\n", encoding="utf-8")
-            helper.chmod(0o700)
+            mutate_user_helper(helper, b"new-value")
             CONFIG.retrust_user_helper(home, "openrouter")
             with self.assertRaisesRegex(
                 CONFIG.ExternalConfigurationError, "no longer qualified"

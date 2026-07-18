@@ -1867,7 +1867,7 @@ def _link_original_tombstone(
 ) -> None:
     if tombstone.is_symlink() or _path_identity(tombstone) != placeholder_identity:
         raise ConfigurationError(f"Update tombstone changed before use: {tombstone}.")
-    tombstone.unlink()
+    _unlink_exact(tombstone, placeholder_identity)
     os.link(destination, tombstone, follow_symlinks=False)
     destination_stat = destination.stat(follow_symlinks=False)
     tombstone_stat = tombstone.stat(follow_symlinks=False)
@@ -2931,7 +2931,7 @@ def _apply_changes_transactionally_locked(
                 staged_paths[item["staged_old"]] = item["staged_old_identity"]
             if isinstance(item["tombstone"], Path):
                 item["tombstone"] = stage_text(
-                    item["path"], "", item["mode"], item["tombstone"]
+                    item["path"], "", 0o600, item["tombstone"]
                 )
                 item["tombstone_placeholder_identity"] = _path_identity(
                     item["tombstone"]
