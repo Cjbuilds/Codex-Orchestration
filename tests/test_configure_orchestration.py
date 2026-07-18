@@ -161,6 +161,47 @@ class ConfigureOrchestrationTests(unittest.TestCase):
             base / "agents" / CONFIGURE.ADVISOR_FILENAME,
         )
 
+    def test_low_level_staging_requests_binary_descriptors_when_available(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "agent.toml"
+            staged = root / "staged.toml"
+            path.write_bytes(b"old\n")
+            real_open = os.open
+            synthetic_binary_flag = 1 << 29
+            observed_flags: list[int] = []
+
+            def tracked_open(
+                candidate: object,
+                flags: int,
+                mode: int = 0o777,
+                **kwargs: object,
+            ) -> int:
+                observed_flags.append(flags)
+                return real_open(
+                    candidate,
+                    flags & ~synthetic_binary_flag,
+                    mode,
+                    **kwargs,
+                )
+
+            with (
+                mock.patch.object(
+                    CONFIGURE.os,
+                    "O_BINARY",
+                    synthetic_binary_flag,
+                    create=True,
+                ),
+                mock.patch.object(CONFIGURE.os, "open", side_effect=tracked_open),
+            ):
+                CONFIGURE.stage_existing_file(path, "new\n", staged)
+
+            self.assertGreaterEqual(len(observed_flags), 3)
+            self.assertTrue(
+                all(flags & synthetic_binary_flag for flags in observed_flags)
+            )
+            self.assertEqual(staged.read_bytes(), b"new\n")
+
     @staticmethod
     def prepared_fallback_state(root: Path) -> tuple[Path, Path, dict[str, object]]:
         """Create a valid prepared journal whose original tombstone is unavailable."""

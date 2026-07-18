@@ -1000,6 +1000,8 @@ def stage_text(
                     f"Unsafe explicit staging path for {path}: {staged_path}"
                 )
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            if hasattr(os, "O_BINARY"):
+                flags |= os.O_BINARY
             if hasattr(os, "O_NOFOLLOW"):
                 flags |= os.O_NOFOLLOW
             descriptor = os.open(staged_path, flags, mode)
@@ -1038,6 +1040,8 @@ def _write_staged_content(
 ) -> None:
     """Write only to a private staged inode; the live file is never truncated."""
     flags = os.O_WRONLY
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     descriptor = os.open(staged, flags)
@@ -1821,6 +1825,8 @@ def stage_existing_file(
         staged.chmod(stat.S_IMODE(staged.stat(follow_symlinks=False).st_mode) | stat.S_IWUSR)
         _write_staged_content(staged, content, staged_identity)
         flags = os.O_RDWR
+        if hasattr(os, "O_BINARY"):
+            flags |= os.O_BINARY
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         durability_descriptor = os.open(staged, flags)
