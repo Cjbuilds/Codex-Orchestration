@@ -1235,6 +1235,35 @@ def _windows_security_signature(path: Path) -> str | None:
     return _windows_security_sddl(_windows_security_descriptor(path))
 
 
+def _windows_named_security_information(control: int, *, has_label: bool) -> int:
+    """Select exact access-control components for SetNamedSecurityInfoW."""
+
+    owner_security_information = 0x00000001
+    group_security_information = 0x00000002
+    dacl_security_information = 0x00000004
+    label_security_information = 0x00000010
+    unprotected_dacl_security_information = 0x20000000
+    protected_sacl_security_information = 0x40000000
+    protected_dacl_security_information = 0x80000000
+    se_dacl_protected = 0x1000
+    se_sacl_protected = 0x2000
+    requested = (
+        owner_security_information
+        | group_security_information
+        | dacl_security_information
+    )
+    if has_label:
+        requested |= label_security_information
+    requested |= (
+        protected_dacl_security_information
+        if control & se_dacl_protected
+        else unprotected_dacl_security_information
+    )
+    if has_label and control & se_sacl_protected:
+        requested |= protected_sacl_security_information
+    return requested
+
+
 def _set_windows_security_descriptor(path: Path, descriptor: bytes | None) -> None:
     """Apply and canonically verify access-control metadata on one staged file."""
 
@@ -1245,23 +1274,111 @@ def _set_windows_security_descriptor(path: Path, descriptor: bytes | None) -> No
     import ctypes
     from ctypes import wintypes
 
-    requested = 0x00000001 | 0x00000002 | 0x00000004 | 0x00000010
     expected = _windows_security_sddl(descriptor)
     advapi = ctypes.WinDLL("Advapi32.dll", use_last_error=True)
-    set_file_security = advapi.SetFileSecurityW
-    set_file_security.argtypes = (
-        wintypes.LPCWSTR,
-        wintypes.DWORD,
+    descriptor_buffer = ctypes.create_string_buffer(descriptor)
+    descriptor_pointer = ctypes.cast(descriptor_buffer, ctypes.c_void_p)
+
+    get_control = advapi.GetSecurityDescriptorControl
+    get_control.argtypes = (
         ctypes.c_void_p,
+        ctypes.POINTER(wintypes.WORD),
+        ctypes.POINTER(wintypes.DWORD),
     )
-    set_file_security.restype = wintypes.BOOL
-    buffer = ctypes.create_string_buffer(descriptor)
-    if not set_file_security(
-        str(path), requested, ctypes.cast(buffer, ctypes.c_void_p)
+    get_control.restype = wintypes.BOOL
+    control = wintypes.WORD()
+    revision = wintypes.DWORD()
+    ctypes.set_last_error(0)
+    if not get_control(
+        descriptor_pointer, ctypes.byref(control), ctypes.byref(revision)
     ):
         error = ctypes.get_last_error()
         raise ConfigurationError(
-            f"Could not apply the Windows security descriptor for {path}: {error}."
+            f"Could not inspect Windows security descriptor control for {path}: {error}."
+        )
+
+    def descriptor_sid(function_name: str) -> ctypes.c_void_p:
+        function = getattr(advapi, function_name)
+        function.argtypes = (
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(wintypes.BOOL),
+        )
+        function.restype = wintypes.BOOL
+        value = ctypes.c_void_p()
+        defaulted = wintypes.BOOL()
+        ctypes.set_last_error(0)
+        if not function(
+            descriptor_pointer, ctypes.byref(value), ctypes.byref(defaulted)
+        ):
+            error = ctypes.get_last_error()
+            raise ConfigurationError(
+                f"Could not inspect a Windows security descriptor SID for {path}: "
+                f"{error}."
+            )
+        if not value.value:
+            raise ConfigurationError(
+                f"Windows security descriptor SID is missing for {path}."
+            )
+        return value
+
+    def descriptor_acl(function_name: str) -> tuple[bool, ctypes.c_void_p]:
+        function = getattr(advapi, function_name)
+        function.argtypes = (
+            ctypes.c_void_p,
+            ctypes.POINTER(wintypes.BOOL),
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(wintypes.BOOL),
+        )
+        function.restype = wintypes.BOOL
+        present = wintypes.BOOL()
+        value = ctypes.c_void_p()
+        defaulted = wintypes.BOOL()
+        ctypes.set_last_error(0)
+        if not function(
+            descriptor_pointer,
+            ctypes.byref(present),
+            ctypes.byref(value),
+            ctypes.byref(defaulted),
+        ):
+            error = ctypes.get_last_error()
+            raise ConfigurationError(
+                f"Could not inspect a Windows security descriptor ACL for {path}: "
+                f"{error}."
+            )
+        return bool(present.value), value
+
+    owner = descriptor_sid("GetSecurityDescriptorOwner")
+    group = descriptor_sid("GetSecurityDescriptorGroup")
+    dacl_present, dacl = descriptor_acl("GetSecurityDescriptorDacl")
+    if not dacl_present or not dacl.value:
+        raise ConfigurationError(f"Windows security descriptor DACL is missing for {path}.")
+    sacl_present, sacl = descriptor_acl("GetSecurityDescriptorSacl")
+    has_label = sacl_present and bool(sacl.value)
+
+    set_named_security_info = advapi.SetNamedSecurityInfoW
+    set_named_security_info.argtypes = (
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+    )
+    set_named_security_info.restype = wintypes.DWORD
+    result = set_named_security_info(
+        str(path),
+        1,  # SE_FILE_OBJECT
+        _windows_named_security_information(control.value, has_label=has_label),
+        owner,
+        group,
+        dacl,
+        sacl if has_label else None,
+    )
+    if result:
+        raise ConfigurationError(
+            f"Could not apply the Windows security descriptor for {path}: {result}."
         )
     if _windows_security_signature(path) != expected:
         raise ConfigurationError(

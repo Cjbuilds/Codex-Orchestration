@@ -2110,6 +2110,21 @@ multi_agent = true'''
             self.assertEqual(CONFIGURE._windows_security_signature(path), before)
             self.assertFalse((root / CONFIGURE.TRANSACTION_JOURNAL).exists())
 
+    def test_windows_named_security_information_preserves_acl_protection(self) -> None:
+        base = 0x00000001 | 0x00000002 | 0x00000004
+        self.assertEqual(
+            CONFIGURE._windows_named_security_information(0, has_label=False),
+            base | 0x20000000,
+        )
+        self.assertEqual(
+            CONFIGURE._windows_named_security_information(0x1000, has_label=False),
+            base | 0x80000000,
+        )
+        self.assertEqual(
+            CONFIGURE._windows_named_security_information(0x3000, has_label=True),
+            base | 0x00000010 | 0x80000000 | 0x40000000,
+        )
+
     @unittest.skipUnless(os.name == "nt", "requires Windows security descriptors")
     def test_windows_inherited_dacl_survives_existing_file_update(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

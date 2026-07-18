@@ -209,7 +209,7 @@ The standalone-agent configurator remains dry-run first, rejects symlinks and ha
 
 The role-file transaction and native App Server policy transaction are independent. After a phase-two failure, remove only fully validated newly managed roles. Native status reports collision-resistant managed personal roles that are not referenced by its current restore state, and `--require-effective` treats them as unhealthy. This recovery is compensating cleanup, not atomicity across the two stores.
 
-On Windows, the custom-agent configurator can create a new role but refuses in-place update or removal of an existing managed role because it cannot prove the Unix inode/metadata-preservation contract. Native App Server policy setup and disable are separate and remain capability-tested through the active Codex binary.
+On Windows, in-place update and removal stage the replacement beside the existing managed role, apply the captured owner, group, DACL, and mandatory integrity label through `SetNamedSecurityInfoW`, and require exact canonical SDDL readback before publication. Any unsupported descriptor, access failure, or mismatch rolls the transaction back. Native App Server policy setup and disable are separate and remain capability-tested through the active Codex binary.
 
 ## Provider boundaries
 

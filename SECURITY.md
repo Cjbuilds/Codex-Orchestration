@@ -50,8 +50,8 @@ multi-file transaction. Recovery rolls forward or back only when every digest an
 ownership check matches; ambiguity becomes `RECOVERY_REQUIRED` without overwriting
 user data. On Windows, replacement stages copy and canonically verify the existing
 owner, group, DACL, and mandatory integrity label before publication; inability to
-read, apply, or re-read that access-control metadata fails closed and rolls the
-transaction back.
+read, apply through Windows' `SetNamedSecurityInfoW` API, or re-read that
+access-control metadata fails closed and rolls the transaction back.
 
 Gate 0 is an explicit, potentially billable, ephemeral `codex exec` probe in an
 isolated temporary `CODEX_HOME`. The pinned CLI must advertise every required flag
