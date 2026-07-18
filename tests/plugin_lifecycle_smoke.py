@@ -3,7 +3,7 @@
 
 A disposable bare Git marketplace is served over loopback HTTP. The real Codex
 CLI installs the affected Advisor-only 0.5.0 bundle, runs its documented
-marketplace-upgrade command after 0.5.1 is pushed to that Git remote, installs
+marketplace-upgrade command after 0.6.0 is pushed to that Git remote, installs
 the refreshed package, verifies the new cache and Planner contract, and runs
 native-policy plus custom-agent setup/status/cleanup in isolation.
 """
@@ -31,7 +31,7 @@ PLUGIN_ID = "codex-orchestration@codex-orchestration"
 MARKETPLACE_NAME = "codex-orchestration"
 OLD_RELEASE = "a1d9c546665c3253cdcaa8fe5c0c060199a6126c"
 OLD_VERSION = "0.5.0"
-NEW_VERSION = "0.5.1"
+NEW_VERSION = "0.6.0"
 COMMAND_TIMEOUT_SECONDS = 60
 
 
@@ -502,7 +502,7 @@ def main() -> int:
             installed_root = Path(new_install["installedPath"]).resolve()
             if installed_root == old_installed_root:
                 raise SmokeFailure(
-                    "0.5.1 reused the Advisor-only 0.5.0 cache directory"
+                    "0.6.0 reused the Advisor-only 0.5.0 cache directory"
                 )
             assert_equal(
                 file_tree(installed_root),

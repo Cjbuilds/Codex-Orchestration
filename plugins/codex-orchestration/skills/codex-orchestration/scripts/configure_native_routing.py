@@ -30,6 +30,9 @@ from routing_state import (
     MANAGED_MARKER,
     ROUTING_TOOL_NAMESPACE,
     RoutingStateError,
+    candidate_activation_id,
+    route_chain,
+    route_identity,
     validate_routing_state,
 )
 
@@ -39,8 +42,8 @@ except ModuleNotFoundError as exc:  # pragma: no cover - Python < 3.11
     raise SystemExit("Python 3.11 or newer is required (missing tomllib).") from exc
 
 
-POLICY_VERSION = 3
-STATE_SCHEMA = 3
+POLICY_VERSION = 4
+STATE_SCHEMA = 4
 STATE_FILENAME = ".codex-orchestration-routing.json"
 PROBE_VALUE = "CODEX_ORCHESTRATION_CAPABILITY_PROBE"
 PLUGIN_ID = "codex-orchestration@codex-orchestration"
@@ -64,6 +67,149 @@ CUSTOM_AGENT_MANAGED_MARKER = (
     "# Managed by codex-orchestration. Standalone custom agent v2."
 )
 MISSING = object()
+
+
+def parse_backup_spec(spec: str, seat: str) -> dict[str, Any]:
+    """Parse one exact ordered-backup route specification.
+
+    Backup syntax is intentionally narrower than persisted state: Fable's
+    launcher is selected during setup, while model and custom-agent routes are
+    fully self-describing. No whitespace or implicit normalization is accepted.
+    """
+
+    if seat not in {"executor", "planner", "advisor"}:
+        raise ConfigurationError(f"Unknown route seat: {seat!r}.")
+    if not isinstance(spec, str) or not spec or spec.strip() != spec:
+        raise ConfigurationError(f"Invalid {seat} backup route: {spec!r}.")
+    prefix, separator, value = spec.partition(":")
+    if not separator or not value:
+        raise ConfigurationError(
+            f"Invalid {seat} backup route {spec!r}; use model:<id>@<effort>, "
+            "agent:<name>, or fable:<effort>."
+        )
+    if prefix == "model":
+        model, marker, effort = value.partition("@")
+        if not marker or not model or not effort or "@" in effort:
+            raise ConfigurationError(f"Invalid {seat} model backup route: {spec!r}.")
+        if (
+            MODEL_RE.fullmatch(model) is None
+            or EFFORT_RE.fullmatch(effort) is None
+            or effort == "auto"
+        ):
+            raise ConfigurationError(f"Invalid {seat} model backup route: {spec!r}.")
+        return {"kind": "model", "model": model, "effort": effort}
+    if prefix == "agent":
+        if AGENT_RE.fullmatch(value) is None:
+            raise ConfigurationError(f"Invalid {seat} agent backup route: {spec!r}.")
+        return {"kind": "agent", "agent": value}
+    if prefix == "fable":
+        if seat == "executor":
+            raise ConfigurationError("Fable is not permitted as an Executor route.")
+        if EFFORT_RE.fullmatch(value) is None:
+            raise ConfigurationError(f"Invalid {seat} Fable backup route: {spec!r}.")
+        return {
+            "kind": "fable",
+            "model": FABLE_MODEL,
+            "effort": normalize_fable_effort(value),
+        }
+    raise ConfigurationError(f"Unsupported {seat} backup route kind: {prefix!r}.")
+
+
+def _route_ids(
+    routes: list[dict[str, Any]],
+    *,
+    agent_identities: dict[str, tuple[str, str]] | None,
+    seat: str,
+) -> list[tuple[str, str]]:
+    identities: list[tuple[str, str]] = []
+    for route in routes:
+        identity = route_identity(route, agent_identities=agent_identities)
+        if identity is None:
+            raise ConfigurationError(f"{seat} route has no canonical identity.")
+        if route.get("kind") == "agent" and agent_identities is not None:
+            name = route.get("agent")
+            if name not in agent_identities:
+                raise ConfigurationError(
+                    f"{seat} custom agent {name!r} has no resolvable model identity."
+                )
+        if any(_identities_overlap(identity, prior) for prior in identities):
+            raise ConfigurationError(f"{seat} route chain contains duplicate identities.")
+        identities.append(identity)
+    return identities
+
+
+def _identities_overlap(
+    left: tuple[str, str],
+    right: tuple[str, str],
+) -> bool:
+    """Treat the unresolved root provider as a wildcard for the same model."""
+
+    left_provider, left_model = left
+    right_provider, right_model = right
+    return left_model == right_model and (
+        left_provider == right_provider
+        or "__root_provider__" in {left_provider, right_provider}
+    )
+
+
+def validate_route_chains(
+    executor: dict[str, Any],
+    executor_backups: list[dict[str, Any]],
+    planner: dict[str, Any] | None,
+    planner_backups: list[dict[str, Any]],
+    advisor: dict[str, Any] | None,
+    advisor_backups: list[dict[str, Any]],
+    agent_identities: dict[str, tuple[str, str]] | None = None,
+) -> None:
+    """Validate backup counts, duplicate identities, and planning separation."""
+
+    all_routes: list[dict[str, Any]] = []
+    for seat, primary, backups in (
+        ("executor", executor, executor_backups),
+        ("planner", planner, planner_backups),
+        ("advisor", advisor, advisor_backups),
+    ):
+        if primary is None:
+            if backups:
+                raise ConfigurationError(f"{seat.title()} backups require a primary route.")
+            continue
+        if len(backups) > 2:
+            raise ConfigurationError(f"{seat.title()} cannot have more than two backups.")
+        all_routes.extend(route_chain(primary, backups))
+        _route_ids(
+            route_chain(primary, backups),
+            agent_identities=agent_identities,
+            seat=seat,
+        )
+
+    fable_count = sum(route.get("kind") == "fable" for route in all_routes)
+    if fable_count > 1:
+        raise ConfigurationError("Fable may occur at exactly one planning position across all chains.")
+
+    if planner is not None and advisor is not None:
+        if agent_identities is None and any(
+            route.get("kind") == "agent"
+            for route in route_chain(planner, planner_backups) + route_chain(advisor, advisor_backups)
+        ):
+            raise ConfigurationError(
+                "Planner and Advisor custom-agent identities cannot be proven independent."
+            )
+        planner_ids = _route_ids(
+            route_chain(planner, planner_backups),
+            agent_identities=agent_identities,
+            seat="planner",
+        )
+        advisor_ids = _route_ids(
+            route_chain(advisor, advisor_backups),
+            agent_identities=agent_identities,
+            seat="advisor",
+        )
+        if any(
+            _identities_overlap(planner_id, advisor_id)
+            for planner_id in planner_ids
+            for advisor_id in advisor_ids
+        ):
+            raise ConfigurationError("Planner and Advisor routes must be distinct across every candidate.")
 
 
 class ConfigurationError(RuntimeError):
@@ -96,6 +242,13 @@ def parse_args() -> argparse.Namespace:
         help="Loaded custom-agent name for durable or cross-provider routing.",
     )
     parser.add_argument(
+        "--executor-backup",
+        action="append",
+        default=[],
+        metavar="SPEC",
+        help="Ordered backup route: model:<id>@<effort> or agent:<name>.",
+    )
+    parser.add_argument(
         "--executor-effort",
         default="auto",
         help="Exact supported effort, or auto (resolved to the catalog default).",
@@ -114,6 +267,13 @@ def parse_args() -> argparse.Namespace:
         default="auto",
         help="Exact supported planner effort, or auto.",
     )
+    parser.add_argument(
+        "--planner-backup",
+        action="append",
+        default=[],
+        metavar="SPEC",
+        help="Ordered backup route: model:<id>@<effort>, agent:<name>, or fable:<effort>.",
+    )
 
     advisor = parser.add_mutually_exclusive_group()
     advisor.add_argument("--advisor-model", help="Optional exact advisor model ID.")
@@ -127,6 +287,13 @@ def parse_args() -> argparse.Namespace:
         "--advisor-effort",
         default="auto",
         help="Exact supported advisor effort, or auto.",
+    )
+    parser.add_argument(
+        "--advisor-backup",
+        action="append",
+        default=[],
+        metavar="SPEC",
+        help="Ordered backup route: model:<id>@<effort>, agent:<name>, or fable:<effort>.",
     )
 
     parser.add_argument("--codex-bin", default="codex")
@@ -175,6 +342,9 @@ def _validate_args(args: argparse.Namespace) -> None:
             args.advisor_model,
             args.advisor_agent,
             args.advisor_fable,
+            args.executor_backup,
+            args.planner_backup,
+            args.advisor_backup,
         )
     ):
         raise ConfigurationError("--status does not accept seat settings.")
@@ -188,6 +358,9 @@ def _validate_args(args: argparse.Namespace) -> None:
             args.advisor_model,
             args.advisor_agent,
             args.advisor_fable,
+            args.executor_backup,
+            args.planner_backup,
+            args.advisor_backup,
         )
     ):
         raise ConfigurationError("--disable does not accept seat settings.")
@@ -197,6 +370,15 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ConfigurationError(
             "Setup requires --executor-model or --executor-agent. Advisor omission means none."
         )
+    for seat, specs in (
+        ("executor", args.executor_backup),
+        ("planner", args.planner_backup),
+        ("advisor", args.advisor_backup),
+    ):
+        if len(specs) > 2:
+            raise ConfigurationError(f"{seat.title()} cannot have more than two backups.")
+        for spec in specs:
+            parse_backup_spec(spec, seat)
     if args.executor_agent and args.executor_effort != "auto":
         raise ConfigurationError(
             "A custom executor agent owns its effort; omit --executor-effort."
@@ -383,7 +565,7 @@ class AppServer:
                     "clientInfo": {
                         "name": "codex_orchestration_installer",
                         "title": "Codex Orchestration Installer",
-                        "version": "0.5.1",
+                        "version": "0.6.0",
                     },
                     "capabilities": {"experimentalApi": True},
                 },
@@ -711,23 +893,25 @@ def verify_agent_routes(
     codex_home: Path,
     workspace: Path,
     executor: dict[str, Any],
+    executor_backups: list[dict[str, Any]],
     planner: dict[str, Any] | None,
+    planner_backups: list[dict[str, Any]],
     advisor: dict[str, Any] | None,
+    advisor_backups: list[dict[str, Any]],
 ) -> list[Path]:
     """Require personal role files and reject current-project shadowing."""
 
     verified: list[Path] = []
     personal_agents = codex_home / "agents"
     for label, route in (
-        ("Executor", executor),
-        ("Planner", planner),
-        ("Advisor", advisor),
+        ("Executor", route)
+        for route in route_chain(executor, executor_backups)
     ):
-        if route is None or route.get("kind") != "agent":
+        if route is None:
             continue
         name = route.get("agent")
-        if not isinstance(name, str):
-            raise ConfigurationError(f"{label} custom-agent route has an invalid name.")
+        if route.get("kind") != "agent" or not isinstance(name, str):
+            continue
         personal = _agent_files_with_name(personal_agents, name)
         if len(personal) != 1:
             raise ConfigurationError(
@@ -743,7 +927,70 @@ def verify_agent_routes(
                 "the project collision."
             )
         verified.append(personal[0])
+    for label, primary, backups in (
+        ("Planner", planner, planner_backups),
+        ("Advisor", advisor, advisor_backups),
+    ):
+        if primary is None:
+            continue
+        for route in route_chain(primary, backups):
+            if route.get("kind") != "agent":
+                continue
+            name = route.get("agent")
+            if not isinstance(name, str):
+                raise ConfigurationError(f"{label} custom-agent route has an invalid name.")
+            personal = _agent_files_with_name(personal_agents, name)
+            if len(personal) != 1:
+                raise ConfigurationError(
+                    f"{label} custom-agent route {name!r} must resolve to exactly one "
+                    f"personal file under {personal_agents}; found {len(personal)}."
+                )
+            project = _project_agent_matches(workspace, personal_agents, name)
+            if project:
+                locations = ", ".join(str(path) for path in project)
+                raise ConfigurationError(
+                    f"{label} personal agent {name!r} is shadowed by a project role: "
+                    f"{locations}. Use collision-resistant personal route names or remove "
+                    "the project collision."
+                )
+            verified.append(personal[0])
     return verified
+
+
+def agent_route_identities(
+    codex_home: Path,
+    routes: list[dict[str, Any]],
+) -> dict[str, tuple[str, str]]:
+    """Resolve custom-agent aliases to their effective provider/model identity."""
+
+    identities: dict[str, tuple[str, str]] = {}
+    for route in routes:
+        if route.get("kind") != "agent":
+            continue
+        name = route.get("agent")
+        if not isinstance(name, str):
+            raise ConfigurationError("Custom-agent route has an invalid name.")
+        matches = _agent_files_with_name(codex_home / "agents", name)
+        if len(matches) != 1:
+            raise ConfigurationError(
+                f"Custom-agent route {name!r} has no single effective identity."
+            )
+        try:
+            parsed = tomllib.loads(matches[0].read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+            raise ConfigurationError(f"Could not resolve custom-agent {name!r}: {exc}") from exc
+        model = parsed.get("model")
+        if not isinstance(model, str) or not model:
+            raise ConfigurationError(f"Custom-agent {name!r} does not pin a model identity.")
+        provider = parsed.get("model_provider")
+        if not isinstance(provider, str) or not provider:
+            provider = "__root_provider__"
+        identity = (provider, model)
+        prior = identities.get(name)
+        if prior is not None and prior != identity:
+            raise ConfigurationError(f"Custom-agent {name!r} resolves inconsistently.")
+        identities[name] = identity
+    return identities
 
 
 def load_models(app: AppServer) -> dict[str, dict[str, Any]]:
@@ -885,6 +1132,88 @@ def _route_summary(route: dict[str, Any]) -> str:
     return f"{route['model']}@{route['effort']}"
 
 
+def _chain_summary(
+    primary: dict[str, Any] | None,
+    backups: list[dict[str, Any]],
+    *,
+    empty: str,
+) -> str:
+    if primary is None:
+        return empty
+    return " -> ".join(_route_summary(route) for route in route_chain(primary, backups))
+
+
+def _fable_activation_manifest(
+    planner: dict[str, Any] | None,
+    planner_backups: list[dict[str, Any]],
+    advisor: dict[str, Any] | None,
+    advisor_backups: list[dict[str, Any]],
+) -> str:
+    entries: list[str] = []
+    for seat, primary, backups in (
+        ("planner", planner, planner_backups),
+        ("advisor", advisor, advisor_backups),
+    ):
+        if primary is None:
+            continue
+        for index, route in enumerate(route_chain(primary, backups)):
+            if route.get("kind") != "fable":
+                continue
+            try:
+                activation_id = candidate_activation_id(seat, index, route)
+            except RoutingStateError as exc:
+                raise ConfigurationError(
+                    "Fable route has no canonical activation identity."
+                ) from exc
+            entries.append(
+                f"{seat} candidate {index} requires candidate_index={index} "
+                f"and activation_id={activation_id} on MCP server {route['server']}"
+            )
+    return "; ".join(entries) if entries else "none"
+
+
+def _candidate_tool_manifest(
+    executor: dict[str, Any],
+    executor_backups: list[dict[str, Any]],
+    planner: dict[str, Any] | None,
+    planner_backups: list[dict[str, Any]],
+    advisor: dict[str, Any] | None,
+    advisor_backups: list[dict[str, Any]],
+) -> str:
+    entries: list[str] = []
+    for seat, primary, backups in (
+        ("executor", executor, executor_backups),
+        ("planner", planner, planner_backups),
+        ("advisor", advisor, advisor_backups),
+    ):
+        if primary is None:
+            continue
+        for index, route in enumerate(route_chain(primary, backups)):
+            if route.get("kind") == "fable":
+                entries.append(f"{seat} candidate {index} => Fable MCP")
+            else:
+                entries.append(f"{seat} candidate {index} => {_spawn_route(route)}")
+    return "; ".join(entries)
+
+
+def _candidate_readiness(
+    route: dict[str, Any],
+    *,
+    fable_available: bool,
+    verified_agents: set[Path],
+    agent_paths: dict[str, Path] | None = None,
+) -> str:
+    if route.get("kind") == "fable":
+        return "READY" if fable_available else "UNAVAILABLE"
+    if route.get("kind") == "agent":
+        name = route.get("agent")
+        path = agent_paths.get(name) if agent_paths and isinstance(name, str) else None
+        return "READY" if path in verified_agents else "UNKNOWN"
+    if route.get("kind") == "model":
+        return "READY"
+    return "UNKNOWN"
+
+
 def _managed_personal_roles(codex_home: Path) -> tuple[dict[str, Path], list[str]]:
     """Find only collision-resistant v0.4 personal roles owned by this plugin."""
 
@@ -924,12 +1253,18 @@ def _referenced_agent_names(state: dict[str, Any] | None) -> set[str]:
     names: set[str] = set()
     if not isinstance(state, dict):
         return names
+    saved_backups = state.get("backups", {})
     for key in ("executor", "planner", "advisor"):
-        route = state.get(key)
-        if isinstance(route, dict) and route.get("kind") == "agent":
-            name = route.get("agent")
-            if isinstance(name, str):
-                names.add(name)
+        routes: list[Any] = [state.get(key)]
+        if isinstance(saved_backups, dict):
+            value = saved_backups.get(key, [])
+            if isinstance(value, list):
+                routes.extend(value)
+        for route in routes:
+            if isinstance(route, dict) and route.get("kind") == "agent":
+                name = route.get("agent")
+                if isinstance(name, str):
+                    names.add(name)
     return names
 
 
@@ -946,11 +1281,54 @@ def build_policy(
     executor: dict[str, Any],
     planner: dict[str, Any] | None,
     advisor: dict[str, Any] | None,
+    executor_backups: list[dict[str, Any]] | None = None,
+    planner_backups: list[dict[str, Any]] | None = None,
+    advisor_backups: list[dict[str, Any]] | None = None,
 ) -> tuple[str, str]:
-    has_direct_route = executor["kind"] == "model" or (
-        planner is not None and planner["kind"] == "model"
-    ) or (
-        advisor is not None and advisor["kind"] == "model"
+    executor_backups = executor_backups or []
+    planner_backups = planner_backups or []
+    advisor_backups = advisor_backups or []
+    fable_activations = _fable_activation_manifest(
+        planner,
+        planner_backups,
+        advisor,
+        advisor_backups,
+    )
+    candidate_tools = _candidate_tool_manifest(
+        executor,
+        executor_backups,
+        planner,
+        planner_backups,
+        advisor,
+        advisor_backups,
+    )
+    fable_guidance: list[str] = []
+    if any(
+        route.get("kind") == "fable"
+        for route in route_chain(planner, planner_backups)
+        if isinstance(route, dict)
+    ):
+        fable_guidance.append(
+            "At a Fable Planner position use create_plan for the initial draft "
+            "and revise_plan after PLAN_REVISE."
+        )
+    if any(
+        route.get("kind") == "fable"
+        for route in route_chain(advisor, advisor_backups)
+        if isinstance(route, dict)
+    ):
+        fable_guidance.append("At a Fable Advisor position use review_plan.")
+    fable_tool_guidance = " ".join(fable_guidance)
+    has_direct_route = any(
+        isinstance(route, dict) and route.get("kind") == "model"
+        for route in (
+            executor,
+            *executor_backups,
+            planner,
+            *planner_backups,
+            advisor,
+            *advisor_backups,
+        )
     )
     provider_guard = (
         "Direct model overrides retain the root provider. Before using a direct "
@@ -998,7 +1376,13 @@ On PLAN_REVISE, record the latest finding IDs before revision. After the Planner
 
 When executor delegation materially improves speed, cost, quality, or context isolation, use only the configured executor route. Give each executor one bounded, self-contained packet with objective, relevant facts, constraints, owned files or read-only scope, dependencies, acceptance criteria, verification, and handoff format. Inspect every handoff, integrate it, and run final checks yourself.
 
-Explicit user instructions win, including no-subagents and task-local seat overrides. Persistent and task-local Planner and Advisor routes must remain distinct: reject the same direct model ID, the same custom-agent name, or Fable in both seats. This policy does not create or change a Goal, weaken approvals, alter permissions, or force a worker count.
+Ordered backup routes are policy-directed failover, never engine-level automatic failover. Executor candidates are tried only in this order: {_chain_summary(executor, executor_backups, empty="none")}. A primary or candidate that has started is never silently replaced. ELIGIBLE_PRESTART is limited to proven local unavailability or explicit spawn rejection with no child, agent, or task ID; STARTED means no automatic Executor advancement. AMBIGUOUS and UNKNOWN freeze the chain. Normal Codex children remain mutation-capable even when a packet says read-only. Post-start planning failover is limited to a mechanically no-tools launcher; valid PLAN_REVISE, disagreement, refusal, or perceived quality never triggers failover. Planning candidates are Planner: {_chain_summary(planner, planner_backups, empty="root")} and Advisor: {_chain_summary(advisor, advisor_backups, empty="none")}.
+
+The shared Fable classification is exhaustive: AUTH_UNAVAILABLE and MODEL_UNAVAILABLE are eligible pre-start only with bridge-attested provenance; TRANSPORT_FAILURE and INVALID_RESULT are eligible only after authenticated, identity-matched, mechanically no-tools execution with no valid deliverable; IDENTITY_MISMATCH and STATE_INVALID freeze as STATE_UNKNOWN; UNKNOWN or any impossible combination freezes. A valid deliverable never falls back.
+
+Before any routed activation, initialize and retain this prompt-governed envelope shape: routing_envelope_version=1; seats={{executor|planner|advisor: {{cursor, active_identity, episode_state, activation_ids, started_child_ids, superseded_attempts}}}}. Update it after every creation response and before considering the next candidate. A missing, truncated, inconsistent, or unknown field/version is STATE_UNKNOWN: freeze backup activation and never issue another Executor when prior creation cannot be disproved. The envelope is policy text, not engine enforcement.
+
+Explicit user instructions win, including no-subagents and task-local seat overrides. Persistent and task-local Planner and Advisor routes, including every backup candidate, must remain distinct: resolve custom-agent TOML provider/model identities, treat an unresolved root provider as a wildcard for the same model ID, and freeze when independence cannot be proven. Reject the same direct model identity, aliases of the same effective model route, or Fable in both chains. This policy does not create or change a Goal, weaken approvals, alter permissions, or force a worker count. Backup activation inherits the current root authority cap unchanged or narrower; unknown effective authority blocks failover. Route grammar rejects sandbox, approval, service-tier, Goal, and authority extensions.
 
 Planner and Advisor are policy-isolated, root-directed seats: they cannot contact each other or Executors, spawn descendants, edit files, execute work, or release Executor. They return only to the root. Fable MCP requests do not carry caller identity, so caller isolation is instruction-enforced even though the bridge itself disables tools and persistence. If you are a spawned child, stay inside the supplied packet, report only to the root, never call planning tools, and never spawn descendants. An Executor never redesigns the root plan or contacts Planner or Advisor.
 """
@@ -1039,7 +1423,11 @@ Planner and Advisor are policy-isolated, root-directed seats: they cannot contac
     usage = f"""{MANAGED_MARKER}
 If you are the root task model, you are the orchestrator. Apply these routes only to children you decide to create.
 
-For delegated executor work, call this tool with {_spawn_route(executor)}, fork_turns = "none". Send a self-contained task packet.
+The configured ordered backup chains are Executor: {_chain_summary(executor, executor_backups, empty="none")}; Planner: {_chain_summary(planner, planner_backups, empty="root")}; Advisor: {_chain_summary(advisor, advisor_backups, empty="none")}. The bridge never chooses a backup or moves a cursor. Only the root may advance a cursor after mechanically classified failure, and it must preserve the task envelope and activation IDs. Fable authorization: {fable_activations}. Every schema-4 Fable tool call must supply the exact listed candidate_index and activation_id; omission or mismatch freezes the chain. {fable_tool_guidance}
+
+Candidate tool routes: {candidate_tools}.
+
+For delegated executor work, begin with candidate 0 using {_spawn_route(executor)}, fork_turns = "none". Send a self-contained task packet. Use a later candidate's exact listed tool route only after the policy permits its cursor.
 
 {planner_hint}
 
@@ -1047,7 +1435,7 @@ For delegated executor work, call this tool with {_spawn_route(executor)}, fork_
 
 {provider_guard}
 
-Never use fork_turns = "all" with model, reasoning_effort, or agent_type: a full-history fork inherits the root route and rejects those overrides. Never silently substitute the root model when an exact child route is unavailable. Report the unavailable route to the root. A user's explicit current-task model, effort, agent, or no-subagents instruction overrides this saved default, but a task-local Planner and Advisor must still be distinct: reject the same direct model ID, the same custom-agent name, or Fable in both seats.
+Never use fork_turns = "all" with model, reasoning_effort, or agent_type: a full-history fork inherits the root route and rejects those overrides. Never silently substitute the root model when an exact child route is unavailable. Report the unavailable route to the root. A user's explicit current-task model, effort, agent, or no-subagents instruction overrides this saved default, but task-local Planner and Advisor must still be distinct across their full chains and proven disjoint by effective provider/model identity; unknown identity freezes routing. At minimum, reject the same direct model ID, aliases of the same custom-agent model route, or Fable in both seats.
 
 If you are a spawned child, do not call this tool or create descendants. Finish only your assigned packet and return to the root.
 """
@@ -1214,14 +1602,18 @@ def _status(
         print(f"Config: {app.config_path}")
         fable_available = True
         if state_matches:
-            print(f"Executor: {_route_summary(state['executor'])}")
+            saved_backups = state.get("backups", {})
+            executor_backups = saved_backups.get("executor", []) if isinstance(saved_backups, dict) else []
+            planner_backups = saved_backups.get("planner", []) if isinstance(saved_backups, dict) else []
+            advisor_backups = saved_backups.get("advisor", []) if isinstance(saved_backups, dict) else []
+            print(f"Executor: {_chain_summary(state['executor'], executor_backups, empty='none')}")
             planner = state.get("planner")
             advisor = state.get("advisor")
-            print(f"Planner: {_route_summary(planner) if planner else 'root'}")
-            print(f"Advisor: {_route_summary(advisor) if advisor else 'none'}")
+            print(f"Planner: {_chain_summary(planner, planner_backups, empty='root')}")
+            print(f"Advisor: {_chain_summary(advisor, advisor_backups, empty='none')}")
             fable_routes = [
                 route
-                for route in (planner, advisor)
+                for route in (planner, advisor, *planner_backups, *advisor_backups)
                 if isinstance(route, dict) and route.get("kind") == "fable"
             ]
             for route in fable_routes:
@@ -1234,13 +1626,18 @@ def _status(
                     print(
                         "Claude Fable 5: ready — first-party login; no model call made"
                     )
+            verified: list[Path] = []
+            agent_paths: dict[str, Path] = {}
             try:
                 verified = verify_agent_routes(
                     app.codex_home,
                     workspace,
                     state["executor"],
+                    executor_backups,
                     planner,
+                    planner_backups,
                     advisor,
+                    advisor_backups,
                 )
             except (ConfigurationError, KeyError, TypeError) as exc:
                 print(f"Custom-agent route: unavailable — {exc}")
@@ -1252,6 +1649,38 @@ def _status(
                         "Custom-agent route: verified — "
                         + ", ".join(str(path) for path in verified)
                     )
+                for route in (
+                    state["executor"],
+                    *executor_backups,
+                    planner,
+                    *planner_backups,
+                    advisor,
+                    *advisor_backups,
+                ):
+                    if not isinstance(route, dict) or route.get("kind") != "agent":
+                        continue
+                    name = route.get("agent")
+                    if not isinstance(name, str):
+                        continue
+                    matches = _agent_files_with_name(app.codex_home / "agents", name)
+                    if len(matches) == 1:
+                        agent_paths[name] = matches[0]
+            verified_set = set(verified)
+            for label, primary, candidates in (
+                ("Executor", state["executor"], executor_backups),
+                ("Planner", planner, planner_backups),
+                ("Advisor", advisor, advisor_backups),
+            ):
+                if primary is None:
+                    continue
+                for index, route in enumerate(route_chain(primary, candidates)):
+                    readiness = _candidate_readiness(
+                        route,
+                        fable_available=fable_available,
+                        verified_agents=verified_set,
+                        agent_paths=agent_paths,
+                    )
+                    print(f"{label} candidate {index}: {_route_summary(route)} — {readiness}")
         elif routing_state.startswith("installed"):
             agent_routes_available = False
             print("Seats: managed policy found; local state is unavailable")
@@ -1307,8 +1736,11 @@ def _prepare_setup_state(
     mode: str,
     usage: str,
     executor: dict[str, Any],
+    executor_backups: list[dict[str, Any]],
     planner: dict[str, Any] | None,
+    planner_backups: list[dict[str, Any]],
     advisor: dict[str, Any] | None,
+    advisor_backups: list[dict[str, Any]],
     config_path: Path,
     replace_existing: bool,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
@@ -1470,7 +1902,12 @@ def _prepare_setup_state(
     manage_mcp = (
         any(
             isinstance(route, dict) and route.get("kind") == "fable"
-            for route in (planner, advisor)
+            for route in (
+                planner,
+                advisor,
+                *planner_backups,
+                *advisor_backups,
+            )
         )
         or isinstance(existing_managed, dict)
         and isinstance(existing_managed.get("mcp"), dict)
@@ -1483,7 +1920,7 @@ def _prepare_setup_state(
         fable_route = next(
             (
                 route
-                for route in (planner, advisor)
+                for route in (planner, advisor, *planner_backups, *advisor_backups)
                 if isinstance(route, dict) and route.get("kind") == "fable"
             ),
             None,
@@ -1535,6 +1972,11 @@ def _prepare_setup_state(
         "managed_by": "codex-orchestration",
         "config_file": str(config_path),
         "executor": executor,
+        "backups": {
+            "executor": executor_backups,
+            "planner": planner_backups,
+            "advisor": advisor_backups,
+        },
         "planner": planner,
         "advisor": advisor,
         "managed": managed,
@@ -1689,7 +2131,15 @@ def main() -> int:
                 return _disable(app, config, version, state, args.apply)
 
             catalog: dict[str, dict[str, Any]] = {}
-            if args.executor_model or args.planner_model or args.advisor_model:
+            if (
+                args.executor_model
+                or args.planner_model
+                or args.advisor_model
+                or any(
+                    spec.startswith("model:")
+                    for spec in (*args.executor_backup, *args.planner_backup, *args.advisor_backup)
+                )
+            ):
                 try:
                     catalog = load_models(app)
                 except ConfigurationError:
@@ -1712,12 +2162,36 @@ def main() -> int:
             else:
                 executor = {"kind": "agent", "agent": args.executor_agent}
 
+            executor_backups = [
+                parse_backup_spec(spec, "executor") for spec in args.executor_backup
+            ]
+            planner_backups = [
+                parse_backup_spec(spec, "planner") for spec in args.planner_backup
+            ]
+            advisor_backups = [
+                parse_backup_spec(spec, "advisor") for spec in args.advisor_backup
+            ]
+
+            if planner_backups and not (
+                args.planner_model or args.planner_agent or args.planner_fable
+            ):
+                raise ConfigurationError("Planner backups require a Planner primary route.")
+            if advisor_backups and not (
+                args.advisor_model or args.advisor_agent or args.advisor_fable
+            ):
+                raise ConfigurationError("Advisor backups require an Advisor primary route.")
+
             planner: dict[str, Any] | None = None
             advisor: dict[str, Any] | None = None
             fable_auth: dict[str, str] | None = None
             fable_server = (
                 select_fable_server()
-                if args.planner_fable or args.advisor_fable
+                if args.planner_fable
+                or args.advisor_fable
+                or any(
+                    route.get("kind") == "fable"
+                    for route in (*planner_backups, *advisor_backups)
+                )
                 else None
             )
             if args.planner_model:
@@ -1743,6 +2217,9 @@ def main() -> int:
                     "server": fable_server,
                 }
 
+            if planner is None and planner_backups:
+                raise ConfigurationError("Planner backups require a Planner primary route.")
+
             if args.advisor_model:
                 advisor_effort = resolve_model_effort(
                     "Advisor",
@@ -1766,10 +2243,32 @@ def main() -> int:
                     "server": fable_server,
                 }
 
+            if advisor is None and advisor_backups:
+                raise ConfigurationError("Advisor backups require an Advisor primary route.")
+
+            for label, routes in (
+                ("Executor", executor_backups),
+                ("Planner", planner_backups),
+                ("Advisor", advisor_backups),
+            ):
+                for route in routes:
+                    if route.get("kind") == "model":
+                        route["effort"] = resolve_model_effort(
+                            label,
+                            route["model"],
+                            route["effort"],
+                            catalog,
+                            args.confirm_unlisted_models,
+                        )
+
+            for route in (*planner_backups, *advisor_backups):
+                if route.get("kind") == "fable":
+                    route["server"] = fable_server
+
             validate_planning_routes(planner, advisor)
             fable_efforts = {
                 route["effort"]
-                for route in (planner, advisor)
+                for route in (planner, advisor, *planner_backups, *advisor_backups)
                 if isinstance(route, dict) and route.get("kind") == "fable"
             }
             for effort in sorted(fable_efforts):
@@ -1779,26 +2278,61 @@ def main() -> int:
                 app.codex_home,
                 workspace,
                 executor,
+                executor_backups,
+                planner,
+                planner_backups,
+                advisor,
+                advisor_backups,
+            )
+            route_agents = [
+                route
+                for route in (
+                    executor,
+                    *executor_backups,
+                    planner,
+                    *planner_backups,
+                    advisor,
+                    *advisor_backups,
+                )
+                if isinstance(route, dict)
+            ]
+            agent_identities = agent_route_identities(app.codex_home, route_agents)
+            validate_route_chains(
+                executor,
+                executor_backups,
+                planner,
+                planner_backups,
+                advisor,
+                advisor_backups,
+                agent_identities,
+            )
+            mode, usage = build_policy(
+                executor,
                 planner,
                 advisor,
+                executor_backups,
+                planner_backups,
+                advisor_backups,
             )
-            mode, usage = build_policy(executor, planner, advisor)
             new_state, edits, rollback = _prepare_setup_state(
                 config,
                 state,
                 mode,
                 usage,
                 executor,
+                executor_backups,
                 planner,
+                planner_backups,
                 advisor,
+                advisor_backups,
                 app.config_path,
                 args.replace_existing_policy,
             )
             print(f"Config: {app.config_path}")
             print("Orchestrator: model selected when each Codex task starts")
-            print(f"Executor: {_route_summary(executor)}")
-            print(f"Planner: {_route_summary(planner) if planner else 'root'}")
-            print(f"Advisor: {_route_summary(advisor) if advisor else 'none'}")
+            print(f"Executor: {_chain_summary(executor, executor_backups, empty='none')}")
+            print(f"Planner: {_chain_summary(planner, planner_backups, empty='root')}")
+            print(f"Advisor: {_chain_summary(advisor, advisor_backups, empty='none')}")
             if args.planner_fable and args.planner_effort in FABLE_EFFORT_ALIASES:
                 print(
                     f"Planner effort alias: {args.planner_effort} -> "

@@ -1,6 +1,12 @@
 # Changelog
 
-## 0.5.1 — Unreleased
+## 0.6.0 — Unreleased
+
+- Add ordered backup routes with policy-directed, fail-closed candidate chains for Executor, Planner, and Advisor seats.
+- Persist exact schema/policy 4 state with up to two backups per seat, migrate schemas 1–3 on the next successful setup, and preserve restore snapshots.
+- Add repeatable backup CLI specs, canonical provider/model identity checks, Fable candidate authorization, exhaustive failure classification, and per-candidate readiness status.
+
+## 0.5.1 — Historical
 
 - Preserve explicit role labels exactly: a model supplied as `planner:` can never be reinterpreted as an Advisor, and Fable Planner uses only the Planner operations.
 - Give Planner support a new plugin version so marketplace upgrade and reinstall replace the affected Advisor-only `0.5.0` cache instead of reusing it.

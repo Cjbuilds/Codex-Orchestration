@@ -78,6 +78,60 @@ def genuine_state(schema: int) -> dict[str, object]:
 
 
 class RoutingStateTests(unittest.TestCase):
+    def test_schema_four_requires_ordered_backup_chains(self) -> None:
+        state = genuine_state(3)
+        state["schema"] = 4
+        state["policy_version"] = 4
+        state["backups"] = {"executor": [], "planner": [], "advisor": []}
+        STATE.validate_routing_state(state)
+
+        state["backups"]["executor"] = [
+            {"kind": "model", "model": "gpt-5.6-sol", "effort": "high"}
+        ]
+        STATE.validate_routing_state(state)
+
+        state["backups"]["executor"].append(
+            {"kind": "agent", "agent": "backup_executor"}
+        )
+        STATE.validate_routing_state(state)
+
+        state["backups"]["executor"].append(
+            {"kind": "model", "model": "third", "effort": "high"}
+        )
+        with self.assertRaises(STATE.RoutingStateError):
+            STATE.validate_routing_state(state)
+
+    def test_schema_four_rejects_missing_or_malformed_backup_surfaces(self) -> None:
+        baseline = genuine_state(3)
+        baseline["schema"] = 4
+        baseline["policy_version"] = 4
+        baseline["backups"] = {"executor": [], "planner": [], "advisor": []}
+        mutations = (
+            lambda state: state.pop("backups"),
+            lambda state: state["backups"].pop("advisor"),
+            lambda state: state["backups"].update(future=[]),
+            lambda state: state["backups"].update(executor={}),
+            lambda state: state["backups"].update(planner=[None]),
+            lambda state: state["backups"].update(advisor=[fable_route()]),
+            lambda state: state["backups"].update(
+                executor=[
+                    {"kind": "model", "model": "same", "effort": "high"},
+                    {"kind": "model", "model": "same", "effort": "low"},
+                ]
+            ),
+        )
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                state = deepcopy(baseline)
+                mutate(state)
+                with self.assertRaises(STATE.RoutingStateError):
+                    STATE.validate_routing_state(state)
+
+    def test_route_chain_helper_preserves_primary_then_backups(self) -> None:
+        primary = {"kind": "model", "model": "primary", "effort": "high"}
+        backup = {"kind": "agent", "agent": "backup"}
+        self.assertEqual(STATE.route_chain(primary, [backup]), [primary, backup])
+
     def test_genuine_schemas_one_two_and_three_are_accepted(self) -> None:
         for schema in (1, 2, 3):
             with self.subTest(schema=schema):

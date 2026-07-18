@@ -23,7 +23,7 @@ FABLE_SERVERS = frozenset(
     }
 )
 
-_SCHEMA_POLICY_PAIRS = {1: 1, 2: 2, 3: 3}
+_SCHEMA_POLICY_PAIRS = {1: 1, 2: 2, 3: 3, 4: 4}
 _MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+/@-]{0,199}$")
 _AGENT_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 _EFFORT_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
@@ -41,6 +41,87 @@ _BASE_TOP_LEVEL_KEYS = frozenset(
         "managed_feature",
     }
 )
+
+
+def route_chain(primary: Any, backups: Any) -> list[Any]:
+    """Return a route's ordered primary-plus-backup chain.
+
+    The helper intentionally returns a new list so callers cannot mutate the
+    persisted primary or backup values while rendering or evaluating a chain.
+    Validation belongs to :func:`validate_routing_state`; this helper is also
+    useful for prompt/status rendering of a candidate route.
+    """
+
+    if backups is None:
+        return [primary]
+    if type(backups) is not list:
+        raise RoutingStateError("route backups must be an array")
+    return [primary, *backups]
+
+
+def route_identity(route: Any, *, agent_identities: dict[str, tuple[str, str]] | None = None) -> tuple[str, str] | None:
+    """Return the canonical provider/model identity for a route when known.
+
+    Effort is deliberately excluded.  Custom-agent identities are resolved by
+    the native configurator from their TOML ``model``/``model_provider`` fields;
+    when no resolver is supplied the synthetic agent identity keeps duplicate
+    names from evading static checks while callers that require effective
+    independence can fail closed before setup.
+    """
+
+    if not isinstance(route, dict):
+        return None
+    kind = route.get("kind")
+    if kind == "model" and isinstance(route.get("model"), str):
+        provider = route.get("model_provider")
+        if not isinstance(provider, str) or not provider:
+            provider = "__root_provider__"
+        return provider, route["model"]
+    if kind == "agent" and isinstance(route.get("agent"), str):
+        if agent_identities and route["agent"] in agent_identities:
+            return agent_identities[route["agent"]]
+        return "__custom_agent__", route["agent"]
+    if kind == "fable":
+        return "anthropic-claude-code", FABLE_MODEL
+    return None
+
+
+def candidate_activation_id(seat: str, candidate_index: int, route: Any) -> str:
+    """Return the stable, redacted activation identity for one planning route."""
+
+    _require(seat in {"planner", "advisor"}, "candidate seat is invalid")
+    _require(
+        type(candidate_index) is int and candidate_index >= 0,
+        "candidate index is invalid",
+    )
+    identity = route_identity(route)
+    _require(identity is not None, "candidate route has no canonical identity")
+    effort = route.get("effort") if isinstance(route, dict) else None
+    _require(isinstance(effort, str) and bool(effort), "candidate effort is invalid")
+    return f"{seat}:{candidate_index}:{identity[0]}/{identity[1]}@{effort}"
+
+
+def _validate_chain(backups: Any, *, seat: str, primary: Any, schema: int) -> list[Any]:
+    _require(type(backups) is list, f"{seat} backups must be an array")
+    _require(len(backups) <= 2, f"{seat} cannot have more than two backups")
+    for route in backups:
+        _validate_route(route, seat=seat, schema=schema)
+    chain = route_chain(primary, backups)
+    identities = [route_identity(route) for route in chain]
+    known = [identity for identity in identities if identity is not None]
+    _require(len(known) == len(set(known)), f"{seat} route chain contains duplicate identities")
+    return chain
+
+
+def _validate_planning_chains(state: dict[str, Any]) -> None:
+    """Reject every possible Planner/Advisor identity overlap."""
+
+    backups = state.get("backups") or {"executor": [], "planner": [], "advisor": []}
+    planner = route_chain(state.get("planner"), backups.get("planner", [])) if state.get("planner") is not None else []
+    advisor = route_chain(state.get("advisor"), backups.get("advisor", [])) if state.get("advisor") is not None else []
+    planner_ids = {identity for route in planner if (identity := route_identity(route)) is not None}
+    advisor_ids = {identity for route in advisor if (identity := route_identity(route)) is not None}
+    _require(not planner_ids.intersection(advisor_ids), "Planner and Advisor routes are not independent")
 _BASE_MANAGED_KEYS = frozenset({"mode", "usage", "metadata", "namespace"})
 _BASE_PREVIOUS_KEYS = frozenset({"mode", "usage", "metadata", "namespace"})
 
@@ -203,7 +284,7 @@ def _validate_scalar_conversion(state: dict[str, Any], managed: dict[str, Any]) 
 
 
 def validate_routing_state(value: Any) -> dict[str, Any]:
-    """Validate and return one exact, complete persisted schema 1, 2, or 3.
+    """Validate and return one exact, complete persisted schema 1 through 4.
 
     Unknown keys and future extensions are rejected intentionally. Callers must
     perform their own secure file read and any caller-specific path/seat checks.
@@ -223,8 +304,10 @@ def validate_routing_state(value: Any) -> dict[str, Any]:
     )
 
     expected_top = set(_BASE_TOP_LEVEL_KEYS)
-    if schema == 3:
+    if schema >= 3:
         expected_top.add("planner")
+    if schema >= 4:
+        expected_top.add("backups")
     _require(set(value) == expected_top, "top-level state shape is unsupported")
     _require(value["managed_by"] == "codex-orchestration", "state owner is invalid")
     _require(
@@ -242,6 +325,39 @@ def validate_routing_state(value: Any) -> dict[str, Any]:
     if advisor is not None:
         _validate_route(advisor, seat="advisor", schema=schema)
     _validate_route_separation(planner, advisor)
+
+    if schema >= 4:
+        backups = value["backups"]
+        _require(type(backups) is dict, "backups must be an object")
+        _require(
+            set(backups) == {"executor", "planner", "advisor"},
+            "backups must contain exactly executor, planner, and advisor",
+        )
+        _validate_chain(
+            backups["executor"],
+            seat="executor",
+            primary=value["executor"],
+            schema=schema,
+        )
+        if planner is None:
+            _require(backups["planner"] == [], "Planner backups require a Planner primary")
+        else:
+            _validate_chain(
+                backups["planner"],
+                seat="planner",
+                primary=planner,
+                schema=schema,
+            )
+        if advisor is None:
+            _require(backups["advisor"] == [], "Advisor backups require an Advisor primary")
+        else:
+            _validate_chain(
+                backups["advisor"],
+                seat="advisor",
+                primary=advisor,
+                schema=schema,
+            )
+        _validate_planning_chains(value)
 
     managed = value["managed"]
     previous = value["previous"]
@@ -277,7 +393,12 @@ def validate_routing_state(value: Any) -> dict[str, Any]:
 
     fable_routes = [
         route
-        for route in (planner, advisor)
+        for route in (
+            planner,
+            advisor,
+            *(value.get("backups", {}).get("planner", []) if schema >= 4 else []),
+            *(value.get("backups", {}).get("advisor", []) if schema >= 4 else []),
+        )
         if type(route) is dict and route.get("kind") == "fable"
     ]
     _require(len(fable_routes) <= 1, "more than one Fable seat is configured")

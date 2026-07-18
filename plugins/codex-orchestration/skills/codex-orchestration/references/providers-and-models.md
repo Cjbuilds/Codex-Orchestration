@@ -153,7 +153,7 @@ Restore state lives at:
 ~/.codex/.codex-orchestration-routing.json
 ```
 
-It contains the prior and managed values of the four routing fields, chosen Planner/Advisor/Executor routes, schema/version markers, scalar-conversion metadata when needed, and config path. When Claude Fable 5 is selected for either planning seat, it also records only the plugin-scoped MCP launcher overrides that setup touched. It never copies provider definitions, auth stores, account identifiers, or credentials. A normal clean setup contains generated policy text, the namespace value, seat IDs, and restoration metadata. Explicit replacement must retain the user's exact old hint text so disable can restore it; routing hints must never contain credentials. State is written with a same-directory atomic replacement and restrictive file mode where supported. If persistence fails after config apply, the configurator rolls the config back using the returned version.
+It contains the prior and managed values of the four routing fields, ordered Planner/Advisor/Executor primary and backup chains, schema/version markers, scalar-conversion metadata when needed, and config path. When Claude Fable 5 is selected for either planning seat, it also records only the plugin-scoped MCP launcher overrides that setup touched. It never copies provider definitions, auth stores, account identifiers, or credentials. A normal clean setup contains generated policy text, the namespace value, seat IDs, exact schema-4 backup arrays, and restoration metadata. Explicit replacement must retain the user's exact old hint text so disable can restore it; routing hints must never contain credentials. State is written with a same-directory atomic replacement and restrictive file mode where supported. If persistence fails after config apply, the configurator rolls the config back using the returned version.
 
 Disable compares every current managed value before restoration. If the user edited a managed field after setup, it stops instead of erasing that work. Without state, each surviving marker proves ownership only of that hint string. Disable may safely remove the marked string or strings, but it leaves metadata visibility and the tool namespace unchanged because their previous values are unknown.
 
@@ -221,7 +221,25 @@ The bridge removes `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and Bedrock/Vert
 
 The saved policy authorizes the root to call these planning tools and prohibits children from doing so. Current MCP requests provide no caller identity to the server, so that specific caller boundary is instruction-enforced, not server-authenticated. The bridge mechanically uses the same full saved-state validator as native status/disable, restricts the operation surface, and runs Fable without tools or persistence.
 
-Saved state compatibility is explicit: schema 1 must carry policy version 1 and predates Fable and Planner; schema 2 must carry policy version 2 and may authorize only the historical Fable Advisor shape; schema 3 must carry policy version 3 and adds Planner. Schema and policy values must be actual JSON integers, not booleans or floats. Legacy state cannot contain fields introduced later; nested snapshots, scalar conversion, MCP launchers, and routes must match an emitted contract; and managed policy strings must carry the plugin marker before status, update, disable, or Fable trusts them. Unknown extensions intentionally fail closed.
+Saved state compatibility is explicit: schema 1 must carry policy version 1 and predates Fable and Planner; schema 2 must carry policy version 2 and may authorize only the historical Fable Advisor shape; schema 3 must carry policy version 3 and adds Planner; schema 4 carries policy version 4 and exact `backups={executor:[], planner:[], advisor:[]}` arrays. Schemas 1–3 are accepted for status/disable and upgrade to schema 4 on the next successful setup/change while preserving restore snapshots. Each chain has at most two backups, duplicate canonical `(provider_id, model_id)` identities are rejected, Planner and Advisor chains are disjoint across every candidate, and Fable can occur at one planning position only. Schema and policy values must be actual JSON integers, not booleans or floats. Legacy state cannot contain fields introduced later; nested snapshots, scalar conversion, MCP launchers, and routes must match an emitted contract; and managed policy strings must carry the plugin marker before status, update, disable, or Fable trusts them. Unknown extensions intentionally fail closed.
+
+### Ordered backup failure boundary
+
+Backups are root policy, not engine-level automatic failover. A pre-start
+candidate is eligible only for bridge-attested `AUTH_UNAVAILABLE` or
+`MODEL_UNAVAILABLE` with no child/agent/task ID. A started attempt never advances
+an Executor. Post-start planning fallback is limited to a mechanically no-tools
+launcher with authenticated, identity-matched execution and no valid deliverable.
+`IDENTITY_MISMATCH`, `STATE_INVALID`, impossible combinations, and missing or
+truncated task envelopes produce `STATE_UNKNOWN` and freeze. Valid deliverables,
+`PLAN_REVISE`, disagreement, refusal, and perceived quality never trigger a
+backup. Schema-4 Fable calls must supply the exact candidate ordinal and
+bridge-derived activation ID printed in the managed policy. Success and failure
+tool results include the redacted activation, ordinal, authentication/identity/
+no-tools/start/deliverable flags, outcome code, and eligibility state; generic or
+inconsistent failures remain `STATE_UNKNOWN`. The prompt-governed task envelope carries each seat's active identity and
+cursor, episode state, activation IDs, started child identities, and superseded
+attempts; this is an honest policy contract, not engine enforcement.
 
 Fable setup defaults to `high`. It accepts the Claude Code effort values `low`, `medium`, `high`, `xhigh`, and `max`; the user-facing label `ultra` normalizes to the effective Claude Code value `max` because the CLI has no separate Ultra setting. Setup checks the installed CLI's advertised choices before persisting the route. The bridge reads only the normalized saved value, so tool callers cannot raise the effort at review time. Existing saved `max` routes remain compatible.
 

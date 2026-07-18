@@ -19,4 +19,6 @@
 
 Never move a published release tag. If a release is bad, fix forward with a new version and retain the old tag as provenance.
 
-Before downgrading to a release that predates Planner/state-schema-3 support, run `disable` with the current release. Older versions must fail closed on the unknown state schema rather than guessing how to restore it.
+Before downgrading to any release older than 0.6.0, run `disable` with the current
+release. Older versions do not understand state-schema-4 backup chains and must
+fail closed on the unknown state schema rather than guessing how to restore it.
