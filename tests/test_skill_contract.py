@@ -76,8 +76,9 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("omitted designer means `designer: none`", SKILL)
         self.assertIn("--designer-model", SKILL)
         self.assertIn("--designer-effort", SKILL)
-        self.assertIn("--designer-agent", SKILL)
-        self.assertIn("Designer is a native model-or-agent seat", SKILL)
+        self.assertNotIn("--designer-agent", SKILL)
+        self.assertIn("Persistent Designer accepts only a direct same-provider model", SKILL)
+        self.assertIn("task-local External Model role named `designer`", SKILL)
         self.assertIn("Designer may edit only explicitly delegated design artifacts", SKILL)
         self.assertIn("never revises the canonical plan", SKILL)
         self.assertIn("Designer may use the same model as another seat", SKILL)
@@ -93,8 +94,9 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("Desktop and start a new task", SKILL)
         self.assertIn('PLUGIN_ID = f"{PLUGIN_NAME}@{MARKETPLACE_NAME}"', UPDATE_SCRIPT)
         self.assertIn("_is_canonical_repository", UPDATE_SCRIPT)
-        self.assertIn("candidate_version", UPDATE_SCRIPT)
-        self.assertIn("after_enabled is not was_enabled", UPDATE_SCRIPT)
+        self.assertIn("candidate.version", UPDATE_SCRIPT)
+        self.assertIn("after_enabled is not True", UPDATE_SCRIPT)
+        self.assertIn("_rollback", UPDATE_SCRIPT)
         self.assertNotIn("plugin\", \"remove", UPDATE_SCRIPT)
 
     def test_codex_still_decides_when_to_delegate(self) -> None:

@@ -141,6 +141,7 @@ class RoutingStateTests(unittest.TestCase):
             ("executor null", lambda state: state.__setitem__("executor", None)),
             ("executor Fable", lambda state: state.__setitem__("executor", fable_route())),
             ("designer Fable", lambda state: state.__setitem__("designer", fable_route())),
+            ("designer agent", lambda state: state.__setitem__("designer", {"kind": "agent", "agent": "designer_agent"})),
             ("model route missing effort", lambda state: state["executor"].pop("effort")),
             ("model route extra key", lambda state: state["executor"].update(future=True)),
             ("model route bad model", lambda state: state["executor"].update(model="bad model")),

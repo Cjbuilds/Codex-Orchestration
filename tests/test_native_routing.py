@@ -457,29 +457,15 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertIn("Invalid planner model", invalid.stderr)
 
     def test_designer_argument_validation(self) -> None:
-        exclusive = self.run_script(
-            "--executor-model",
-            "gpt-5.6-luna",
-            "--designer-model",
-            "gpt-5.6-sol",
-            "--designer-agent",
-            "designer_agent",
-            check=False,
-        )
-        self.assertEqual(exclusive.returncode, 2)
-        self.assertIn("not allowed with argument", exclusive.stderr)
-
-        effort = self.run_script(
+        external = self.run_script(
             "--executor-model",
             "gpt-5.6-luna",
             "--designer-agent",
             "designer_agent",
-            "--designer-effort",
-            "high",
             check=False,
         )
-        self.assertEqual(effort.returncode, 2)
-        self.assertIn("custom designer agent owns its effort", effort.stderr)
+        self.assertEqual(external.returncode, 2)
+        self.assertIn("unrecognized arguments: --designer-agent", external.stderr)
 
         invalid = self.run_script(
             "--executor-model",
@@ -1329,14 +1315,11 @@ class NativeRoutingTests(unittest.TestCase):
     def test_custom_agent_route_and_optional_advisor(self) -> None:
         self.write_personal_agent("codex_orchestration_executor")
         self.write_personal_agent("codex_orchestration_advisor")
-        self.write_personal_agent("codex_orchestration_designer")
         result = self.run_script(
             "--executor-agent",
             "codex_orchestration_executor",
             "--advisor-agent",
             "codex_orchestration_advisor",
-            "--designer-agent",
-            "codex_orchestration_designer",
             "--apply",
         )
         self.assertIn("custom agent codex_orchestration_executor", result.stdout)
@@ -1344,7 +1327,7 @@ class NativeRoutingTests(unittest.TestCase):
         usage = feature["usage_hint_text"]
         self.assertIn('agent_type = "codex_orchestration_executor"', usage)
         self.assertIn('agent_type = "codex_orchestration_advisor"', usage)
-        self.assertIn('agent_type = "codex_orchestration_designer"', usage)
+        self.assertIn("No Designer route is configured", usage)
 
     def test_custom_planner_shadow_and_orphan_tracking(self) -> None:
         name = "codex_orchestration_planner_012345abcdef"

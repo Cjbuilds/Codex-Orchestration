@@ -129,9 +129,7 @@ def parse_args() -> argparse.Namespace:
         help="Exact supported advisor effort, or auto.",
     )
 
-    designer = parser.add_mutually_exclusive_group()
-    designer.add_argument("--designer-model", help="Optional exact designer model ID.")
-    designer.add_argument("--designer-agent", help="Optional loaded designer agent name.")
+    parser.add_argument("--designer-model", help="Optional exact designer model ID.")
     parser.add_argument(
         "--designer-effort",
         default="auto",
@@ -185,7 +183,6 @@ def _validate_args(args: argparse.Namespace) -> None:
             args.advisor_agent,
             args.advisor_fable,
             args.designer_model,
-            args.designer_agent,
             args.executor_effort != "auto",
             args.planner_effort != "auto",
             args.advisor_effort != "auto",
@@ -204,7 +201,6 @@ def _validate_args(args: argparse.Namespace) -> None:
             args.advisor_agent,
             args.advisor_fable,
             args.designer_model,
-            args.designer_agent,
             args.executor_effort != "auto",
             args.planner_effort != "auto",
             args.advisor_effort != "auto",
@@ -231,10 +227,6 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ConfigurationError(
             "A custom advisor agent owns its effort; omit --advisor-effort."
         )
-    if args.designer_agent and args.designer_effort != "auto":
-        raise ConfigurationError(
-            "A custom designer agent owns its effort; omit --designer-effort."
-        )
     if args.planner_fable:
         normalize_fable_effort(args.planner_effort)
     if args.advisor_fable:
@@ -251,7 +243,6 @@ def _validate_args(args: argparse.Namespace) -> None:
         ("executor agent", args.executor_agent, AGENT_RE),
         ("planner agent", args.planner_agent, AGENT_RE),
         ("advisor agent", args.advisor_agent, AGENT_RE),
-        ("designer agent", args.designer_agent, AGENT_RE),
     ):
         if value is not None and not pattern.fullmatch(value):
             raise ConfigurationError(f"Invalid {label}: {value!r}.")
@@ -742,7 +733,6 @@ def verify_agent_routes(
     executor: dict[str, Any],
     planner: dict[str, Any] | None,
     advisor: dict[str, Any] | None,
-    designer: dict[str, Any] | None,
 ) -> list[Path]:
     """Require personal role files and reject current-project shadowing."""
 
@@ -752,7 +742,6 @@ def verify_agent_routes(
         ("Executor", executor),
         ("Planner", planner),
         ("Advisor", advisor),
-        ("Designer", designer),
     ):
         if route is None or route.get("kind") != "agent":
             continue
@@ -955,7 +944,7 @@ def _referenced_agent_names(state: dict[str, Any] | None) -> set[str]:
     names: set[str] = set()
     if not isinstance(state, dict):
         return names
-    for key in ("executor", "planner", "advisor", "designer"):
+    for key in ("executor", "planner", "advisor"):
         route = state.get(key)
         if isinstance(route, dict) and route.get("kind") == "agent":
             name = route.get("agent")
@@ -1305,7 +1294,6 @@ def _status(
                     state["executor"],
                     planner,
                     advisor,
-                    designer,
                 )
             except (ConfigurationError, KeyError, TypeError) as exc:
                 print(f"Custom-agent route: unavailable — {exc}")
@@ -1852,9 +1840,6 @@ def main() -> int:
                     "model": args.designer_model,
                     "effort": designer_effort,
                 }
-            elif args.designer_agent:
-                designer = {"kind": "agent", "agent": args.designer_agent}
-
             validate_planning_routes(planner, advisor)
             fable_efforts = {
                 route["effort"]
@@ -1870,7 +1855,6 @@ def main() -> int:
                 executor,
                 planner,
                 advisor,
-                designer,
             )
             mode, usage = build_policy(executor, planner, advisor, designer)
             new_state, edits, rollback = _prepare_setup_state(

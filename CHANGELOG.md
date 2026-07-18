@@ -7,9 +7,10 @@
   sources, malformed candidates, downgrades, source drift, version drift, and
   enabled-state drift without removing the plugin or touching routing, credentials,
   chats, or sessions.
-- Add an optional first-class Designer seat with exact direct-model effort or
-  custom/external-agent routing, bounded root-directed design authority, status and
-  task-local reporting, and native routing schema/policy version 4.
+- Add an optional first-class Designer seat with exact direct-model effort,
+  bounded root-directed design authority, status and task-local reporting, and
+  native routing schema/policy version 4. Cross-provider/custom Designers remain
+  task-local until Codex exposes a scope-qualified agent identity.
 - Preserve schemas 1–3 as valid legacy states with no Designer and migrate them on
   the next explicit setup while retaining their original disable snapshot.
 

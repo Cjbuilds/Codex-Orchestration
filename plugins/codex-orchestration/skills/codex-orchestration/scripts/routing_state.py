@@ -245,7 +245,11 @@ def validate_routing_state(value: Any) -> dict[str, Any]:
     if advisor is not None:
         _validate_route(advisor, seat="advisor", schema=schema)
     if designer is not None:
-        _validate_route(designer, seat="designer", schema=schema)
+        designer_kind = _validate_route(designer, seat="designer", schema=schema)
+        _require(
+            designer_kind == "model",
+            "persistent Designer must use a direct model route",
+        )
     _validate_route_separation(planner, advisor)
 
     managed = value["managed"]

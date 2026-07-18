@@ -23,20 +23,25 @@ non-secret state under `CODEX_HOME`. External setup never writes top-level `mode
 or `model_provider`, never edits OpenAI authentication, and never reads, migrates,
 or deletes chat/session storage.
 
-The explicit plugin updater delegates its only writes to Codex's native
-`plugin marketplace upgrade` and `plugin add` commands. Before mutation it requires
-the exact installed plugin identity, canonical HTTPS GitHub marketplace URL, and
-expected non-symlinked marketplace path. After refresh it validates a bounded,
-single-link manifest, canonical repository identity, and strictly nondecreasing
-SemVer before install; afterward it re-reads Codex's plugin inventory and requires
-the exact candidate version, original enabled state, and original trusted source.
-Local, SSH, redirected, query-bearing, unexpected, malformed, and downgrade sources
-fail closed. The updater removes credential-bearing, Git/SSH hook, and common
-language-runtime injection variables from the child environment, never echoes native
-command diagnostics, never removes the
-old plugin, and never reads or writes routing state, provider state, credentials,
-config, chats, or sessions. A failure after Codex reports install is surfaced as a
-verification failure rather than falsely claiming rollback or success.
+Before mutation, the explicit plugin updater requires the exact installed identity,
+canonical HTTPS GitHub marketplace URL, enabled state, expected non-symlinked path,
+and Git remote. It uses pinned absolute interpreters/helpers and an isolated,
+allowlisted environment with no inherited credentials, proxy/CA overrides, runtime
+hooks, arbitrary `CODEX_*` values, or user/system Git config. A shallow temporary
+clone stages the registered branch first; bounded no-follow manifest reads validate
+the canonical identity, immutable commit, and strictly increasing SemVer before
+Codex state changes. Same-version, disabled, local, SSH, redirected, query-bearing,
+unexpected, malformed, and downgrade states stop before marketplace mutation.
+
+The mutation phase uses Codex's native `plugin marketplace upgrade` and `plugin add`
+commands, then binds the refreshed snapshot and installed inventory to the staged
+commit/version, original enabled state, and trusted path. Commands have streaming
+output caps, bounded time, and whole-process-tree termination. On any mutation or
+verification failure, the updater resets only the managed marketplace snapshot to
+its prior commit and, if install began, re-adds and verifies the prior enabled
+version; rollback failure is reported explicitly. It never removes the plugin,
+rewrites Codex config, reads credentials, or reads/writes routing, provider, chat,
+or session state.
 
 Provider API keys are accepted only by a hidden local prompt outside chat and are
 stored in the operating-system credential store. Codex retrieves a key at request
@@ -87,7 +92,10 @@ instruction-enforced rather than server-authenticated.
 
 Routing schema/policy version 4 adds the optional Designer field while retaining
 strict validation for schemas 1–3. Legacy schemas cannot smuggle a Designer key,
-and Designer cannot use the privileged Fable MCP route. Designer authority is
+and persistent Designer accepts only a direct same-provider model, never the
+privileged Fable MCP route or a project-shadowable unqualified agent name.
+Cross-provider/custom Designers remain task-local and require current-project
+validation immediately before use. Designer authority is
 policy-bounded: it reports only to root, cannot contact other seats or spawn
 descendants, may edit only explicitly delegated design artifacts, and cannot alter
 the canonical plan, implementation code, approvals, or Executor release. These

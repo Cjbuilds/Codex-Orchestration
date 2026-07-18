@@ -59,10 +59,13 @@ If an old prompt contains `orchestrator:`, explain that the current task model a
 
 Normalize `Extra High` to `xhigh`. For Claude Fable 5, accept `Low`, `Medium`, `High`, `XHigh`, `Max`, or `Ultra`. Omission or `Auto` means `High`; `Ultra` is a user-facing alias for Claude Code's actual `max` setting and must be reported as that mapping. Route Fable with `--planner-fable --planner-effort <normalized-effort>` or `--advisor-fable --advisor-effort <normalized-effort>`, not through the Codex model catalog. Resolve every other display name to an exact ID only through the executing host's model catalog, picker, a loaded custom agent, or official provider documentation. Never invent an ID. For persistent direct routing, resolve `auto` to the catalog's concrete default.
 
-Designer is a native model-or-agent seat, not a Fable MCP seat. Route it with
-`--designer-model` plus `--designer-effort`, or `--designer-agent` for a loaded
-custom or External Model role. A Designer route may share a model with another
-seat; only Planner and Advisor require independent routes.
+Persistent Designer accepts only a direct same-provider model, not a Fable MCP
+or unqualified custom-agent route. Route it with `--designer-model` plus
+`--designer-effort`. A Designer route may share a model with another seat; only
+Planner and Advisor require independent routes. For a cross-provider Designer,
+create and invoke a task-local External Model role named `designer` after validating
+it in the current project. Codex does not yet expose a scope-qualified agent identity,
+so persisting an agent name would let a later project's agent shadow it.
 
 Read [providers-and-models.md](references/providers-and-models.md) before setup, when clients disagree, when a model is absent, when providers differ, or when custom agents or legacy migration are involved.
 
@@ -81,12 +84,17 @@ python3 <skill-dir>/scripts/update_plugin.py \
 Use a Python 3.11+ launcher available on the host. Never run a repository-relative
 copy. The updater accepts only the exact installed
 `codex-orchestration@codex-orchestration` plugin from the canonical
-`https://github.com/Cjbuilds/Codex-Orchestration` Git marketplace. It delegates
-mutation to `codex plugin marketplace upgrade` and `codex plugin add`, refuses
-local or unexpected sources, malformed manifests, same-version replacement,
-downgrades, and post-install version/source/enabled-state drift. It never removes
-the plugin, rewrites Codex config, reads credentials, or touches routing, chats, or
-sessions. Do not disable routing before an ordinary update.
+`https://github.com/Cjbuilds/Codex-Orchestration` Git marketplace. It stages and
+validates the registered branch in an isolated clone before mutation, then uses
+`codex plugin marketplace upgrade` and `codex plugin add` and binds their result to
+the staged commit. It refuses disabled, local, unexpected, malformed, same-version,
+and downgrade states before mutation; any later failure restores the prior managed
+snapshot and prior installed version or reports rollback failure. It runs pinned
+helpers in a minimal no-proxy/no-credential environment with bounded output, time,
+and process-tree termination. It never removes the plugin, rewrites Codex config,
+reads credentials, or touches routing, chats, or sessions. Do not disable routing
+before an ordinary update; a disabled plugin is left unchanged and must be enabled
+through Codex before it can update.
 
 On success, report the old and new versions and tell the user to restart Codex
 Desktop and start a new task. The current task keeps the already loaded skill
@@ -230,11 +238,11 @@ Add `--advisor-model` and `--advisor-effort` for a same-provider Codex advisor. 
 
 Add `--planner-model` and `--planner-effort` for a same-provider Planner. For Claude Fable 5, use `--planner-fable`; add `--planner-effort low|medium|high|xhigh|max` when the user chooses one. Planner omission persists no Planner route and means the root plans. A configured Planner and Advisor must not resolve to the same model or agent route; independent review is required.
 
-Add `--designer-model` and `--designer-effort` for a same-provider Designer, or
-`--designer-agent` for an exact loaded custom/External Model role. Designer omission
-persists `designer: none`. Designer cannot use the Fable MCP route. The native
-configurator validates the exact model effort or loaded personal-agent file and
-rejects same-name project shadowing.
+Add `--designer-model` and `--designer-effort` for a persistent same-provider
+Designer. Designer omission persists `designer: none`. Designer cannot use the
+Fable MCP route or a persistent custom-agent name. Use a task-local External Model
+role named `designer` for cross-provider design work so the root can validate its
+personal file and reject project shadowing immediately before the bounded call.
 
 The configurator capability-tests the complete four-field preset on the active target, `codex` on PATH when different, the known macOS Desktop binary when present, and every explicit `--compat-bin`. A successful isolated config probe means that client can parse the preset; it is not a live child-model confirmation. Report `route accepted` or `used and confirmed` only from the exact live spawn evidence defined below. Ask about other Codex/IDE installations that share this config only when the environment suggests they exist, and pass their binaries explicitly. If the request or active host indicates a named `--profile`, explain that normal setup manages the default user layer and is not verified for that profile; do not add a routine question for users with no profile signal. If a checked client rejects any managed field, stop before apply. Recommend updating it or using the task-local fallback. `--allow-incompatible-client` requires a separate explicit user decision because it can make the shared config unreadable to that client.
 
@@ -311,7 +319,7 @@ The managed workflow reserves these MCP calls for the root Codex model. Current 
 
 Direct `model` routing is same-provider. The audited External Model path above may prepare one bundled provider safely. Every unbundled provider still needs an already authenticated Codex-compatible provider and a loaded custom agent that pins `model_provider`.
 
-For a cross-provider Planner or Designer, create a bounded personal custom role through the arbitrary-role or audited External Model flow, start a new task so it loads, and pass its exact name with `--planner-agent` or `--designer-agent`. The older standalone managed-role helper below continues to own only its existing Advisor and Executor files; do not expand its migration/removal transaction just to create a Planner or Designer.
+For a cross-provider Planner, create a bounded personal custom role through the arbitrary-role or audited External Model flow, start a new task so it loads, and pass its exact name with `--planner-agent`. For a cross-provider Designer, create a task-local External Model role named `designer` and invoke it only after current-project validation; do not persist its unqualified agent name. The older standalone managed-role helper below continues to own only its existing Advisor and Executor files.
 
 Use the existing standalone-agent configurator for an unbundled provider path. Personal scope is required for machine-local provider IDs and affects all projects, so the user's explicit cross-provider `setup` request must name or confirm the existing provider ID. Never create an unreviewed provider definition, collect keys in chat, or write credentials.
 
