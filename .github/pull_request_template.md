@@ -10,6 +10,11 @@ Run `python3 scripts/preflight.py full` locally and record any relevant focused 
 
 Replace every placeholder before merge. Every tier binds review to the exact head SHA. For `docs`, reviewer fields, findings disposition, and threat model may be `not-required`, and negative evidence may be empty. `behavior` and `security-state` require real reviewer identity and route, test evidence, and a findings disposition. `security-state` also requires a short threat model plus malformed and negative-path evidence. If the head changes, obtain a fresh final-tree review and update this attestation. Required `quality` validates this block from the actual pull request event. This is an attestation, never proof.
 
+An OpenRouter manifest change must use schema 2 and add a strict `runtime_probe`
+object for `openrouter` / `moonshotai/kimi-k3` / `max`. `pending` or `failed` is
+valid only while the pull request remains draft. `passed` must bind
+`tested_head_sha` to the exact current head before the pull request becomes ready.
+
 <!-- codex-review-attestation:start -->
 {
   "schema": 1,

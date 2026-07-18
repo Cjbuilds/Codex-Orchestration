@@ -91,7 +91,7 @@ python3 <skill-dir>/scripts/external_configurator.py \
   --codex-bin <active-codex-binary> gate0 \
   --provider openrouter \
   --model moonshotai/kimi-k3 \
-  --effort medium \
+  --effort max \
   --acknowledge-billing
 ```
 
@@ -111,20 +111,20 @@ python3 <skill-dir>/scripts/external_configurator.py connect \
   --purpose "Gather evidence from the bounded packet and cite sources." \
   --provider openrouter \
   --model moonshotai/kimi-k3 \
-  --effort medium
+  --effort max
 
 python3 <skill-dir>/scripts/external_configurator.py connect \
   --role researcher \
   --purpose "Gather evidence from the bounded packet and cite sources." \
   --provider openrouter \
   --model moonshotai/kimi-k3 \
-  --effort medium \
+  --effort max \
   --apply
 ```
 
 The configurator creates one personal provider-pinned agent per manifest-validated
 effort. Start a new Codex task so Desktop loads those files, preview `ready`, then
-apply it. Read-only `resolve --role researcher --effort medium` returns the exact
+apply it. Read-only `resolve --role researcher --effort max` returns the exact
 loaded agent name root should delegate to. The agent file, not prompt text, binds
 provider, model, and effort.
 
@@ -133,9 +133,9 @@ provider, model, and effort.
 Normalize forms such as these:
 
 ```text
-call researcher at medium — <bounded task>
+call researcher at max — <bounded task>
 use reviewer@high for <bounded task>
-researcher: <bounded task> (effort medium)
+researcher: <bounded task> (effort max)
 ```
 
 Resolve the role and effort through `external_configurator.py resolve`. Reject an
@@ -192,11 +192,18 @@ operation allowlist, mechanical runtime model metadata, CLI re-attestation behav
 and dedicated redaction tests. Do not generalize Fable's adapter into arbitrary CLI
 execution.
 
-## Kimi K3 candidate status
+## Kimi K3 status
 
-The included candidate uses the user-supplied exact ID `moonshotai/kimi-k3`, context
-claim `1048576`, auto-compaction limit `950000`, and `medium` effort. As of the adapter review on 2026-07-17, the
-current OpenRouter listing confirmed Responses API routes for listed Kimi models but
-did not list Kimi K3. Therefore the manifest remains experimental and unqualified.
-Do not replace it with a dated or "latest" alias. Gate 0 must fail closed until the
-exact candidate is available and authorized.
+As verified from OpenRouter's official model page and public endpoint metadata on
+2026-07-18, `moonshotai/kimi-k3` is listed with context `1048576`, a live
+Responses-compatible endpoint, and support for the reasoning parameter. OpenRouter
+currently documents only `max` reasoning for Kimi K3. The plugin therefore accepts
+`max`, lets `auto` resolve to `max`, and rejects `xhigh`, `high`, `medium`, `low`,
+`minimal`, and `none` without clamping. The auto-compaction limit remains `950000`.
+
+The bundled adapter is no longer experimental, but official listing evidence is not
+per-install route qualification. Every installation starts unqualified and must pass
+one explicitly authorized, potentially billable Gate 0 for the exact
+OpenRouter/Kimi/max tuple before role creation. Upstream capacity may return `429`;
+that is a failed probe and must not be retried without renewed approval. Do not
+replace the exact model ID with a dated or `latest` alias.

@@ -30,22 +30,29 @@ class ExternalProviderTests(unittest.TestCase):
             openrouter["models"]["moonshotai/kimi-k3"]["context_window"],
             1_048_576,
         )
-        self.assertTrue(openrouter["experimental"])
+        self.assertEqual(openrouter["version"], 2)
+        self.assertFalse(openrouter["experimental"])
         self.assertFalse(openrouter["qualified"])
+        self.assertIn(
+            "https://openrouter.ai/moonshotai/kimi-k3",
+            openrouter["models"]["moonshotai/kimi-k3"]["capability_source"],
+        )
         self.assertEqual(fable["lane"], "subscription")
         self.assertEqual(fable["runtime_identity"], "cli_metadata")
 
     def test_kimi_effort_is_explicit_and_never_clamped(self) -> None:
         provider = PROVIDERS.load_provider("openrouter")
         model = "moonshotai/kimi-k3"
-        self.assertEqual(PROVIDERS.resolve_effort(provider, model, "auto"), "medium")
-        self.assertEqual(PROVIDERS.resolve_effort(provider, model, "medium"), "medium")
-        with self.assertRaisesRegex(PROVIDERS.ProviderError, "unsupported"):
-            PROVIDERS.resolve_effort(provider, model, "max")
+        self.assertEqual(PROVIDERS.resolve_effort(provider, model, "auto"), "max")
+        self.assertEqual(PROVIDERS.resolve_effort(provider, model, "max"), "max")
+        for effort in ("xhigh", "high", "medium", "low", "minimal", "none"):
+            with self.subTest(effort=effort):
+                with self.assertRaisesRegex(PROVIDERS.ProviderError, "unsupported"):
+                    PROVIDERS.resolve_effort(provider, model, effort)
         with self.assertRaisesRegex(PROVIDERS.ProviderError, "not in provider"):
             PROVIDERS.resolve_effort(provider, "moonshotai/missing", "max")
 
-    def test_experimental_unqualified_provider_fails_closed(self) -> None:
+    def test_official_but_per_install_unqualified_provider_fails_closed(self) -> None:
         provider = PROVIDERS.load_provider("openrouter")
         with self.assertRaisesRegex(PROVIDERS.ProviderError, "Gate 0"):
             PROVIDERS.require_qualified(provider)
@@ -78,7 +85,7 @@ class ExternalProviderTests(unittest.TestCase):
 
         value = deepcopy(baseline)
         model = value["models"]["moonshotai/kimi-k3"]
-        model["supported_efforts"] = ["medium", "medium"]
+        model["supported_efforts"] = ["max", "max"]
         with self.assertRaisesRegex(PROVIDERS.ProviderError, "efforts"):
             PROVIDERS.validate_provider(value, expected_id="openrouter")
 

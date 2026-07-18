@@ -119,9 +119,9 @@ authentication.
 Ask for a role in plain language:
 
 ```text
-/codex-orchestration configure external role researcher with OpenRouter model moonshotai/kimi-k3 at medium; job: gather evidence and cite sources
+/codex-orchestration configure external role researcher with OpenRouter model moonshotai/kimi-k3 at max; job: gather evidence and cite sources
 
-/codex-orchestration call researcher at medium — review this bounded research packet
+/codex-orchestration call researcher at max — review this bounded research packet
 ```
 
 Setup is deliberately staged: preview and prepare the audited provider adapter,
@@ -131,11 +131,14 @@ Gate 0 probe, create the role variants, then start a new task. Never paste an AP
 key into Codex chat. The repository,
 provider TOML, registry, journal, logs, and tests store no key.
 
-The bundled OpenRouter/Kimi K3 definition is an unqualified candidate based on the
-supplied exact ID `moonshotai/kimi-k3` and `medium` effort. It is not currently
-claimed as an OpenRouter-listed model and cannot become callable unless that exact
-tuple passes Gate 0. New providers or subscription CLIs require a reviewed bundled
-manifest and adapter; arbitrary URLs and arbitrary local CLIs are not auto-trusted.
+OpenRouter now officially lists the exact ID `moonshotai/kimi-k3`, a 1,048,576-token
+context, a Responses-compatible endpoint, and only `max` reasoning. For this model,
+`auto` resolves to `max`; every other explicit effort is rejected rather than
+clamped. The bundled manifest is no longer experimental, but each installation
+remains unqualified and uncallable until its exact OpenRouter/Kimi/max tuple passes
+the explicitly billable isolated Gate 0. New providers or subscription CLIs still
+require a reviewed bundled manifest and adapter; arbitrary URLs and arbitrary local
+CLIs are not auto-trusted.
 
 Fable 5 remains the sealed subscription exception and can be used directly as
 Planner or Advisor through first-party Claude login. See the

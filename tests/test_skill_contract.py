@@ -136,10 +136,19 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("same-name project role", SKILL)
 
     def test_external_models_are_nonpicker_nonsecret_and_fail_closed(self) -> None:
+        missing_auth_message = (
+            "External provider authentication is required. Do not paste the API key "
+            "into this chat. Run the displayed enrollment command in a trusted local "
+            "terminal; its hidden local prompt stores the key in your operating-system "
+            "credential store. Tell me when that command succeeds."
+        )
         self.assertIn("## External Model roles", SKILL)
         self.assertIn("Desktop model picker", SKILL)
         self.assertIn("Never write top-level", SKILL)
-        self.assertIn("Do not paste the API key into this chat", SKILL)
+        self.assertIn(missing_auth_message, SKILL)
+        self.assertIn("When authentication is missing", SKILL)
+        self.assertIn("Never ask the user to paste, upload, dictate", SKILL)
+        self.assertIn("Do not run the enrollment command for", SKILL)
         self.assertIn("separate explicit approval for `--acknowledge-billing`", SKILL)
         self.assertIn("one personal provider-pinned custom-agent variant", SKILL)
         self.assertIn("model self-identification", SKILL)
@@ -148,7 +157,9 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("never reads or deletes chats", EXTERNAL_REFERENCE)
         self.assertIn("command-backed auth", EXTERNAL_REFERENCE)
         self.assertIn("moonshotai/kimi-k3", EXTERNAL_REFERENCE)
-        self.assertIn("did not list Kimi K3", EXTERNAL_REFERENCE)
+        self.assertIn("currently documents only `max` reasoning", EXTERNAL_REFERENCE)
+        self.assertIn("rejects `xhigh`, `high`, `medium`, `low`", EXTERNAL_REFERENCE)
+        self.assertIn("Every installation starts unqualified", EXTERNAL_REFERENCE)
 
     def test_arbitrary_roles_are_native_bounded_and_user_owned(self) -> None:
         self.assertIn("## Create arbitrary custom roles", SKILL)

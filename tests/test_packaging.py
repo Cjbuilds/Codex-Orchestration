@@ -45,6 +45,8 @@ class PackagingTests(unittest.TestCase):
         self.assertRegex(attestation["reviewed_head_sha"], r"^[0-9a-f]{40}$")
         self.assertIsInstance(attestation["negative_test_evidence"], list)
         self.assertNotIn("proof", template.lower().split(start, 1)[1])
+        self.assertIn("OpenRouter manifest change must use schema 2", template)
+        self.assertIn("tested_head_sha", template)
 
     def test_versioned_hooks_use_the_preflight_source_of_truth(self) -> None:
         pre_commit = REPO_ROOT / ".githooks/pre-commit"
@@ -87,8 +89,10 @@ class PackagingTests(unittest.TestCase):
                 workflow,
             )
         self.assertIn('cron: "17 4 * * 1"', codeql)
-        self.assertIn("types: [opened, synchronize, reopened, edited]", ci)
-        self.assertNotIn("types: [opened, synchronize, reopened, edited]", codeql)
+        self.assertIn(
+            "types: [opened, synchronize, reopened, edited, ready_for_review]", ci
+        )
+        self.assertNotIn("ready_for_review", codeql)
 
     def test_seven_ci_contexts_use_strict_targets_and_codeql_stays_native(self) -> None:
         ci = (REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
@@ -235,7 +239,13 @@ class PackagingTests(unittest.TestCase):
         openrouter = json.loads((providers / "openrouter.json").read_text("utf-8"))
         fable = json.loads((providers / "claude-fable.json").read_text("utf-8"))
         self.assertEqual(openrouter["models"].keys(), {"moonshotai/kimi-k3"})
+        self.assertEqual(openrouter["version"], 2)
+        self.assertFalse(openrouter["experimental"])
         self.assertFalse(openrouter["qualified"])
+        self.assertEqual(
+            openrouter["models"]["moonshotai/kimi-k3"]["supported_efforts"],
+            ["max"],
+        )
         self.assertEqual(fable["subscription_adapter"]["module"], "fable_advisor_mcp")
         external_reference = SKILL_ROOT / "references/external-models.md"
         self.assertTrue(external_reference.is_file())

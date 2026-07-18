@@ -33,7 +33,7 @@ def genuine_registry(home: Path) -> dict[str, object]:
     value["providers"] = {
         "openrouter": {
             "adapter": "openrouter",
-            "adapter_version": 1,
+            "adapter_version": 2,
             "lane": "native",
             "endpoint": "https://openrouter.ai/api/v1",
             "endpoint_sha256": DIGEST,
@@ -54,14 +54,14 @@ def genuine_registry(home: Path) -> dict[str, object]:
             "purpose": "Review a bounded research packet.",
             "provider": "openrouter",
             "model": "moonshotai/kimi-k3",
-            "default_effort": "medium",
-            "supported_efforts": ["medium"],
+            "default_effort": "max",
+            "supported_efforts": ["max"],
             "effort_source": "bundled-openrouter-template",
             "agent_name": "codex_orchestration_kimi_researcher_abcd1234",
             "agent_file": str(home / "agents" / "kimi.toml"),
             "agent_sha256": DIGEST,
             "effort_agents": {
-                "medium": {
+                "max": {
                     "name": "codex_orchestration_kimi_researcher_abcd1234",
                     "file": str(home / "agents" / "kimi.toml"),
                     "sha256": DIGEST,
@@ -120,8 +120,8 @@ class ExternalRegistryTests(unittest.TestCase):
             baseline = genuine_registry(Path(raw))
             mutations = [
                 lambda role: role.update(provider="missing"),
-                lambda role: role.update(default_effort="max"),
-                lambda role: role.update(supported_efforts=["medium", "medium"]),
+                lambda role: role.update(default_effort="medium"),
+                lambda role: role.update(supported_efforts=["max", "max"]),
                 lambda role: role.update(agent_name="Bad-Agent"),
                 lambda role: role.update(agent_sha256="short"),
             ]

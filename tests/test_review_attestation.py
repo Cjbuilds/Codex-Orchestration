@@ -16,6 +16,24 @@ HEAD = "a" * 40
 BASE = "b" * 40
 
 
+def runtime_probe(
+    *,
+    status: str = "pending",
+    tested_head_sha: str | None = None,
+    **updates: object,
+) -> dict[str, object]:
+    value: dict[str, object] = {
+        "status": status,
+        "provider": "openrouter",
+        "model": "moonshotai/kimi-k3",
+        "effort": "max",
+        "tested_head_sha": tested_head_sha,
+        "evidence": "Exact tuple awaits one explicitly authorized isolated Gate 0",
+    }
+    value.update(updates)
+    return value
+
+
 def body(**updates: object) -> str:
     value: dict[str, object] = {
         "schema": 1,
@@ -53,11 +71,14 @@ def body(**updates: object) -> str:
     )
 
 
-def event(pr_body: str, *, head: str = HEAD) -> dict[str, object]:
+def event(
+    pr_body: str, *, head: str = HEAD, draft: bool = True
+) -> dict[str, object]:
     return {
         "repository": {"full_name": "Cjbuilds/Codex-Orchestration"},
         "pull_request": {
             "body": pr_body,
+            "draft": draft,
             "head": {"sha": head},
             "base": {"ref": "main", "sha": BASE},
         },
@@ -73,6 +94,105 @@ class ReviewAttestationTests(unittest.TestCase):
             changed_paths=["scripts/preflight.py"],
         )
         self.assertEqual(tier, "security-state")
+
+    def test_openrouter_manifest_requires_schema_2_runtime_probe(self) -> None:
+        with self.assertRaisesRegex(ATTESTATION.AttestationError, "schema 2"):
+            ATTESTATION.validate_pull_request_event(
+                event(body()),
+                expected_base=BASE,
+                expected_head=HEAD,
+                changed_paths=[ATTESTATION.RUNTIME_PROBE_PATH],
+            )
+
+        tier = ATTESTATION.validate_pull_request_event(
+            event(body(schema=2, runtime_probe=runtime_probe())),
+            expected_base=BASE,
+            expected_head=HEAD,
+            changed_paths=[ATTESTATION.RUNTIME_PROBE_PATH],
+        )
+        self.assertEqual(tier, "security-state")
+
+    def test_runtime_probe_pass_is_exact_head_bound_and_allows_ready_pr(self) -> None:
+        attestation = body(
+            schema=2,
+            runtime_probe=runtime_probe(
+                status="passed",
+                tested_head_sha=HEAD,
+                evidence="One isolated Gate 0 accepted the exact tuple on this head",
+            ),
+        )
+        tier = ATTESTATION.validate_pull_request_event(
+            event(attestation, draft=False),
+            expected_base=BASE,
+            expected_head=HEAD,
+            changed_paths=[ATTESTATION.RUNTIME_PROBE_PATH],
+        )
+        self.assertEqual(tier, "security-state")
+
+        for tested_head in ("c" * 40, None):
+            with self.subTest(tested_head=tested_head):
+                with self.assertRaisesRegex(ATTESTATION.AttestationError, "tested SHA"):
+                    ATTESTATION.validate_pull_request_event(
+                        event(
+                            body(
+                                schema=2,
+                                runtime_probe=runtime_probe(
+                                    status="passed",
+                                    tested_head_sha=tested_head,
+                                ),
+                            ),
+                            draft=False,
+                        ),
+                        expected_base=BASE,
+                        expected_head=HEAD,
+                        changed_paths=[ATTESTATION.RUNTIME_PROBE_PATH],
+                    )
+
+    def test_unpassed_runtime_probe_is_draft_only_and_strict(self) -> None:
+        for status in ("pending", "failed"):
+            with self.subTest(status=status):
+                tested_head = None if status == "pending" else HEAD
+                valid = body(
+                    schema=2,
+                    runtime_probe=runtime_probe(
+                        status=status,
+                        tested_head_sha=tested_head,
+                    ),
+                )
+                self.assertEqual(
+                    ATTESTATION.validate_pull_request_event(
+                        event(valid, draft=True),
+                        expected_base=BASE,
+                        expected_head=HEAD,
+                        changed_paths=[ATTESTATION.RUNTIME_PROBE_PATH],
+                    ),
+                    "security-state",
+                )
+                with self.assertRaisesRegex(ATTESTATION.AttestationError, "draft"):
+                    ATTESTATION.validate_pull_request_event(
+                        event(valid, draft=False),
+                        expected_base=BASE,
+                        expected_head=HEAD,
+                        changed_paths=[ATTESTATION.RUNTIME_PROBE_PATH],
+                    )
+
+        malformed = (
+            runtime_probe(status="unknown"),
+            runtime_probe(provider="other"),
+            runtime_probe(model="moonshotai/kimi-latest"),
+            runtime_probe(effort="medium"),
+            runtime_probe(extra="unsupported"),
+            runtime_probe(tested_head_sha=HEAD),
+        )
+        for probe in malformed:
+            with self.subTest(probe=probe):
+                with self.assertRaises(ATTESTATION.AttestationError):
+                    ATTESTATION.validate_pull_request_event(
+                        event(body(schema=2, runtime_probe=probe)),
+                        expected_base=BASE,
+                        expected_head=HEAD,
+                        changed_paths=[ATTESTATION.RUNTIME_PROBE_PATH],
+                    )
 
     def test_non_pr_event_needs_no_attestation(self) -> None:
         self.assertIsNone(

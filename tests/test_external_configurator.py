@@ -240,7 +240,7 @@ class ExternalConfiguratorTests(unittest.TestCase):
                     "Review bounded research packets.",
                     "openrouter",
                     "moonshotai/kimi-k3",
-                    "medium",
+                    "max",
                 )
             qualify(home)
             name = CONFIG.connect_role(
@@ -249,7 +249,7 @@ class ExternalConfiguratorTests(unittest.TestCase):
                 "Review bounded research packets.",
                 "openrouter",
                 "moonshotai/kimi-k3",
-                "medium",
+                "max",
             )
             registry, _ = CONFIG.load_registry(home)
             role = registry["roles"]["kimi_researcher"]
@@ -257,7 +257,7 @@ class ExternalConfiguratorTests(unittest.TestCase):
             self.assertEqual(role["agent_name"], name)
             self.assertIn('model_provider = "openrouter"', content)
             self.assertIn('model = "moonshotai/kimi-k3"', content)
-            self.assertIn('model_reasoning_effort = "medium"', content)
+            self.assertIn('model_reasoning_effort = "max"', content)
             self.assertIn("model_context_window = 1048576", content)
             self.assertIn("model_auto_compact_token_limit = 950000", content)
             self.assertEqual(role["state"], "RESTART_REQUIRED")
@@ -275,7 +275,7 @@ class ExternalConfiguratorTests(unittest.TestCase):
                 "Review bounded research packets.",
                 "openrouter",
                 "moonshotai/kimi-k3",
-                "medium",
+                "max",
             )
             with self.assertRaisesRegex(CONFIG.ExternalConfigurationError, "not ready"):
                 CONFIG.resolve_role(home, "kimi_researcher", "auto", backend)
@@ -283,13 +283,11 @@ class ExternalConfiguratorTests(unittest.TestCase):
             with mock.patch.object(
                 CONFIG.external_credentials, "credential_ready", return_value=True
             ):
-                resolved = CONFIG.resolve_role(
-                    home, "kimi_researcher", "medium", backend
-                )
+                resolved = CONFIG.resolve_role(home, "kimi_researcher", "max", backend)
             self.assertEqual(resolved["agent"], name)
-            self.assertEqual(resolved["effort"], "medium")
+            self.assertEqual(resolved["effort"], "max")
             with self.assertRaisesRegex(CONFIG.ExternalConfigurationError, "unsupported"):
-                CONFIG.resolve_role(home, "kimi_researcher", "max", backend)
+                CONFIG.resolve_role(home, "kimi_researcher", "medium", backend)
 
     def test_resolve_fails_closed_on_provider_agent_helper_and_qualification_drift(self) -> None:
         attacks = (
@@ -312,7 +310,7 @@ class ExternalConfiguratorTests(unittest.TestCase):
                     "Review bounded research packets.",
                     "openrouter",
                     "moonshotai/kimi-k3",
-                    "medium",
+                    "max",
                 )
                 CONFIG.mark_role_ready(home, "kimi_researcher")
                 registry, digest = CONFIG.load_registry(home)
@@ -355,7 +353,7 @@ class ExternalConfiguratorTests(unittest.TestCase):
                 ):
                     with self.assertRaises(CONFIG.ExternalConfigurationError):
                         CONFIG.resolve_role(
-                            home, "kimi_researcher", "medium", backend
+                            home, "kimi_researcher", "max", backend
                         )
 
     def test_retrust_dequalifies_an_existing_role_at_resolve_time(self) -> None:
@@ -379,7 +377,7 @@ class ExternalConfiguratorTests(unittest.TestCase):
                 "Review bounded research packets.",
                 "openrouter",
                 "moonshotai/kimi-k3",
-                "medium",
+                "max",
             )
             CONFIG.mark_role_ready(home, "kimi_researcher")
             helper.write_text("#!/bin/sh\nprintf 'new-value\\n'\n", encoding="utf-8")
@@ -388,7 +386,7 @@ class ExternalConfiguratorTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 CONFIG.ExternalConfigurationError, "no longer qualified"
             ):
-                CONFIG.resolve_role(home, "kimi_researcher", "medium", backend)
+                CONFIG.resolve_role(home, "kimi_researcher", "max", backend)
 
     def test_two_roles_share_a_provider_and_disconnect_in_either_order(self) -> None:
         for order in (("researcher", "critic"), ("critic", "researcher")):
@@ -403,7 +401,7 @@ class ExternalConfiguratorTests(unittest.TestCase):
                     "Review bounded research packets.",
                     "openrouter",
                     "moonshotai/kimi-k3",
-                    "medium",
+                    "max",
                 )
                 CONFIG.mark_role_ready(home, "researcher")
                 CONFIG.connect_role(
@@ -412,7 +410,7 @@ class ExternalConfiguratorTests(unittest.TestCase):
                     "Critique bounded evidence packets.",
                     "openrouter",
                     "moonshotai/kimi-k3",
-                    "medium",
+                    "max",
                 )
                 registry, _ = CONFIG.load_registry(home)
                 self.assertEqual(
@@ -450,7 +448,7 @@ class ExternalConfiguratorTests(unittest.TestCase):
                 "Review bounded research packets.",
                 "openrouter",
                 "moonshotai/kimi-k3",
-                "medium",
+                "max",
             )
             CONFIG.mark_role_ready(home, "researcher")
             CONFIG.connect_role(
@@ -459,7 +457,7 @@ class ExternalConfiguratorTests(unittest.TestCase):
                 "Critique bounded evidence packets.",
                 "openrouter",
                 "moonshotai/kimi-k3",
-                "medium",
+                "max",
             )
             CONFIG.disconnect_role(home, "critic")
             registry, _ = CONFIG.load_registry(home)
@@ -469,9 +467,7 @@ class ExternalConfiguratorTests(unittest.TestCase):
             with mock.patch.object(
                 CONFIG.external_credentials, "credential_ready", return_value=True
             ):
-                resolved = CONFIG.resolve_role(
-                    home, "researcher", "medium", backend
-                )
+                resolved = CONFIG.resolve_role(home, "researcher", "max", backend)
             self.assertEqual(resolved["role"], "researcher")
 
     def test_disconnect_and_provider_removal_preserve_chat_and_root_files(self) -> None:
@@ -491,7 +487,7 @@ class ExternalConfiguratorTests(unittest.TestCase):
                 "Review bounded research packets.",
                 "openrouter",
                 "moonshotai/kimi-k3",
-                "medium",
+                "max",
             )
             self.assertEqual(
                 CONFIG.disconnect_role(home, "kimi_researcher"), "openrouter"
@@ -521,7 +517,7 @@ class ExternalConfiguratorTests(unittest.TestCase):
                 "Review bounded research packets.",
                 "openrouter",
                 "moonshotai/kimi-k3",
-                "medium",
+                "max",
             )
             registry, _ = CONFIG.load_registry(home)
             agent = Path(registry["roles"]["kimi_researcher"]["agent_file"])
@@ -570,7 +566,7 @@ class ExternalConfiguratorTests(unittest.TestCase):
                     home,
                     "openrouter",
                     "moonshotai/kimi-k3",
-                    "medium",
+                    "max",
                     Path("/safe/codex"),
                     acknowledge_billing=False,
                 )
@@ -591,7 +587,7 @@ class ExternalConfiguratorTests(unittest.TestCase):
                         home,
                         "openrouter",
                         "moonshotai/kimi-k3",
-                        "medium",
+                        "max",
                         Path("/safe/codex"),
                         acknowledge_billing=True,
                     )
@@ -640,7 +636,7 @@ class ExternalConfiguratorTests(unittest.TestCase):
                     home,
                     "openrouter",
                     "moonshotai/kimi-k3",
-                    "medium",
+                    "max",
                     Path("/safe/codex"),
                     acknowledge_billing=True,
                 )
@@ -665,7 +661,7 @@ class ExternalConfiguratorTests(unittest.TestCase):
                 "Review bounded research packets.",
                 "openrouter",
                 "moonshotai/kimi-k3",
-                "medium",
+                "max",
             )
             CONFIG.mark_role_ready(home, "researcher")
             with self.assertRaisesRegex(
@@ -675,7 +671,7 @@ class ExternalConfiguratorTests(unittest.TestCase):
                     home,
                     "openrouter",
                     "moonshotai/kimi-k3",
-                    "medium",
+                    "max",
                     Path("/safe/codex"),
                     acknowledge_billing=True,
                 )
@@ -705,7 +701,7 @@ class ExternalConfiguratorTests(unittest.TestCase):
                         home,
                         "openrouter",
                         "moonshotai/kimi-k3",
-                        "medium",
+                        "max",
                         Path("/safe/codex"),
                         acknowledge_billing=True,
                     )
@@ -748,7 +744,7 @@ class ExternalConfiguratorTests(unittest.TestCase):
                     home,
                     "openrouter",
                     "moonshotai/kimi-k3",
-                    "medium",
+                    "max",
                     fake,
                     acknowledge_billing=True,
                 )

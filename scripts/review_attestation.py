@@ -21,7 +21,7 @@ EXACT_SHA_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 MAX_EVENT_BYTES = 1_000_000
 MAX_GIT_OUTPUT_BYTES = 1_000_000
 PLACEHOLDERS = {"", "not-required", "todo", "replace-me", "n/a", "none"}
-FIELDS = {
+FIELDS_V1 = {
     "schema",
     "risk_tier",
     "repository",
@@ -33,6 +33,20 @@ FIELDS = {
     "negative_test_evidence",
     "findings_disposition",
 }
+FIELDS_V2 = FIELDS_V1 | {"runtime_probe"}
+RUNTIME_PROBE_FIELDS = {
+    "status",
+    "provider",
+    "model",
+    "effort",
+    "tested_head_sha",
+    "evidence",
+}
+RUNTIME_PROBE_STATUSES = {"pending", "passed", "failed"}
+RUNTIME_PROBE_PATH = (
+    "plugins/codex-orchestration/skills/codex-orchestration/providers/openrouter.json"
+)
+RUNTIME_PROBE_TUPLE = ("openrouter", "moonshotai/kimi-k3", "max")
 SECURITY_PATHS = {
     "AGENTS.md",
     ".github/CODEOWNERS",
@@ -206,6 +220,42 @@ def _validate_test_evidence(value: Any, *, tier: str) -> None:
         )
 
 
+def _validate_runtime_probe(
+    value: Any,
+    *,
+    expected_head: str,
+    pull_request_draft: Any,
+) -> None:
+    if not isinstance(value, dict) or set(value) != RUNTIME_PROBE_FIELDS:
+        raise AttestationError("runtime_probe fields do not match schema 2")
+    status = value["status"]
+    if status not in RUNTIME_PROBE_STATUSES:
+        raise AttestationError("runtime_probe status is unsupported")
+    if (
+        value["provider"],
+        value["model"],
+        value["effort"],
+    ) != RUNTIME_PROBE_TUPLE:
+        raise AttestationError("runtime_probe tuple does not match Kimi K3")
+    _meaningful_string(value["evidence"], "runtime_probe evidence")
+    tested_head = value["tested_head_sha"]
+    if status == "passed":
+        if tested_head != expected_head:
+            raise AttestationError(
+                "runtime_probe tested SHA is stale or does not match the PR head"
+            )
+        return
+    if pull_request_draft is not True:
+        raise AttestationError(
+            "an unpassed runtime_probe is allowed only while the pull request is draft"
+        )
+    if status == "pending" and tested_head is not None:
+        raise AttestationError("a pending runtime_probe cannot claim a tested SHA")
+    if status == "failed" and tested_head is not None:
+        if not isinstance(tested_head, str) or not EXACT_SHA_RE.fullmatch(tested_head):
+            raise AttestationError("failed runtime_probe tested SHA is invalid")
+
+
 def parse_attestation(body: str) -> dict[str, Any]:
     if len(body) > 200_000:
         raise AttestationError("pull request body is too large")
@@ -220,8 +270,14 @@ def parse_attestation(body: str) -> dict[str, Any]:
         if isinstance(exc, AttestationError):
             raise
         raise AttestationError(f"attestation is not strict JSON: {exc}") from exc
-    if not isinstance(value, dict) or set(value) != FIELDS:
-        raise AttestationError("attestation fields do not match schema 1")
+    if not isinstance(value, dict):
+        raise AttestationError("attestation must be an object")
+    schema = value.get("schema")
+    if type(schema) is not int or schema not in {1, 2}:
+        raise AttestationError("attestation schema must be the integer 1 or 2")
+    fields = FIELDS_V1 if schema == 1 else FIELDS_V2
+    if set(value) != fields:
+        raise AttestationError(f"attestation fields do not match schema {schema}")
     return value
 
 
@@ -255,14 +311,26 @@ def validate_pull_request_event(
         raise AttestationError("pull request body is missing")
 
     value = parse_attestation(body)
-    if type(value["schema"]) is not int or value["schema"] != 1:
-        raise AttestationError("attestation schema must be the integer 1")
+    if type(value["schema"]) is not int or value["schema"] not in {1, 2}:
+        raise AttestationError("attestation schema must be the integer 1 or 2")
     if value["repository"] != EXPECTED_REPOSITORY:
         raise AttestationError("attestation repository does not match")
     if value["base_branch"] != EXPECTED_BASE:
         raise AttestationError("attestation base branch is not main")
     if value["reviewed_head_sha"] != expected_head:
         raise AttestationError("attestation reviewed SHA is stale or incorrect")
+
+    probe_required = RUNTIME_PROBE_PATH in changed_paths
+    if probe_required and value["schema"] != 2:
+        raise AttestationError(
+            "OpenRouter manifest changes require schema 2 runtime_probe evidence"
+        )
+    if value["schema"] == 2:
+        _validate_runtime_probe(
+            value["runtime_probe"],
+            expected_head=expected_head,
+            pull_request_draft=pull_request.get("draft"),
+        )
 
     required_tier = classify_risk(changed_paths)
     if value["risk_tier"] != required_tier:

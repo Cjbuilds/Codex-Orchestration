@@ -19,8 +19,8 @@ Support these simple forms:
 /codex-orchestration setup planner: Claude Fable 5 High, advisor: GPT-5.6 Sol High, executor: GPT-5.6 Luna Extra High
 /codex-orchestration create project role: researcher
 /codex-orchestration create personal roles: researcher, writer, reviewer
-/codex-orchestration configure external role researcher with OpenRouter model moonshotai/kimi-k3 at medium
-/codex-orchestration call researcher at medium — <one bounded task>
+/codex-orchestration configure external role researcher with OpenRouter model moonshotai/kimi-k3 at max
+/codex-orchestration call researcher at max — <one bounded task>
 /codex-orchestration status
 /codex-orchestration disable
 /codex-orchestration remove custom roles personally
@@ -76,7 +76,7 @@ Accept natural-language forms such as:
 
 ```text
 configure external role researcher with <provider> model <exact-id> at <effort>; job: <purpose>
-call researcher at medium — <bounded task>
+call researcher at max — <bounded task>
 use reviewer@high for <bounded task>
 external status
 disconnect external role researcher
@@ -112,10 +112,12 @@ the stable helper under `CODEX_HOME` or an explicitly trusted absolute user help
 
 `gate0` runs one fixed, ephemeral, read-only request in a temporary `CODEX_HOME` and
 may incur provider cost. Treat success as `CAPABILITY_VERIFIED` and route acceptance,
-not runtime model confirmation. The bundled Kimi K3 candidate uses only the
-user-supplied exact tuple `moonshotai/kimi-k3` at `medium`; current provider research
-did not verify that listing, so it remains unqualified until the exact Gate 0 probe
-succeeds. Never substitute a dated or `latest` Kimi alias.
+not runtime model confirmation. OpenRouter officially lists the exact Kimi K3 tuple
+`moonshotai/kimi-k3` with only `max` reasoning. For this model, `auto` resolves to
+`max`; reject every other explicit effort instead of clamping it. The bundled
+adapter is no longer experimental, but each installation remains unqualified until
+that exact tuple passes its explicitly authorized Gate 0. Never substitute a dated
+or `latest` Kimi alias.
 
 `connect` creates one personal provider-pinned custom-agent variant for every
 manifest-validated effort. After a new task and exact integrity check, `resolve`
