@@ -1,6 +1,32 @@
 # Changelog
 
-## 0.5.1 — Unreleased
+## 0.6.0 — Unreleased
+
+- Add security-first External Model roles that remain outside the Codex Desktop
+  model picker and never replace the root provider or model.
+- Add strict bundled provider manifests, an explicit readiness state machine, exact
+  effort validation, provider-pinned personal agent variants, and honest
+  route-accepted versus runtime-confirmed states.
+- Add command-backed provider authentication through a stable helper under
+  `CODEX_HOME`, with macOS Keychain, Linux Secret Service, Windows Credential
+  Manager, and explicitly pinned user-helper paths. No provider key is accepted in
+  chat, command arguments, TOML, registry state, journals, logs, tests, or Git.
+- Add preview-first provider preparation, isolated paid Gate 0 qualification,
+  additive App Server writes, content-free crash recovery, exact-match disconnect,
+  and provider removal that preserve root settings, OpenAI auth, and chat sessions.
+- Preserve Claude Fable 5 as the only sealed first-party subscription adapter, with
+  its existing no-tools/no-persistence bridge, first-party login checks, and runtime
+  model metadata.
+- Include an unqualified `moonshotai/kimi-k3` candidate from user-supplied evidence
+  at `medium` effort. It cannot become callable until the exact route passes Gate 0;
+  no current OpenRouter listing was inferred into a different Kimi ID.
+- Verify Gate 0 CLI controls before any billable command and read only Codex's
+  bounded `--output-last-message` artifact, never decorated process output. The
+  Windows portability job performs a real temporary Credential Manager round trip;
+  that hosted gate must pass before 0.6.0 is released and is not reproducible on a
+  non-Windows local preflight.
+
+## 0.5.1 — 2026-07-16
 
 - Preserve explicit role labels exactly: a model supplied as `planner:` can never be reinterpreted as an Advisor, and Fable Planner uses only the Planner operations.
 - Give Planner support a new plugin version so marketplace upgrade and reinstall replace the affected Advisor-only `0.5.0` cache instead of reusing it.

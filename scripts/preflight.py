@@ -333,6 +333,7 @@ def ci_checks(
                     "tests.test_inspect_models",
                     "tests.test_packaging",
                     "tests.test_skill_contract",
+                    "tests.test_external_credentials",
                 ],
                 timeout=600,
             ),

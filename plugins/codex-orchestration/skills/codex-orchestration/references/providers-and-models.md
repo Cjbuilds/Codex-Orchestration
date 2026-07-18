@@ -232,7 +232,11 @@ A cross-provider seat normally needs:
 3. a new task that loads that agent;
 4. v2 spawn with the matching `agent_type` and `fork_turns = "none"`.
 
-Never create provider definitions, request keys in chat, write credentials, or imply that an OpenAI login grants access to another provider.
+The reviewed External Models subsystem may prepare one bundled provider definition
+and command-backed auth route under the stricter lifecycle in
+[external-models.md](external-models.md). Every other provider must already exist.
+Never create an unreviewed provider definition, request keys in chat, write
+credentials, or imply that an OpenAI login grants access to another provider.
 
 Codex custom providers currently use the Responses wire protocol. An Anthropic Messages endpoint is not automatically compatible. Use a supported integration that the user has configured and tested, such as an appropriate Amazon Bedrock route where available.
 

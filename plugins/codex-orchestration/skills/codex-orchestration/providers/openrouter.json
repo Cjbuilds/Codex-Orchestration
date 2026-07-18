@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "id": "openrouter",
+  "version": 1,
+  "name": "OpenRouter",
+  "lane": "native",
+  "experimental": true,
+  "qualified": false,
+  "base_url": "https://openrouter.ai/api/v1",
+  "wire_api": "responses",
+  "auth": "secure_store",
+  "models": {
+    "moonshotai/kimi-k3": {
+      "default_effort": "medium",
+      "supported_efforts": [
+        "medium"
+      ],
+      "context_window": 1048576,
+      "auto_compact_token_limit": 950000,
+      "capability_source": "user-supplied-screenshot-2026-07-17-unverified"
+    }
+  },
+  "runtime_identity": "conditional",
+  "subscription_adapter": null
+}

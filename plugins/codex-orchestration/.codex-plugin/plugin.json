@@ -1,7 +1,7 @@
 {
   "name": "codex-orchestration",
-  "version": "0.5.1",
-  "description": "Bring models like Claude Fable 5 into Codex as Planner, Advisor, or Executor.",
+  "version": "0.6.0",
+  "description": "Give Codex and audited external models safe, provider-pinned roles.",
   "author": {
     "name": "CJ Zafir",
     "url": "https://github.com/Cjbuilds"
@@ -21,7 +21,7 @@
   "interface": {
     "displayName": "Codex Orchestration",
     "shortDescription": "Plan, review, and build with multiple models",
-    "longDescription": "Bring Fable 5 and compatible models into Codex as Planner, Advisor, or Executor, then let Codex coordinate the workflow.",
+    "longDescription": "Bring Fable 5 and audited API models into Codex as bounded roles without changing the root model or Desktop model picker.",
     "developerName": "CJ Zafir",
     "category": "Productivity",
     "websiteURL": "https://github.com/Cjbuilds/Codex-Orchestration",
@@ -31,6 +31,7 @@
       "Custom agent roles",
       "Model planning",
       "Plan review",
+      "External model roles",
       "Efficient execution"
     ],
     "defaultPrompt": [

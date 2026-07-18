@@ -19,6 +19,8 @@ Support these simple forms:
 /codex-orchestration setup planner: Claude Fable 5 High, advisor: GPT-5.6 Sol High, executor: GPT-5.6 Luna Extra High
 /codex-orchestration create project role: researcher
 /codex-orchestration create personal roles: researcher, writer, reviewer
+/codex-orchestration configure external role researcher with OpenRouter model moonshotai/kimi-k3 at medium
+/codex-orchestration call researcher at medium — <one bounded task>
 /codex-orchestration status
 /codex-orchestration disable
 /codex-orchestration remove custom roles personally
@@ -56,6 +58,84 @@ If an old prompt contains `orchestrator:`, explain that the current task model a
 Normalize `Extra High` to `xhigh`. For Claude Fable 5, accept `Low`, `Medium`, `High`, `XHigh`, `Max`, or `Ultra`. Omission or `Auto` means `High`; `Ultra` is a user-facing alias for Claude Code's actual `max` setting and must be reported as that mapping. Route Fable with `--planner-fable --planner-effort <normalized-effort>` or `--advisor-fable --advisor-effort <normalized-effort>`, not through the Codex model catalog. Resolve every other display name to an exact ID only through the executing host's model catalog, picker, a loaded custom agent, or official provider documentation. Never invent an ID. For persistent direct routing, resolve `auto` to the catalog's concrete default.
 
 Read [providers-and-models.md](references/providers-and-models.md) before setup, when clients disagree, when a model is absent, when providers differ, or when custom agents or legacy migration are involved.
+
+## External Model roles
+
+Use this path when the user wants Codex Orchestration to own a model that should not
+appear in the Desktop model picker. Read
+[external-models.md](references/external-models.md) completely before preparing,
+qualifying, creating, resolving, disconnecting, or removing an External Model role.
+
+The root model and its ChatGPT/OpenAI login remain untouched. Never write top-level
+`model` or `model_provider`, never edit the Desktop picker, and never inspect,
+migrate, archive, or delete a chat or session. An External Model is represented only
+by a reviewed provider adapter, strict non-secret state, and provider-pinned personal
+agent variants.
+
+Accept natural-language forms such as:
+
+```text
+configure external role researcher with <provider> model <exact-id> at <effort>; job: <purpose>
+call researcher at medium — <bounded task>
+use reviewer@high for <bounded task>
+external status
+disconnect external role researcher
+remove external provider openrouter
+```
+
+Only bundled provider manifests are eligible. Do not turn an arbitrary URL, model
+name, shell command, project file, or subscription CLI into a provider. Resolve the
+exact model and supported efforts from the manifest and its cited evidence. Reject
+all unsupported effort values; never clamp, alias, or silently fall back.
+
+Native setup is preview-first and uses
+`scripts/external_configurator.py` from this skill's real installed directory. Its
+stages are `prepare`, external authentication, explicitly authorized billable
+`gate0`, `connect`, a new Codex task, and `ready`. A literal configure request
+authorizes clean preview and preparation, but not entering a key or spending on Gate
+0. Obtain separate explicit approval for `--acknowledge-billing` immediately before
+that probe. Apply role creation only after Gate 0 succeeds for the exact
+provider/model/effort tuple.
+
+When authentication is missing, say exactly this before stopping:
+
+```text
+External provider authentication is required. Do not paste the API key into this chat. Run the displayed enrollment command in a trusted local terminal; its hidden local prompt stores the key in your operating-system credential store. Tell me when that command succeeds.
+```
+
+Never ask the user to paste, upload, dictate, or save a provider key in chat. Never
+place one in a command argument, environment file, TOML, registry, journal, prompt,
+test, log, Git file, issue, or pull request. Do not run the enrollment command for
+the user: they must enter the value through the OS prompt outside chat. The durable
+provider table may contain only documented command-backed auth fields pointing to
+the stable helper under `CODEX_HOME` or an explicitly trusted absolute user helper.
+
+`gate0` runs one fixed, ephemeral, read-only request in a temporary `CODEX_HOME` and
+may incur provider cost. Treat success as `CAPABILITY_VERIFIED` and route acceptance,
+not runtime model confirmation. The bundled Kimi K3 candidate uses only the
+user-supplied exact tuple `moonshotai/kimi-k3` at `medium`; current provider research
+did not verify that listing, so it remains unqualified until the exact Gate 0 probe
+succeeds. Never substitute a dated or `latest` Kimi alias.
+
+`connect` creates one personal provider-pinned custom-agent variant for every
+manifest-validated effort. After a new task and exact integrity check, `resolve`
+maps the requested role and effort to one exact loaded agent name. Delegate only to
+that returned name. Report `route accepted` when the host accepts it. Report `used
+and confirmed` only from mechanical host/provider/rollout metadata; model self-identification is never evidence.
+
+For an unavailable provider, effort, auth helper, role file, or readiness state,
+stop and report the exact blocker. `CLI_CHANGED`, `CONFIG_DRIFT`, `ROLE_COLLISION`,
+and `RECOVERY_REQUIRED` are not best-effort states. Preview disconnect and removal,
+then apply only exact plugin-owned bytes and exact provider config. Preserve edited
+or ambiguous data for manual recovery. An intentionally replaced user helper may be
+accepted only through preview/apply `trust-helper` at the same absolute path, which
+clears qualification and requires authentication plus Gate 0 again.
+
+Claude Fable 5 remains the sealed first-party subscription adapter. It continues to
+use only its Planner/Advisor MCP operations and existing first-party login,
+no-tools, no-session-persistence, runtime-model-metadata contract. Do not route it
+through the native External Model provider configurator and do not generalize its
+adapter to arbitrary CLIs.
 
 ## Create arbitrary custom roles
 
@@ -185,11 +265,11 @@ The managed workflow reserves these MCP calls for the root Codex model. Current 
 
 ## Durable or cross-provider custom agents
 
-Direct `model` routing is same-provider. Except for the built-in Claude Fable 5 MCP route above, a different provider needs an already authenticated Codex-compatible provider and a loaded custom agent that pins `model_provider`.
+Direct `model` routing is same-provider. The audited External Model path above may prepare one bundled provider safely. Every unbundled provider still needs an already authenticated Codex-compatible provider and a loaded custom agent that pins `model_provider`.
 
 For a cross-provider Planner, create a bounded personal custom role through the arbitrary-role flow, start a new task so it loads, and pass its exact name with `--planner-agent`. The older standalone managed-role helper below continues to own only its existing Advisor and Executor files; do not expand its migration/removal transaction just to create a Planner.
 
-Use the existing standalone-agent configurator for this extended path. Personal scope is required for machine-local provider IDs and affects all projects, so the user's explicit cross-provider `setup` request must name or confirm the existing provider ID. Never create provider definitions, collect keys in chat, or write credentials.
+Use the existing standalone-agent configurator for an unbundled provider path. Personal scope is required for machine-local provider IDs and affects all projects, so the user's explicit cross-provider `setup` request must name or confirm the existing provider ID. Never create an unreviewed provider definition, collect keys in chat, or write credentials.
 
 First preview and apply the namespaced custom agents:
 
@@ -365,4 +445,8 @@ Never call that 65% fewer raw tokens, a guaranteed five-hour or weekly-limit sav
 - `scripts/fable_advisor_mcp.py`: fail-closed Claude Fable 5 planning and review bridge.
 - `scripts/configure_orchestration.py`: namespaced custom agents, provider pins, safe removal, and legacy migration.
 - `scripts/inspect_models.py`: fallible host-catalog diagnostics.
+- `scripts/external_configurator.py`: preview-first External Model provider, Gate 0, role, status, recovery, and removal lifecycle.
+- `scripts/external_auth_helper.py`: stable OS credential-store reader for documented command-backed provider auth.
+- `scripts/external_subscription.py`: sealed dispatch through the existing Claude Fable 5 bridge.
 - [providers-and-models.md](references/providers-and-models.md): detailed capability, provider, compatibility, persistence, and usage boundaries.
+- [external-models.md](references/external-models.md): External Model trust lanes, lifecycle, commands, secret handling, Kimi status, and adapter-extension contract.

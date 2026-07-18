@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "id": "claude-fable",
+  "version": 1,
+  "name": "Claude Fable 5",
+  "lane": "subscription",
+  "experimental": false,
+  "qualified": true,
+  "base_url": null,
+  "wire_api": null,
+  "auth": "first_party_cli",
+  "models": {
+    "claude-fable-5": {
+      "default_effort": "high",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "context_window": null,
+      "auto_compact_token_limit": null,
+      "capability_source": "bundled-first-party-cli-adapter"
+    }
+  },
+  "runtime_identity": "cli_metadata",
+  "subscription_adapter": {
+    "module": "fable_advisor_mcp",
+    "allowed_seats": [
+      "planner",
+      "advisor"
+    ],
+    "allowed_operations": [
+      "create_plan",
+      "revise_plan",
+      "review_plan"
+    ],
+    "trust_strategy": "first_party_auth_and_runtime_metadata"
+  }
+}

@@ -75,7 +75,6 @@ class PackagingTests(unittest.TestCase):
         codeql = (REPO_ROOT / ".github/workflows/codeql.yml").read_text(
             encoding="utf-8"
         )
-
         for workflow in (ci, codeql):
             trigger_block = workflow.split("permissions:", 1)[0]
             self.assertRegex(trigger_block, r"(?m)^  push:\n    branches: \[main\]$")
@@ -96,6 +95,7 @@ class PackagingTests(unittest.TestCase):
         codeql = (REPO_ROOT / ".github/workflows/codeql.yml").read_text(
             encoding="utf-8"
         )
+        preflight = (REPO_ROOT / "scripts/preflight.py").read_text(encoding="utf-8")
 
         expected_targets = {
             "quality": "quality",
@@ -117,6 +117,7 @@ class PackagingTests(unittest.TestCase):
         self.assertIn('python-version: ["3.11", "3.13"]', ci)
         self.assertIn("name: portability (${{ matrix.os }})", ci)
         self.assertIn("os: [macos-latest, windows-latest]", ci)
+        self.assertIn('"tests.test_external_credentials"', preflight)
         self.assertIn("name: analyze (python)", codeql)
         self.assertEqual(codeql.count("github/codeql-action/analyze@"), 1)
 
@@ -191,7 +192,7 @@ class PackagingTests(unittest.TestCase):
 
         self.assertEqual(manifest["name"], "codex-orchestration")
         self.assertEqual(manifest["skills"], "./skills/")
-        self.assertEqual(manifest["version"], "0.5.1")
+        self.assertEqual(manifest["version"], "0.6.0")
         self.assertEqual(manifest["mcpServers"], "./.mcp.json")
         self.assertRegex(
             manifest["version"],
@@ -212,9 +213,32 @@ class PackagingTests(unittest.TestCase):
         self.assertTrue(custom.is_file())
         self.assertTrue(routing_state.is_file())
         self.assertIn("config/batchWrite", native.read_text(encoding="utf-8"))
-        self.assertIn('"version": "0.5.1"', native.read_text(encoding="utf-8"))
+        self.assertIn('"version": "0.6.0"', native.read_text(encoding="utf-8"))
         self.assertIn("validate_routing_state", routing_state.read_text(encoding="utf-8"))
         self.assertIn("Standalone custom agent", custom.read_text(encoding="utf-8"))
+
+    def test_external_model_runtime_and_manifests_are_packaged(self) -> None:
+        scripts = SKILL_ROOT / "scripts"
+        providers = SKILL_ROOT / "providers"
+        required_scripts = {
+            "external_auth_helper.py",
+            "external_cli_trust.py",
+            "external_configurator.py",
+            "external_credentials.py",
+            "external_providers.py",
+            "external_readiness.py",
+            "external_registry.py",
+            "external_subscription.py",
+        }
+        for name in required_scripts:
+            self.assertTrue((scripts / name).is_file(), name)
+        openrouter = json.loads((providers / "openrouter.json").read_text("utf-8"))
+        fable = json.loads((providers / "claude-fable.json").read_text("utf-8"))
+        self.assertEqual(openrouter["models"].keys(), {"moonshotai/kimi-k3"})
+        self.assertFalse(openrouter["qualified"])
+        self.assertEqual(fable["subscription_adapter"]["module"], "fable_advisor_mcp")
+        external_reference = SKILL_ROOT / "references/external-models.md"
+        self.assertTrue(external_reference.is_file())
 
     def test_fable_mcp_is_packaged_and_disabled_until_selected(self) -> None:
         mcp = json.loads((PLUGIN_ROOT / ".mcp.json").read_text(encoding="utf-8"))
@@ -277,7 +301,7 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("@openai/codex@0.144.1", workflow)
         smoke_text = smoke.read_text(encoding="utf-8")
         self.assertIn('OLD_VERSION = "0.5.0"', smoke_text)
-        self.assertIn('NEW_VERSION = "0.5.1"', smoke_text)
+        self.assertIn('NEW_VERSION = "0.6.0"', smoke_text)
         self.assertIn("old Advisor-only cache unexpectedly supports Planner", smoke_text)
         self.assertIn("Upgraded installed skill is missing Planner contract", smoke_text)
         self.assertIn("reused the Advisor-only 0.5.0 cache directory", smoke_text)
@@ -305,7 +329,7 @@ class PackagingTests(unittest.TestCase):
             encoding="utf-8"
         )
 
-        self.assertIn("Other providers must already be configured and authenticated", readme)
+        self.assertIn("Other unbundled providers must already be configured and authenticated", readme)
         self.assertIn("never creates credentials or bypasses permissions", readme)
         self.assertIn("Codex decides when delegation or parallel work is useful", readme)
         self.assertIn("Fable 5 is the bundled cross-provider exception", readme)
@@ -381,7 +405,7 @@ class PackagingTests(unittest.TestCase):
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
 
         self.assertIn("/codex-orchestration status", readme)
-        self.assertIn("Version **0.5.1 or newer**", readme)
+        self.assertIn("Version **0.6.0 or newer**", readme)
         self.assertIn("`marketplaceSource.sourceType` is `local`", readme)
         self.assertIn("`disable` restores the routing values", readme)
         self.assertIn("does not delete user-owned custom roles", readme)

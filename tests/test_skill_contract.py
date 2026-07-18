@@ -16,6 +16,9 @@ SKILL = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
 REFERENCE = (SKILL_ROOT / "references" / "providers-and-models.md").read_text(
     encoding="utf-8"
 )
+EXTERNAL_REFERENCE = (SKILL_ROOT / "references" / "external-models.md").read_text(
+    encoding="utf-8"
+)
 NATIVE_SCRIPT = (
     SKILL_ROOT / "scripts" / "configure_native_routing.py"
 ).read_text(encoding="utf-8")
@@ -124,13 +127,28 @@ class SkillContractTests(unittest.TestCase):
     def test_cross_provider_requires_existing_provider_and_custom_agent(self) -> None:
         self.assertIn("already authenticated Codex-compatible provider", SKILL)
         self.assertIn("loaded custom agent", SKILL)
-        self.assertIn("Never create provider definitions", SKILL)
-        self.assertIn("Never create provider definitions", REFERENCE)
+        self.assertIn("Never create an unreviewed provider definition", SKILL)
+        self.assertIn("Never create an unreviewed provider definition", REFERENCE)
         self.assertIn("Responses wire protocol", REFERENCE)
         self.assertIn("Anthropic Messages", REFERENCE)
         self.assertIn("--personal-route-names", SKILL)
         self.assertIn("verify_agent_routes", NATIVE_SCRIPT)
         self.assertIn("same-name project role", SKILL)
+
+    def test_external_models_are_nonpicker_nonsecret_and_fail_closed(self) -> None:
+        self.assertIn("## External Model roles", SKILL)
+        self.assertIn("Desktop model picker", SKILL)
+        self.assertIn("Never write top-level", SKILL)
+        self.assertIn("Do not paste the API key into this chat", SKILL)
+        self.assertIn("separate explicit approval for `--acknowledge-billing`", SKILL)
+        self.assertIn("one personal provider-pinned custom-agent variant", SKILL)
+        self.assertIn("model self-identification", SKILL)
+        self.assertIn("CLI_CHANGED", SKILL)
+        self.assertIn("RECOVERY_REQUIRED", SKILL)
+        self.assertIn("never reads or deletes chats", EXTERNAL_REFERENCE)
+        self.assertIn("command-backed auth", EXTERNAL_REFERENCE)
+        self.assertIn("moonshotai/kimi-k3", EXTERNAL_REFERENCE)
+        self.assertIn("did not list Kimi K3", EXTERNAL_REFERENCE)
 
     def test_arbitrary_roles_are_native_bounded_and_user_owned(self) -> None:
         self.assertIn("## Create arbitrary custom roles", SKILL)

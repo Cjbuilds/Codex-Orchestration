@@ -110,22 +110,46 @@ Examples:
 
 ## Bring another model into Codex
 
-Models already available through Codex can be assigned directly. A model from another provider needs an existing authenticated, compatible provider and a Codex custom-agent role.
+External Models are roles, not picker entries. Codex stays signed in with ChatGPT,
+the selected GPT model remains root, and the plugin adds only a provider-pinned
+personal agent for each validated effort. It never changes top-level `model` or
+`model_provider`, and disconnect/removal never touches chats, sessions, or OpenAI
+authentication.
 
-Ask the plugin to create a project or personal role:
+Ask for a role in plain language:
 
 ```text
-/codex-orchestration create project role:
-name: researcher
-model: <exact-model-id>
-provider: <configured-provider-id>
-effort: high
-job: gather evidence and cite sources
+/codex-orchestration configure external role researcher with OpenRouter model moonshotai/kimi-k3 at medium; job: gather evidence and cite sources
+
+/codex-orchestration call researcher at medium — review this bounded research packet
 ```
 
-Project roles live in `.codex/agents/`. Personal roles live in `~/.codex/agents/` and can be reused across projects. Codex previews role files before creating them.
+Setup is deliberately staged: preview and prepare the audited provider adapter,
+authenticate through a hidden local prompt backed by the operating-system credential
+store in a trusted terminal, explicitly approve one potentially billable isolated
+Gate 0 probe, create the role variants, then start a new task. Never paste an API
+key into Codex chat. The repository,
+provider TOML, registry, journal, logs, and tests store no key.
 
-Fable 5 is the bundled cross-provider exception and can be used directly as Planner or Advisor. The plugin never creates provider accounts, credentials, or protocol compatibility.
+The bundled OpenRouter/Kimi K3 definition is an unqualified candidate based on the
+supplied exact ID `moonshotai/kimi-k3` and `medium` effort. It is not currently
+claimed as an OpenRouter-listed model and cannot become callable unless that exact
+tuple passes Gate 0. New providers or subscription CLIs require a reviewed bundled
+manifest and adapter; arbitrary URLs and arbitrary local CLIs are not auto-trusted.
+
+Fable 5 remains the sealed subscription exception and can be used directly as
+Planner or Advisor through first-party Claude login. See the
+[External Models reference](plugins/codex-orchestration/skills/codex-orchestration/references/external-models.md)
+for commands, lifecycle states, extension rules, and threat boundaries.
+
+Models already available through Codex can still become ordinary user-owned roles:
+
+```text
+/codex-orchestration create project role: researcher
+```
+
+Project roles live in `.codex/agents/`; personal roles live in
+`~/.codex/agents/`. An unbundled cross-provider model still requires an existing authenticated, compatible provider. Fable 5 is the bundled cross-provider exception.
 
 ## Use it with Codex Goals
 
@@ -148,8 +172,10 @@ Create a Codex Goal normally, then tell Codex to use the saved workflow until th
 - Planner and Advisor report only to Codex; they do not contact each other or Executors directly.
 - The workflow reserves Fable planning tools for the root Codex model by policy. Current MCP calls do not identify their caller, so this caller boundary is instruction-enforced; the bridge itself still disables tools, edits, and session persistence.
 - Advisor approval is a planning gate, not a guarantee that implementation will succeed.
-- Direct model routes inherit the root provider. Other providers must already be configured and authenticated.
-- The plugin never creates credentials or bypasses permissions and approvals.
+- Direct model routes inherit the root provider. Audited external adapters use
+  provider-pinned personal role agents and never enter the model picker.
+- Other unbundled providers must already be configured and authenticated.
+- The plugin never creates credentials or bypasses permissions and approvals. It can prepare a non-secret provider table and retrieve a user-enrolled key from the OS credential store at request time.
 - Codex decides when delegation or parallel work is useful.
 - If you say `no subagents`, Codex must not delegate.
 
@@ -162,7 +188,7 @@ codex plugin marketplace upgrade codex-orchestration
 codex plugin add codex-orchestration@codex-orchestration
 ```
 
-Version **0.5.1 or newer** is required for reliable Planner assignment. It has a distinct release identity so Codex replaces the affected Advisor-only `0.5.0` cache instead of reusing it. After the two update commands, confirm `codex plugin list --json` reports `0.5.1` or newer, then start a new task; a task that already loaded the old skill cannot refresh its instructions in place.
+Version **0.6.0 or newer** is required for External Model roles. It has a distinct release identity so Codex installs the new security and routing contracts instead of reusing an older cache. After the two update commands, confirm `codex plugin list --json` reports `0.6.0` or newer, then start a new task; a task that already loaded the old skill cannot refresh its instructions in place.
 
 If the version stays old or `marketplaceSource.sourceType` is `local`, Codex is pointed at a local checkout rather than the GitHub marketplace. Run `/codex-orchestration disable` first if a saved policy is active, then remove the plugin and that marketplace registration, add `Cjbuilds/Codex-Orchestration` again, and reinstall. This does not delete the local source checkout.
 
