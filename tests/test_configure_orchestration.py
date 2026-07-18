@@ -2126,8 +2126,14 @@ multi_agent = true'''
         )
 
     def test_windows_sddl_mismatch_summary_withholds_acl_contents(self) -> None:
-        expected = "O:S-1-5-21-111G:S-1-5-21-222D:AI(A;ID;FA;;;S-1-5-21-333)"
-        actual = "O:S-1-5-21-111G:S-1-5-21-222D:ARAI(A;ID;FA;;;S-1-5-21-444)"
+        expected = (
+            'O:S-1-5-21-111G:S-1-5-21-222D:AI'
+            '(XA;ID;FA;;;S-1-5-21-333;(@USER.Dept=="D:SECRET"))'
+        )
+        actual = (
+            'O:S-1-5-21-111G:S-1-5-21-222D:ARAI'
+            '(XA;ID;FA;;;S-1-5-21-444;(@USER.Dept=="S:PRIVATE"))'
+        )
 
         summary = CONFIGURE._windows_sddl_mismatch_summary(expected, actual)
 
@@ -2139,6 +2145,29 @@ multi_agent = true'''
         self.assertIn("expected_dacl_aces=1", summary)
         self.assertIn("actual_dacl_aces=1", summary)
         self.assertNotIn("S-1-5-21", summary)
+        self.assertNotIn("SECRET", summary)
+        self.assertNotIn("PRIVATE", summary)
+        self.assertNotIn("@USER", summary)
+
+        malformed = CONFIGURE._windows_sddl_mismatch_summary("D:SECRET", "D:AI")
+        self.assertIn("expected_dacl_flags=unrecognized", malformed)
+        self.assertNotIn("SECRET", malformed)
+
+    def test_existing_read_only_file_update_preserves_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "read-only.toml"
+            path.write_bytes(b"old\n")
+            path.chmod(0o400)
+            try:
+                CONFIGURE.apply_changes_transactionally(
+                    [(path, "old\n", "new\n")], transaction_root=root
+                )
+                self.assertEqual(path.read_text(encoding="utf-8"), "new\n")
+                self.assertEqual(path.stat().st_mode & 0o777, 0o400)
+                self.assertFalse((root / CONFIGURE.TRANSACTION_JOURNAL).exists())
+            finally:
+                path.chmod(0o600)
 
     @unittest.skipUnless(os.name == "nt", "requires Windows security descriptors")
     def test_windows_inherited_dacl_survives_existing_file_update(self) -> None:

@@ -365,6 +365,8 @@ def ci_checks(
                         "tests.test_configure_orchestration.ConfigureOrchestrationTests."
                         "test_windows_existing_file_update_preserves_security_descriptor",
                         "tests.test_configure_orchestration.ConfigureOrchestrationTests."
+                        "test_existing_read_only_file_update_preserves_mode",
+                        "tests.test_configure_orchestration.ConfigureOrchestrationTests."
                         "test_windows_inherited_dacl_survives_existing_file_update",
                         "tests.test_configure_orchestration.ConfigureOrchestrationTests."
                         "test_windows_security_descriptor_failure_rolls_back",

@@ -1238,35 +1238,121 @@ def _windows_security_signature(path: Path) -> str | None:
 def _windows_sddl_mismatch_summary(expected: str, actual: str) -> str:
     """Describe an SDDL mismatch without exposing SIDs or ACL contents."""
 
-    def components(value: str) -> dict[str, str]:
-        matches = list(re.finditer(r"([OGDS]):", value))
-        return {
-            match.group(1): value[match.start() : matches[index + 1].start()]
-            if index + 1 < len(matches)
-            else value[match.start() :]
-            for index, match in enumerate(matches)
-        }
+    def components(value: str) -> tuple[dict[str, str], bool]:
+        boundaries: list[tuple[str, int]] = []
+        depth = 0
+        quoted = False
+        escaped = False
+        index = 0
+        while index < len(value):
+            character = value[index]
+            if quoted:
+                if escaped:
+                    escaped = False
+                elif character == "\\":
+                    escaped = True
+                elif character == '"':
+                    if index + 1 < len(value) and value[index + 1] == '"':
+                        index += 1
+                    else:
+                        quoted = False
+            elif character == '"':
+                quoted = True
+            elif character == "(":
+                depth += 1
+            elif character == ")":
+                if depth == 0:
+                    return {}, False
+                depth -= 1
+            elif (
+                depth == 0
+                and character in "OGDS"
+                and index + 1 < len(value)
+                and value[index + 1] == ":"
+            ):
+                boundaries.append((character, index))
+            index += 1
+        if depth or quoted or escaped:
+            return {}, False
+        ranks = {marker: rank for rank, marker in enumerate("OGDS")}
+        if any(
+            ranks[current[0]] <= ranks[previous[0]]
+            for previous, current in zip(boundaries, boundaries[1:])
+        ):
+            return {}, False
+        return (
+            {
+                marker: value[start : boundaries[position + 1][1]]
+                if position + 1 < len(boundaries)
+                else value[start:]
+                for position, (marker, start) in enumerate(boundaries)
+            },
+            True,
+        )
 
     def digest(value: str) -> str:
         return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
 
     def acl_flags(value: str) -> str:
-        return value[2:].split("(", 1)[0] if value else "missing"
+        if not value:
+            return "missing"
+        flags = value[2:].split("(", 1)[0]
+        if not flags:
+            return "none"
+        return flags if re.fullmatch(r"(?:(?:P|AR|AI))*", flags) else "unrecognized"
 
-    expected_parts = components(expected)
-    actual_parts = components(actual)
-    details = []
+    def ace_count(value: str) -> int:
+        if not value:
+            return 0
+        depth = 0
+        quoted = False
+        escaped = False
+        count = 0
+        index = 0
+        while index < len(value):
+            character = value[index]
+            if quoted:
+                if escaped:
+                    escaped = False
+                elif character == "\\":
+                    escaped = True
+                elif character == '"':
+                    if index + 1 < len(value) and value[index + 1] == '"':
+                        index += 1
+                    else:
+                        quoted = False
+            elif character == '"':
+                quoted = True
+            elif character == "(":
+                if depth == 0:
+                    count += 1
+                depth += 1
+            elif character == ")":
+                if depth == 0:
+                    return -1
+                depth -= 1
+            index += 1
+        return count if not depth and not quoted and not escaped else -1
+
+    expected_parts, expected_valid = components(expected)
+    actual_parts, actual_valid = components(actual)
+    details = [
+        f"expected_parse_valid={expected_valid}",
+        f"actual_parse_valid={actual_valid}",
+    ]
     for marker, label in (("O", "owner"), ("G", "group"), ("D", "dacl"), ("S", "sacl")):
         before = expected_parts.get(marker, "")
         after = actual_parts.get(marker, "")
-        details.append(f"{label}_equal={before == after}")
+        details.append(
+            f"{label}_equal={expected_valid and actual_valid and before == after}"
+        )
         if marker in {"D", "S"}:
             details.extend(
                 (
                     f"expected_{label}_flags={acl_flags(before)}",
                     f"actual_{label}_flags={acl_flags(after)}",
-                    f"expected_{label}_aces={before.count('(')}",
-                    f"actual_{label}_aces={after.count('(')}",
+                    f"expected_{label}_aces={ace_count(before)}",
+                    f"actual_{label}_aces={ace_count(after)}",
                     f"expected_{label}_hash={digest(before)}",
                     f"actual_{label}_hash={digest(after)}",
                 )
@@ -1421,7 +1507,10 @@ def _set_windows_security_descriptor(path: Path, descriptor: bytes | None) -> No
         )
     actual = _windows_security_signature(path)
     if actual != expected:
-        assert expected is not None and actual is not None
+        if expected is None or actual is None:
+            raise ConfigurationError(
+                f"Windows security descriptor verification was unavailable for {path}."
+            )
         raise ConfigurationError(
             f"Windows security descriptor verification failed for {path}: "
             f"{_windows_sddl_mismatch_summary(expected, actual)}."
@@ -1497,20 +1586,31 @@ def stage_existing_file(
         staged_identity = _path_identity(staged)
         if staged_identity is None:
             raise ConfigurationError(f"Metadata clone disappeared: {staged}")
+        staged.chmod(stat.S_IMODE(staged.stat(follow_symlinks=False).st_mode) | stat.S_IWUSR)
         _write_staged_content(staged, content, staged_identity)
-
-        source_stat = path.stat(follow_symlinks=False)
-        if hasattr(os, "chown"):
-            os.chown(
-                staged,
-                source_stat.st_uid,
-                source_stat.st_gid,
-                follow_symlinks=False,
-            )
-        shutil.copystat(path, staged, follow_symlinks=False)
-        _set_windows_security_descriptor(staged, windows_security)
-        with staged.open("r+b") as handle:
-            os.fsync(handle.fileno())
+        flags = os.O_RDWR
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        durability_descriptor = os.open(staged, flags)
+        try:
+            opened = os.fstat(durability_descriptor)
+            if (opened.st_dev, opened.st_ino) != staged_identity:
+                raise ConfigurationError(
+                    f"Staged-file identity changed before metadata apply for {staged}."
+                )
+            source_stat = path.stat(follow_symlinks=False)
+            if hasattr(os, "chown"):
+                os.chown(
+                    staged,
+                    source_stat.st_uid,
+                    source_stat.st_gid,
+                    follow_symlinks=False,
+                )
+            shutil.copystat(path, staged, follow_symlinks=False)
+            _set_windows_security_descriptor(staged, windows_security)
+            os.fsync(durability_descriptor)
+        finally:
+            os.close(durability_descriptor)
         if _metadata_signature(staged) != _metadata_signature(path):
             raise ConfigurationError(
                 f"Could not preserve all supported metadata while staging {path}."
