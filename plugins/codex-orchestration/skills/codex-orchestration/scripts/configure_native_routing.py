@@ -25,8 +25,10 @@ import time
 from typing import Any
 
 from routing_state import (
+    BUNDLED_MCP_SERVERS,
     FABLE_EFFORTS,
     FABLE_MODEL,
+    KIMI_MODEL,
     MANAGED_MARKER,
     ROUTING_TOOL_NAMESPACE,
     RoutingStateError,
@@ -39,8 +41,8 @@ except ModuleNotFoundError as exc:  # pragma: no cover - Python < 3.11
     raise SystemExit("Python 3.11 or newer is required (missing tomllib).") from exc
 
 
-POLICY_VERSION = 4
-STATE_SCHEMA = 4
+POLICY_VERSION = 5
+STATE_SCHEMA = 5
 STATE_FILENAME = ".codex-orchestration-routing.json"
 PROBE_VALUE = "CODEX_ORCHESTRATION_CAPABILITY_PROBE"
 PLUGIN_ID = "codex-orchestration@codex-orchestration"
@@ -51,6 +53,11 @@ FABLE_SERVERS = {
     "fable-advisor-python3": ("python3", []),
     "fable-advisor-python": ("python", []),
     "fable-advisor-py": ("py", ["-3.11"]),
+}
+KIMI_SERVERS = {
+    "kimi-designer-python3": ("python3", []),
+    "kimi-designer-python": ("python", []),
+    "kimi-designer-py": ("py", ["-3.11"]),
 }
 RPC_TIMEOUT_SECONDS = 20
 PROBE_TIMEOUT_SECONDS = 15
@@ -137,7 +144,13 @@ def parse_args() -> argparse.Namespace:
         help="Exact supported advisor effort, or auto.",
     )
 
-    parser.add_argument("--designer-model", help="Optional exact designer model ID.")
+    designer = parser.add_mutually_exclusive_group()
+    designer.add_argument("--designer-model", help="Optional exact designer model ID.")
+    designer.add_argument(
+        "--designer-kimi",
+        action="store_true",
+        help="Use the installed Kimi Code subscription as K3 Designer through ACP.",
+    )
     parser.add_argument(
         "--designer-effort",
         default="auto",
@@ -191,6 +204,7 @@ def _validate_args(args: argparse.Namespace) -> None:
             args.advisor_agent,
             args.advisor_fable,
             args.designer_model,
+            args.designer_kimi,
             args.executor_effort != "auto",
             args.planner_effort != "auto",
             args.advisor_effort != "auto",
@@ -237,6 +251,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ConfigurationError(
             "Planner and Advisor routes must be distinct; both cannot use Claude Fable 5."
         )
+    if args.designer_kimi and args.designer_effort not in {"auto", "max"}:
+        raise ConfigurationError("Kimi K3 Designer supports only max effort.")
     for label, value, pattern in (
         ("executor model", args.executor_model, MODEL_RE),
         ("planner model", args.planner_model, MODEL_RE),
@@ -405,7 +421,7 @@ class AppServer:
                     "clientInfo": {
                         "name": "codex_orchestration_installer",
                         "title": "Codex Orchestration Installer",
-                        "version": "0.7.2",
+                        "version": "0.8.0",
                     },
                     "capabilities": {"experimentalApi": True},
                 },
@@ -575,7 +591,7 @@ def snapshot_edit(key_path: str, saved: dict[str, Any]) -> dict[str, Any] | None
     }
 
 
-def fable_key_path(server: str) -> str:
+def mcp_key_path(server: str) -> str:
     return (
         f"plugins.{json.dumps(PLUGIN_ID)}.mcp_servers."
         f"{json.dumps(server)}.enabled"
@@ -844,6 +860,30 @@ def select_fable_server() -> str:
     )
 
 
+def select_kimi_server() -> str:
+    for server, (launcher, prefix) in KIMI_SERVERS.items():
+        executable = shutil.which(launcher)
+        if not executable:
+            continue
+        try:
+            result = subprocess.run(
+                [executable, *prefix, "--version"],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=PROBE_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        match = re.search(r"Python\s+(\d+)\.(\d+)", result.stdout)
+        if result.returncode == 0 and match and tuple(map(int, match.groups())) >= (3, 11):
+            return server
+    raise ConfigurationError(
+        "Kimi K3 Designer requires a Python 3.11+ launcher named python3, python, or py."
+    )
+
+
 def verify_fable_prerequisites(effort: str) -> dict[str, str]:
     try:
         from fable_advisor_mcp import AdvisorError, check_claude_auth, resolve_claude
@@ -899,11 +939,24 @@ def verify_fable_prerequisites(effort: str) -> dict[str, str]:
     return {"claude": str(claude), **auth}
 
 
+def verify_kimi_prerequisites() -> dict[str, str]:
+    try:
+        from kimi_designer_mcp import KimiDesignerError, check_prerequisites
+    except ImportError as exc:  # pragma: no cover - corrupt package
+        raise ConfigurationError("The bundled Kimi K3 Designer bridge is missing.") from exc
+    try:
+        return check_prerequisites()
+    except KimiDesignerError as exc:
+        raise ConfigurationError(str(exc)) from exc
+
+
 def _route_summary(route: dict[str, Any]) -> str:
     if route["kind"] == "agent":
         return f"custom agent {route['agent']}"
     if route["kind"] == "fable":
         return f"Claude Fable 5 {route['effort']}"
+    if route["kind"] == "kimi_cli":
+        return "Kimi K3 max (Kimi Code subscription)"
     return f"{route['model']}@{route['effort']}"
 
 
@@ -1042,7 +1095,7 @@ When executor delegation materially improves speed, cost, quality, or context is
 
 Explicit user instructions win, including no-subagents and task-local seat overrides. Persistent and task-local Planner and Advisor routes must remain distinct: reject the same direct model ID, the same custom-agent name, or Fable in both seats. This policy does not create or change a Goal, weaken approvals, alter permissions, or force a worker count.
 
-Planner and Advisor are policy-isolated, root-directed seats: they cannot contact each other, Designer, or Executors, spawn descendants, edit files, execute work, or release Executor. They return only to the root. Designer is also root-directed: it cannot contact Planner, Advisor, or Executor, spawn descendants, redesign the root plan, change implementation code, or release Executor. Designer may edit only explicitly delegated design artifacts. Fable MCP requests do not carry caller identity, so caller isolation is instruction-enforced even though the bridge itself disables tools and persistence. If you are a spawned child, stay inside the supplied packet, report only to the root, never call planning tools, and never spawn descendants. An Executor never redesigns the root plan or contacts Planner, Advisor, or Designer.
+Planner and Advisor are policy-isolated, root-directed seats: they cannot contact each other, Designer, or Executors, spawn descendants, edit files, execute work, or release Executor. They return only to the root. Designer is also root-directed: it cannot contact Planner, Advisor, or Executor, spawn descendants, redesign the root plan, change implementation code, or release Executor. Designer may edit only explicitly delegated design artifacts. Bundled MCP requests do not carry caller identity, so caller isolation is instruction-enforced even when a bridge disables tools and persistence. If you are a spawned child, stay inside the supplied packet, report only to the root, never call planning tools, and never spawn descendants. An Executor never redesigns the root plan or contacts Planner, Advisor, or Designer.
 """
     if planner is not None and planner["kind"] == "fable":
         planner_hint = (
@@ -1078,7 +1131,15 @@ Planner and Advisor are policy-isolated, root-directed seats: they cannot contac
         )
     else:
         advisor_hint = "No advisor route is configured."
-    if designer is not None:
+    if designer is not None and designer["kind"] == "kimi_cli":
+        designer_hint = (
+            "For delegated design work, call `create_design_handoff` from MCP server "
+            f"{json.dumps(designer['server'])}. This is a read-only root tool call, "
+            "not a spawned child. Send approved requirements, bounded deliverables, "
+            "constraints, and the required handoff format. Require DESIGN_HANDOFF and "
+            "runtime_model kimi-code/k3; fail closed on bridge or identity failure."
+        )
+    elif designer is not None:
         designer_hint = (
             "For delegated design work, call this tool with "
             f"{_spawn_route(designer)}, fork_turns = \"none\". Send approved "
@@ -1161,7 +1222,7 @@ def _current_values(config: dict[str, Any]) -> dict[str, Any]:
                 server,
                 "enabled",
             )
-            for server in FABLE_SERVERS
+            for server in BUNDLED_MCP_SERVERS
         },
     }
 
@@ -1292,6 +1353,7 @@ def _status(
         )
         print(f"Config: {app.config_path}")
         fable_available = True
+        kimi_available = True
         if state_matches:
             print(f"Executor: {_route_summary(state['executor'])}")
             planner = state.get("planner")
@@ -1314,6 +1376,18 @@ def _status(
                 else:
                     print(
                         "Claude Fable 5: ready — first-party login; no model call made"
+                    )
+            if isinstance(designer, dict) and designer.get("kind") == "kimi_cli":
+                try:
+                    ready = verify_kimi_prerequisites()
+                except ConfigurationError as exc:
+                    kimi_available = False
+                    print(f"Kimi K3 Designer: unavailable — {exc}")
+                else:
+                    print(
+                        "Kimi K3 Designer: ready — Kimi Code OAuth subscription via "
+                        f"ACP; Kimi {ready['kimi_version']}, acpx {ready['acpx_version']}; "
+                        "no model call made"
                     )
             try:
                 verified = verify_agent_routes(
@@ -1376,6 +1450,7 @@ def _status(
             and state_matches
             and agent_routes_available
             and fable_available
+            and kimi_available
             and not role_issues
             and not orphaned_roles
         )
@@ -1549,11 +1624,13 @@ def _prepare_setup_state(
         managed_feature = None
 
     existing_managed = existing_state.get("managed", {}) if existing_state else {}
+    bundled_routes = [
+        route
+        for route in (planner, advisor, designer)
+        if isinstance(route, dict) and route.get("kind") in {"fable", "kimi_cli"}
+    ]
     manage_mcp = (
-        any(
-            isinstance(route, dict) and route.get("kind") == "fable"
-            for route in (planner, advisor)
-        )
+        bool(bundled_routes)
         or isinstance(existing_managed, dict)
         and isinstance(existing_managed.get("mcp"), dict)
     )
@@ -1562,15 +1639,7 @@ def _prepare_setup_state(
         previous_mcp = previous.get("mcp")
         if not isinstance(previous_mcp, dict):
             previous_mcp = {}
-        fable_route = next(
-            (
-                route
-                for route in (planner, advisor)
-                if isinstance(route, dict) and route.get("kind") == "fable"
-            ),
-            None,
-        )
-        selected = fable_route.get("server") if fable_route is not None else None
+        selected_servers = {route["server"] for route in bundled_routes}
         existing_mcp = (
             existing_managed.get("mcp")
             if isinstance(existing_managed, dict)
@@ -1581,23 +1650,26 @@ def _prepare_setup_state(
         touched.update(
             server for server, value in current["mcp"].items() if value is not MISSING
         )
-        if isinstance(selected, str):
-            touched.add(selected)
+        touched.update(selected_servers)
         for server in touched:
             if server not in previous_mcp:
                 previous_mcp[server] = snapshot(current["mcp"][server])
         previous["mcp"] = previous_mcp
-        managed_mcp = {server: server == selected for server in FABLE_SERVERS if server in touched}
+        managed_mcp = {
+            server: server in selected_servers
+            for server in BUNDLED_MCP_SERVERS
+            if server in touched
+        }
         for server, enabled in managed_mcp.items():
             edits.append(
                 {
-                    "keyPath": fable_key_path(server),
+                    "keyPath": mcp_key_path(server),
                     "value": enabled,
                     "mergeStrategy": "replace",
                 }
             )
             rollback_edit = snapshot_edit(
-                fable_key_path(server), snapshot(current["mcp"][server])
+                mcp_key_path(server), snapshot(current["mcp"][server])
             )
             if rollback_edit is not None:
                 rollback.append(rollback_edit)
@@ -1918,7 +1990,7 @@ def _disable(
             edits.extend(
                 edit
                 for edit in (
-                    snapshot_edit(fable_key_path(server), previous_mcp[server])
+                    snapshot_edit(mcp_key_path(server), previous_mcp[server])
                     for server in previous_mcp
                 )
                 if edit is not None
@@ -2019,6 +2091,7 @@ def main() -> int:
                 if args.planner_fable or args.advisor_fable
                 else None
             )
+            kimi_server = select_kimi_server() if args.designer_kimi else None
             if args.planner_model:
                 planner_effort = resolve_model_effort(
                     "Planner",
@@ -2078,6 +2151,13 @@ def main() -> int:
                     "model": args.designer_model,
                     "effort": designer_effort,
                 }
+            elif args.designer_kimi:
+                designer = {
+                    "kind": "kimi_cli",
+                    "model": KIMI_MODEL,
+                    "effort": "max",
+                    "server": kimi_server,
+                }
             validate_planning_routes(planner, advisor)
             fable_efforts = {
                 route["effort"]
@@ -2086,6 +2166,7 @@ def main() -> int:
             }
             for effort in sorted(fable_efforts):
                 fable_auth = verify_fable_prerequisites(effort)
+            kimi_ready = verify_kimi_prerequisites() if args.designer_kimi else None
 
             verified_agents = verify_agent_routes(
                 app.codex_home,
@@ -2127,6 +2208,12 @@ def main() -> int:
                 print(
                     "Claude Fable 5 login: ready — first-party; "
                     "setup makes no model call"
+                )
+            if kimi_ready is not None:
+                print(
+                    "Kimi K3 Designer: ready — existing Kimi Code OAuth subscription "
+                    f"via ACP; Kimi {kimi_ready['kimi_version']}, "
+                    f"acpx {kimi_ready['acpx_version']}; setup makes no model call"
                 )
             if verified_agents:
                 print(

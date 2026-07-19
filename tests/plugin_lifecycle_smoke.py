@@ -32,7 +32,7 @@ PLUGIN_ID = "codex-orchestration@codex-orchestration"
 MARKETPLACE_NAME = "codex-orchestration"
 OLD_RELEASE = "a1d9c546665c3253cdcaa8fe5c0c060199a6126c"
 OLD_VERSION = "0.5.0"
-NEW_VERSION = "0.7.2"
+NEW_VERSION = "0.8.0"
 COMMAND_TIMEOUT_SECONDS = 60
 
 
@@ -81,7 +81,14 @@ def run_json(
         ) from exc
 
 
-def probe_mcp_subprocess(script: Path, *, cwd: Path, env: dict[str, str]) -> None:
+def probe_mcp_subprocess(
+    script: Path,
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    expected_server: str,
+    expected_tools: set[str],
+) -> None:
     requests = "\n".join(
         json.dumps(request)
         for request in (
@@ -110,7 +117,7 @@ def probe_mcp_subprocess(script: Path, *, cwd: Path, env: dict[str, str]) -> Non
             timeout=COMMAND_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise SmokeFailure(f"Installed Fable MCP subprocess failed: {exc}") from exc
+        raise SmokeFailure(f"Installed MCP subprocess failed: {exc}") from exc
     if completed.returncode != 0:
         raise SmokeFailure(
             "Installed Fable MCP subprocess did not shut down cleanly: "
@@ -119,14 +126,14 @@ def probe_mcp_subprocess(script: Path, *, cwd: Path, env: dict[str, str]) -> Non
     try:
         responses = [json.loads(line) for line in completed.stdout.splitlines()]
     except json.JSONDecodeError as exc:
-        raise SmokeFailure("Installed Fable MCP returned malformed JSON-RPC") from exc
+        raise SmokeFailure("Installed MCP returned malformed JSON-RPC") from exc
     if len(responses) != 2 or [response.get("id") for response in responses] != [1, 2]:
-        raise SmokeFailure(f"Installed Fable MCP returned unexpected responses: {responses!r}")
+        raise SmokeFailure(f"Installed MCP returned unexpected responses: {responses!r}")
     server_info = responses[0].get("result", {}).get("serverInfo", {})
     assert_equal(
         server_info.get("name"),
-        "codex-orchestration-fable-advisor",
-        "installed Fable MCP server identity",
+        expected_server,
+        "installed MCP server identity",
     )
     tools = responses[1].get("result", {}).get("tools", [])
     tool_names = {
@@ -134,8 +141,8 @@ def probe_mcp_subprocess(script: Path, *, cwd: Path, env: dict[str, str]) -> Non
     }
     assert_equal(
         tool_names,
-        {"create_plan", "revise_plan", "review_plan", "status"},
-        "installed Fable MCP tool list",
+        expected_tools,
+        "installed MCP tool list",
     )
 
 
@@ -560,7 +567,28 @@ def main() -> int:
                 / "scripts"
                 / "fable_advisor_mcp.py"
             )
-            probe_mcp_subprocess(installed_fable_mcp, cwd=project, env=env)
+            probe_mcp_subprocess(
+                installed_fable_mcp,
+                cwd=project,
+                env=env,
+                expected_server="codex-orchestration-fable-advisor",
+                expected_tools={"create_plan", "revise_plan", "review_plan", "status"},
+            )
+
+            installed_kimi_mcp = (
+                installed_root
+                / "skills"
+                / "codex-orchestration"
+                / "scripts"
+                / "kimi_designer_mcp.py"
+            )
+            probe_mcp_subprocess(
+                installed_kimi_mcp,
+                cwd=project,
+                env=env,
+                expected_server="codex-orchestration-kimi-designer",
+                expected_tools={"create_design_handoff", "status"},
+            )
 
             native_configurator = (
                 installed_root

@@ -205,7 +205,7 @@ class PackagingTests(unittest.TestCase):
 
         self.assertEqual(manifest["name"], "codex-orchestration")
         self.assertEqual(manifest["skills"], "./skills/")
-        self.assertEqual(manifest["version"], "0.7.2")
+        self.assertEqual(manifest["version"], "0.8.0")
         self.assertEqual(manifest["mcpServers"], "./.mcp.json")
         self.assertRegex(
             manifest["version"],
@@ -228,7 +228,7 @@ class PackagingTests(unittest.TestCase):
         self.assertFalse((SKILL_ROOT / "scripts" / "update_plugin.py").exists())
         self.assertIn("config/batchWrite", native.read_text(encoding="utf-8"))
         self.assertIn('"--repair"', native.read_text(encoding="utf-8"))
-        self.assertIn('"version": "0.7.2"', native.read_text(encoding="utf-8"))
+        self.assertIn('"version": "0.8.0"', native.read_text(encoding="utf-8"))
         self.assertIn("validate_routing_state", routing_state.read_text(encoding="utf-8"))
         self.assertIn("Standalone custom agent", custom.read_text(encoding="utf-8"))
 
@@ -261,7 +261,7 @@ class PackagingTests(unittest.TestCase):
         external_reference = SKILL_ROOT / "references/external-models.md"
         self.assertTrue(external_reference.is_file())
 
-    def test_fable_mcp_is_packaged_and_disabled_until_selected(self) -> None:
+    def test_subscription_mcp_bridges_are_packaged_and_disabled_until_selected(self) -> None:
         mcp = json.loads((PLUGIN_ROOT / ".mcp.json").read_text(encoding="utf-8"))
         servers = mcp["mcpServers"]
         self.assertEqual(
@@ -270,13 +270,22 @@ class PackagingTests(unittest.TestCase):
                 "fable-advisor-python3",
                 "fable-advisor-python",
                 "fable-advisor-py",
+                "kimi-designer-python3",
+                "kimi-designer-python",
+                "kimi-designer-py",
             },
         )
-        for server in servers.values():
+        for name, server in servers.items():
             self.assertFalse(server["enabled"])
             self.assertEqual(server["cwd"], ".")
-            self.assertIn("fable_advisor_mcp.py", server["args"][-1])
+            expected = (
+                "fable_advisor_mcp.py"
+                if name.startswith("fable-")
+                else "kimi_designer_mcp.py"
+            )
+            self.assertIn(expected, server["args"][-1])
         self.assertTrue((SKILL_ROOT / "scripts" / "fable_advisor_mcp.py").is_file())
+        self.assertTrue((SKILL_ROOT / "scripts" / "kimi_designer_mcp.py").is_file())
 
     def test_explicit_and_natural_language_invocation_metadata_is_consistent(self) -> None:
         metadata = (SKILL_ROOT / "agents" / "openai.yaml").read_text(encoding="utf-8")
@@ -287,7 +296,7 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("allow_implicit_invocation: true", metadata)
         self.assertNotIn("allow_implicit_invocation: false", metadata)
         self.assertIn(
-            "Use for natural-language questions or requests about whether Kimi K3",
+            "Use for natural-language questions or requests about whether subscription-backed Kimi K3",
             skill,
         )
         self.assertIn("available or callable as Designer", skill)
@@ -332,13 +341,14 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("@openai/codex@0.144.1", workflow)
         smoke_text = smoke.read_text(encoding="utf-8")
         self.assertIn('OLD_VERSION = "0.5.0"', smoke_text)
-        self.assertIn('NEW_VERSION = "0.7.2"', smoke_text)
+        self.assertIn('NEW_VERSION = "0.8.0"', smoke_text)
         self.assertIn("old Advisor-only cache unexpectedly supports Planner", smoke_text)
         self.assertIn("Upgraded installed skill is missing Planner contract", smoke_text)
         self.assertIn("reused the Advisor-only 0.5.0 cache directory", smoke_text)
         self.assertIn("configure_native_routing.py", smoke_text)
         self.assertIn("configure_orchestration.py", smoke_text)
         self.assertIn("fable_advisor_mcp.py", smoke_text)
+        self.assertIn("kimi_designer_mcp.py", smoke_text)
         self.assertIn('"method": "initialize"', smoke_text)
         self.assertIn('"method": "tools/list"', smoke_text)
         self.assertIn('"marketplace",\n                    "upgrade"', smoke_text)
@@ -363,7 +373,10 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("Other unbundled providers must already be configured and authenticated", readme)
         self.assertIn("never creates credentials or bypasses permissions", readme)
         self.assertIn("Codex decides when delegation or parallel work is useful", readme)
-        self.assertIn("Fable 5 is the bundled cross-provider exception", readme)
+        self.assertIn(
+            "Fable 5 and the Kimi K3 Designer bridge are the two sealed subscription exceptions",
+            readme,
+        )
         self.assertIn('ROUTING_TOOL_NAMESPACE = "agents"', routing_state)
 
     def test_ascii_and_role_copy_are_plain_and_root_centered(self) -> None:

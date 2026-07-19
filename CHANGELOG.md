@@ -1,6 +1,22 @@
 # Changelog
 
-## 0.7.2 — Unreleased
+## 0.8.0 — Unreleased
+
+- Add a sealed, subscription-backed Kimi K3 Designer route through the official
+  Kimi Code CLI and ACP. `Designer: Kimi K3` now uses the existing Kimi Code OAuth
+  login and never asks for an API key, prepares OpenRouter, or runs a billable Gate
+  0.
+- Pin Kimi Code CLI 0.27.0+, `acpx` 0.12.0+, model `kimi-code/k3`, and the local
+  catalog's `max` default. Each design call uses a fresh deny-all, no-terminal ACP
+  session in an empty temporary directory and rejects tool, permission, filesystem,
+  terminal, malformed-transcript, or wrong-model activity.
+- Add routing schema/policy version 5, reversible plugin-scoped Kimi MCP launcher
+  management, prerequisite/status diagnostics without a model call, sanitized
+  runtime evidence, negative tests, and threat-model documentation. Explicit
+  OpenRouter Kimi requests remain available through the separate API-backed
+  External Model lifecycle.
+
+## 0.7.2 — 2026-07-18
 
 - Enable implicit skill discovery for natural-language Kimi K3, External Model,
   and model-role availability questions. The previous metadata required an explicit

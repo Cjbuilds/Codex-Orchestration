@@ -78,10 +78,10 @@ Use Fable 5 to plan, Sol to advise, and Luna to implement:
 /codex-orchestration setup planner: Claude Fable 5 High, advisor: GPT-5.6 Sol High, executor: GPT-5.6 Luna Extra High
 ```
 
-Add a dedicated Designer when the work needs a design handoff:
+Add Kimi K3 as the dedicated Designer through an existing Kimi Code subscription:
 
 ```text
-/codex-orchestration setup planner: Claude Fable 5 High, advisor: GPT-5.6 Sol High, designer: GPT-5.6 Terra High, executor: GPT-5.6 Luna Extra High
+/codex-orchestration setup planner: Claude Fable 5 High, advisor: GPT-5.6 Sol High, designer: Kimi K3, executor: GPT-5.6 Luna Extra High
 ```
 
 Or let your current Codex model plan and use Fable 5 only as Advisor:
@@ -95,6 +95,8 @@ After setup, start another new task and use Codex normally. The saved workflow a
 Fable defaults to **High**. You can choose **Low**, **Medium**, **High**, **XHigh**, or **Max**. **Ultra** is accepted as an alias for Max because Claude Code does not expose a separate Ultra effort.
 
 Fable 5 uses the official Claude Code CLI and a compatible first-party Claude login. You do not need to add an Anthropic API key to Codex.
+
+Kimi K3 uses the official Kimi Code CLI through ACP and its existing OAuth subscription login. It requires acpx 0.12.0 or newer, but no Kimi or OpenRouter API key.
 
 ## Choose your roles
 
@@ -119,9 +121,9 @@ Designer — Kimi K3: Activated
 Executor — GPT-5.6 Sol high: Activated
 ```
 
-`Activated` means the route is ready and callable for that task. If an external
-model still needs authentication, qualification, connection, or a restart, the
-plugin reports that exact state and next action instead of claiming activation.
+`Activated` means the route is ready and callable for that task. If a bridge or
+external model still needs setup, authentication, qualification, connection, or a
+restart, the plugin reports that exact state and next action instead.
 
 You can also ask naturally without selecting the skill first:
 
@@ -129,10 +131,10 @@ You can also ask naturally without selecting the skill first:
 is Kimi available to use as Designer?
 ```
 
-The plugin checks its External Model registry instead of guessing from the visible
-tool list. It distinguishes whether Kimi K3 is bundled and supported, configured on
-this installation, and callable in the current task. A question performs read-only
-status inspection only; it never authorizes configuration, credentials, or spend.
+The plugin checks native routing state, the selected MCP launcher, installed CLI
+versions, and Kimi's non-secret local provider catalog instead of guessing from the
+visible tool list. A question performs read-only status inspection only and never
+authorizes configuration, credentials, or spend.
 
 Examples:
 
@@ -180,8 +182,9 @@ the explicitly billable isolated Gate 0. New providers or subscription CLIs stil
 require a reviewed bundled manifest and adapter; arbitrary URLs and arbitrary local
 CLIs are not auto-trusted.
 
-Fable 5 remains the sealed subscription exception and can be used directly as
-Planner or Advisor through first-party Claude login. See the
+Kimi K3 also has a separate sealed subscription route for the built-in Designer seat.
+That route uses Kimi Code OAuth through acpx/ACP, not OpenRouter. Fable 5 remains the
+sealed Planner/Advisor subscription route through first-party Claude login. See the
 [External Models reference](plugins/codex-orchestration/skills/codex-orchestration/references/external-models.md)
 for commands, lifecycle states, extension rules, and threat boundaries.
 
@@ -192,7 +195,7 @@ Models already available through Codex can still become ordinary user-owned role
 ```
 
 Project roles live in `.codex/agents/`; personal roles live in
-`~/.codex/agents/`. An unbundled cross-provider model still requires an existing authenticated, compatible provider. Fable 5 is the bundled cross-provider exception.
+`~/.codex/agents/`. An unbundled cross-provider model still requires an existing authenticated, compatible provider. Fable 5 and the Kimi K3 Designer bridge are the two sealed subscription exceptions.
 
 ## Use it with Codex Goals
 
@@ -210,20 +213,19 @@ Create a Codex Goal normally, then tell Codex to use the saved workflow until th
 /codex-orchestration disable
 ```
 
-`Designer: Kimi K3` selects the audited task-local External Model role without
-adding Kimi to the Desktop picker or replacing any GPT route. Kimi K3 supports only
-`max` reasoning (`auto` maps to `max`). If the exact role is already ready, the
-plugin resolves and uses it. Otherwise it walks the secure status, preparation,
-hidden authentication, separately authorized Gate 0, connection, restart, and
-readiness states and tells you the exact next action instead of calling the route
-unavailable. The seat label never authorizes credential entry or a paid probe.
+`Designer: Kimi K3` selects the audited persistent Kimi Code subscription bridge
+without adding Kimi to the Desktop picker or replacing any GPT route. K3 runs at
+`max` (`auto` maps to `max`) through a fresh ACP session with terminal disabled,
+permissions denied, an empty disposable cwd, tool-event rejection, and mechanical
+runtime-model confirmation. It uses the existing Kimi OAuth login and does not ask
+for an API key or perform a billable OpenRouter Gate 0.
 
 `disable` restores the routing values that existed before setup. It does not delete user-owned custom roles.
 
 `repair` is narrower than setup or disable. When status reports that plugin-managed
 mode/usage hints conflict with otherwise intact saved state, it can restore only
 those saved hint bytes after a dry run. It refuses missing state, unmarked text,
-namespace or spawn-metadata drift, Fable launcher drift, concurrent edits, and
+namespace or spawn-metadata drift, bundled launcher drift, concurrent edits, and
 higher-layer overrides. It does not rewrite restore history or touch authentication,
 credentials, chats, or sessions.
 
@@ -232,7 +234,7 @@ credentials, chats, or sessions.
 - Codex remains the root orchestrator and final authority.
 - Planner, Advisor, and Designer report only to Codex; they do not contact one another or Executors directly.
 - Designer may edit only design artifacts explicitly delegated by Codex; it does not change implementation code or release Executor.
-- The workflow reserves Fable planning tools for the root Codex model by policy. Current MCP calls do not identify their caller, so this caller boundary is instruction-enforced; the bridge itself still disables tools, edits, and session persistence.
+- The workflow reserves Fable and Kimi bridge tools for the root Codex model by policy. Current MCP calls do not identify their caller, so this caller boundary is instruction-enforced; each bridge still mechanically applies its own tool and persistence controls.
 - Advisor approval is a planning gate, not a guarantee that implementation will succeed.
 - Direct model routes inherit the root provider. Audited external adapters use
   provider-pinned personal role agents and never enter the model picker.
@@ -258,10 +260,10 @@ the plugin or touch routing, credentials, chats, sessions, or the model picker.
 Restart Codex Desktop and start a new task after an update; the task that launched
 the updater keeps its already loaded instructions.
 
-If a Fable call fails in the task that performed an update but fresh status reports
-`first-party login ready`, the login is healthy and the already loaded MCP bridge is
-stale. Fully quit and reopen Codex, then start a new task; do not re-authenticate
-solely for that stale-bridge condition.
+If a Fable or Kimi call fails in the task that performed an update but fresh status
+still reports its first-party route ready, the login is healthy and the already
+loaded MCP bridge is stale. Fully quit and reopen Codex, then start a new task; do
+not re-authenticate solely for that stale-bridge condition.
 
 To move from version 0.6.x or older to 0.7.0, run the native Codex commands once:
 
@@ -271,9 +273,9 @@ codex plugin add codex-orchestration@codex-orchestration
 ```
 
 Version **0.6.0 or newer** is required for External Model roles; version **0.7.0
-or newer** adds `--update`, routing repair, and Designer; version **0.7.1 or newer**
-lets the natural `Designer: Kimi K3` label enter the External Model lifecycle;
-version **0.7.2 or newer** uses the concise per-role activation confirmation.
+or newer** adds `--update`, routing repair, and Designer; version **0.7.2 or newer**
+uses concise per-role activation confirmation; version **0.8.0 or newer** routes
+`Designer: Kimi K3` through the existing Kimi Code OAuth subscription via ACP.
 Confirm with
 `codex plugin list --json`, then restart Codex Desktop and start a new task.
 

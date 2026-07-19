@@ -295,6 +295,47 @@ class NativeRoutingTests(unittest.TestCase):
             encoding="utf-8",
         )
         self.claude.chmod(0o755)
+        self.kimi = self.bin / "kimi"
+        self.kimi.write_text(
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env python3
+                import json
+                import sys
+                if sys.argv[1:] == ["--version"]:
+                    print("0.27.0")
+                    raise SystemExit(0)
+                if sys.argv[1:] == ["provider", "list", "--json"]:
+                    print(json.dumps({
+                        "providers": {
+                            "managed:kimi-code": {
+                                "type": "kimi",
+                                "apiKey": "",
+                                "oauth": {"storage": "file", "key": "oauth/kimi-code"},
+                            }
+                        },
+                        "models": {
+                            "kimi-code/k3": {
+                                "provider": "managed:kimi-code",
+                                "model": "k3",
+                                "defaultEffort": "max",
+                                "supportEfforts": ["low", "high", "max"],
+                            }
+                        },
+                    }))
+                    raise SystemExit(0)
+                raise SystemExit(2)
+                """
+            ),
+            encoding="utf-8",
+        )
+        self.kimi.chmod(0o755)
+        self.acpx = self.bin / "acpx"
+        self.acpx.write_text(
+            "#!/usr/bin/env python3\nimport sys\nprint('0.12.0') if sys.argv[1:] == ['--version'] else sys.exit(2)\n",
+            encoding="utf-8",
+        )
+        self.acpx.chmod(0o755)
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -592,8 +633,8 @@ class NativeRoutingTests(unittest.TestCase):
         state = json.loads(
             (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
         )
-        self.assertEqual(state["schema"], 4)
-        self.assertEqual(state["policy_version"], 4)
+        self.assertEqual(state["schema"], 5)
+        self.assertEqual(state["policy_version"], 5)
         self.assertEqual(state["planner"]["effort"], "xhigh")
         self.assertEqual(state["designer"]["effort"], "medium")
 
@@ -602,8 +643,49 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertIn("Designer: gpt-5.6-luna@medium", status.stdout)
         self.assertEqual(status.returncode, 0)
 
-    def test_legacy_state_schemas_upgrade_to_four_without_losing_restore(self) -> None:
-        for legacy_schema in (1, 2, 3):
+    def test_kimi_subscription_designer_setup_status_and_disable(self) -> None:
+        setup = self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "xhigh",
+            "--planner-fable",
+            "--planner-effort",
+            "high",
+            "--designer-kimi",
+            "--apply",
+        )
+        self.assertIn("Designer: Kimi K3 max (Kimi Code subscription)", setup.stdout)
+        self.assertIn("existing Kimi Code OAuth subscription via ACP", setup.stdout)
+        state = json.loads(
+            (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
+        )
+        self.assertEqual(state["schema"], 5)
+        self.assertEqual(state["designer"]["kind"], "kimi_cli")
+        self.assertEqual(state["designer"]["model"], "kimi-code/k3")
+        self.assertEqual(state["designer"]["effort"], "max")
+        selected = state["designer"]["server"]
+        planner_selected = state["planner"]["server"]
+        self.assertTrue(state["managed"]["mcp"][selected])
+        self.assertTrue(state["managed"]["mcp"][planner_selected])
+        config = self.read_fake_config()
+        servers = config["plugins"][NATIVE.PLUGIN_ID]["mcp_servers"]
+        self.assertTrue(servers[selected]["enabled"])
+        self.assertTrue(servers[planner_selected]["enabled"])
+
+        status = self.run_script("--status", "--require-effective")
+        self.assertIn("Kimi K3 Designer: ready", status.stdout)
+        self.assertEqual(status.returncode, 0)
+
+        self.run_script("--disable", "--apply")
+        restored = self.read_fake_config()
+        restored_servers = restored["plugins"][NATIVE.PLUGIN_ID]["mcp_servers"]
+        self.assertNotIn("enabled", restored_servers[selected])
+        self.assertNotIn("enabled", restored_servers[planner_selected])
+        self.assertFalse((self.home / NATIVE.STATE_FILENAME).exists())
+
+    def test_legacy_state_schemas_upgrade_to_five_without_losing_restore(self) -> None:
+        for legacy_schema in (1, 2, 3, 4):
             with self.subTest(schema=legacy_schema):
                 setup_arguments = ["--executor-model", "gpt-5.6-luna"]
                 if legacy_schema == 2:
@@ -617,7 +699,8 @@ class NativeRoutingTests(unittest.TestCase):
                 legacy["policy_version"] = legacy_schema
                 if legacy_schema < 3:
                     legacy.pop("planner", None)
-                legacy.pop("designer", None)
+                if legacy_schema < 4:
+                    legacy.pop("designer", None)
                 legacy["managed"]["mode"] = (
                     f"{NATIVE.MANAGED_MARKER}\nlegacy schema {legacy_schema} mode"
                 )
@@ -644,8 +727,8 @@ class NativeRoutingTests(unittest.TestCase):
                     "--apply",
                 )
                 upgraded = json.loads(state_path.read_text(encoding="utf-8"))
-                self.assertEqual(upgraded["schema"], 4)
-                self.assertEqual(upgraded["policy_version"], 4)
+                self.assertEqual(upgraded["schema"], 5)
+                self.assertEqual(upgraded["policy_version"], 5)
                 self.assertEqual(upgraded["previous"], original_previous)
                 self.assertEqual(upgraded["planner"]["model"], "gpt-5.6-sol")
                 self.assertEqual(upgraded["designer"]["model"], "gpt-5.6-luna")
@@ -664,7 +747,7 @@ class NativeRoutingTests(unittest.TestCase):
         state_path = self.home / NATIVE.STATE_FILENAME
         current = json.loads(state_path.read_text(encoding="utf-8"))
 
-        for schema, wrong_policy in ((1, 2), (2, 3), (3, 4), (4, 1), (4, True)):
+        for schema, wrong_policy in ((1, 2), (2, 3), (3, 4), (4, 5), (5, 1), (5, True)):
             with self.subTest(schema=schema, policy=wrong_policy):
                 state = json.loads(json.dumps(current))
                 state["schema"] = schema

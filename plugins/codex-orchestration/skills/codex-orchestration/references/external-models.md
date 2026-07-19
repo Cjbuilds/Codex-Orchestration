@@ -11,9 +11,10 @@ Only two lanes are accepted:
 
 1. A bundled, reviewed native provider manifest using HTTPS and the Responses API,
    plus command-backed authentication and provider-pinned personal custom agents.
-2. A bundled, reviewed first-party subscription CLI adapter. Claude Fable 5 is the
-   only adapter in this lane and retains its no-tools, no-session-persistence,
-   first-party-login, runtime-metadata bridge.
+2. A bundled, reviewed first-party subscription CLI adapter. Claude Fable 5 retains
+   its no-tools, no-session-persistence, first-party-login, runtime-metadata bridge;
+   Kimi K3 Designer uses a separate deny-all ACP bridge with first-party OAuth and
+   mechanical runtime-model confirmation.
 
 An arbitrary URL, model ID, effort, shell command, project-local helper, or generic
 subscription CLI is not a provider. Additions require code review, exact schemas,
@@ -33,14 +34,14 @@ UNCONFIGURED -> AUTH_REQUIRED -> AUTH_READY -> CAPABILITY_VERIFIED
 No state may skip an unlisted transition. Provider self-report or model-authored text
 never establishes `USED_CONFIRMED`.
 
-## Seat-label entry
+## Explicit API-backed entry
 
-A built-in seat label may select a bundled External Model without putting that model
-in the Desktop picker. The currently bundled shorthand is case-insensitive
-`Designer: Kimi K3`, which means task-local role `designer`, provider `openrouter`,
-exact model `moonshotai/kimi-k3`, and effort `max`. Omitted effort or `auto` resolves
-to `max`; every other explicit effort is rejected. Similar labels are accepted only
-after a reviewed plugin release adds an unambiguous bundled mapping.
+An External Model request must name the provider and exact model, for example
+`OpenRouter model moonshotai/kimi-k3 at max`. It remains a task-local provider-pinned
+role and never puts that model in the Desktop picker. The shorter built-in label
+`Designer: Kimi K3` is intentionally not an External Model request: version 0.8.0
+routes that label through the sealed Kimi Code OAuth/ACP Designer bridge described
+in the main skill contract. Never silently substitute one lane for the other.
 
 Root must inspect external status before acting. Dispatch by exact state:
 
@@ -54,8 +55,8 @@ Root must inspect external status before acting. Dispatch by exact state:
 | Exact role `READY` | Run `resolve`, then delegate only to its returned loaded agent name. |
 | Role mismatch, drift, shadow, or ambiguity | Stop with the exact blocker; never overwrite, disconnect, repair, or substitute. |
 
-The explicit seat label authorizes clean preparation and clean role creation, just as
-the equivalent literal configure request does. It never authorizes credential entry,
+The explicit configure request authorizes clean preparation and clean role creation.
+It never authorizes credential entry,
 Gate 0 billing, a failed-probe retry, replacement, or deletion. External seat routes
 remain task-local and are never stored in native routing state. Preserve any supplied
 seats and original task across authentication, qualification, or restart boundaries.
@@ -224,7 +225,7 @@ operation allowlist, mechanical runtime model metadata, CLI re-attestation behav
 and dedicated redaction tests. Do not generalize Fable's adapter into arbitrary CLI
 execution.
 
-## Kimi K3 status
+## OpenRouter Kimi K3 status
 
 As verified from OpenRouter's official model page and public endpoint metadata on
 2026-07-18, `moonshotai/kimi-k3` is listed with context `1048576`, a live
@@ -239,3 +240,20 @@ one explicitly authorized, potentially billable Gate 0 for the exact
 OpenRouter/Kimi/max tuple before role creation. Upstream capacity may return `429`;
 that is a failed probe and must not be retried without renewed approval. Do not
 replace the exact model ID with a dated or `latest` alias.
+
+## Subscription Kimi K3 Designer status
+
+The separate built-in `Designer: Kimi K3` route uses Kimi Code CLI 0.27.0 or newer,
+`acpx` 0.12.0 or newer, and the existing Kimi Code OAuth subscription. It does not
+prepare OpenRouter, request an API key, run Gate 0, or create a provider-pinned
+custom agent. Omitted effort, `auto`, and `max` all select the audited `max` route;
+every other explicit effort is rejected.
+
+Setup verifies the non-secret local catalog tuple `managed:kimi-code`,
+`kimi-code/k3`, OAuth, and default effort `max`, then enables one disabled-by-default
+MCP launcher. Each call starts a fresh ACP session in an empty temporary directory,
+pins K3, denies permissions, disables terminal capability, passes no MCP servers,
+rejects any tool/filesystem/terminal request or event, verifies the ACP-selected
+runtime model, and requires a `DESIGN_HANDOFF` signal. ACP does not expose a separate
+runtime effort field, so the adapter rechecks the catalog's audited `max` default on
+every call and reports that distinction honestly.

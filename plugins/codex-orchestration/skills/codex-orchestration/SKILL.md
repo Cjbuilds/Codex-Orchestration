@@ -1,6 +1,6 @@
 ---
 name: codex-orchestration
-description: Use for natural-language questions or requests about whether Kimi K3 or another audited External Model is available or callable as Designer or another role, and for assigning models to Planner, Advisor, Designer, Executor, researcher, reviewer, writer, or supervisor roles. Also use when the user invokes Codex Orchestration to update the plugin, create custom roles, define a workflow, or set up, inspect, repair, change, disable, or temporarily override model routing. Keep the selected task model as root and preserve Codex's Goal, permissions, integration, and verification behavior.
+description: Use for natural-language questions or requests about whether subscription-backed Kimi K3 or another audited model is available or callable as Designer or another role, and for assigning models to Planner, Advisor, Designer, Executor, researcher, reviewer, writer, or supervisor roles. Also use when the user invokes Codex Orchestration to update the plugin, create custom roles, define a workflow, or set up, inspect, repair, change, disable, or temporarily override model routing. Keep the selected task model as root and preserve Codex's Goal, permissions, integration, and verification behavior.
 ---
 
 # Codex Orchestration
@@ -39,25 +39,16 @@ setup, repair, provider preparation, authentication, Gate 0 spend, role creation
 configuration writes, disconnect, or removal.
 
 For a question such as `is Kimi available to use as Designer?`, enter this skill
-implicitly and run `external status` from the installed skill before answering.
-Never infer External Model availability from the currently exposed MCP or subagent
-tool list. A visible Fable tool is not an exhaustive provider or role inventory.
-Report the result in three separate terms:
-
-- `supported`: the exact display name maps to a bundled audited manifest;
-- `configured`: the exact provider/model/effort and role exist without drift;
-- `callable now`: status is `READY` and read-only `resolve` succeeds for the exact
-  role and effort in the current workspace.
-
-Say Kimi K3 is available to use as Designer only when all three are true. Otherwise,
-say it is supported but not yet callable, name the exact lifecycle state, and give
-the next action. Never answer that the plugin does not expose Kimi merely because a
-Kimi-specific tool is absent; the route is materialized through the External Model
-lifecycle and a provider-pinned custom agent.
+implicitly and run native `status` from the installed skill before answering. Kimi
+is callable only when the saved Designer route is `kimi_cli`, its selected MCP
+launcher is effective, Kimi Code CLI and acpx pass the audited version checks, and
+the local Kimi catalog reports `managed:kimi-code` OAuth with model `kimi-code/k3`
+and default effort `max`. Status makes no model call. Never infer availability from
+the visible tool list alone; a bridge loaded before setup or update may be stale.
 
 `--update` securely refreshes this plugin from its canonical Git marketplace. `setup` installs or updates the personal one-time routing policy. `create project role` or `create personal role` creates native Codex custom-agent files. `status` inspects built-in routing. `repair` restores only saved managed hint bytes after narrow drift validation. `disable` restores pre-setup values.
 
-`remove custom roles` cleans only verified plugin-managed advisor/executor files. Arbitrary native roles are user-owned. An invocation with native seats and work but no control verb is a current-task override and must not rewrite config. Explicit External Model seat labels are the exception: they may perform only the clean preparation, connection, and readiness writes authorized in the External Model lifecycle below.
+`remove custom roles` cleans only verified plugin-managed advisor/executor files. Arbitrary native roles are user-owned. An invocation with native seats and work but no control verb is a current-task override and must not rewrite config. The built-in `Designer: Kimi K3` label selects the persistent subscription bridge and is not an External Model provider request. A literal request that names an external provider may perform only the clean preparation, connection, and readiness writes authorized in the External Model lifecycle below.
 
 Explicit seat labels are authoritative. `planner:` configures only Planner, `advisor:` configures only Advisor, `designer:` configures only Designer, and `executor:` configures only Executor. Never infer or change a seat from a model's historical use, default role, cached description, or provider; in particular, never reinterpret a supplied `planner:` model as an Advisor or a supplied `designer:` model as an Executor. Saved defaults may fill only omitted seats and never override a seat supplied in the current invocation.
 
@@ -119,16 +110,14 @@ continue that work.
 
 If an old prompt contains `orchestrator:`, explain that the current task model already owns that role. Ignore that seat instead of switching or persisting it.
 
-Normalize `Extra High` to `xhigh`. For Claude Fable 5, accept `Low`, `Medium`, `High`, `XHigh`, `Max`, or `Ultra`. Omission or `Auto` means `High`; `Ultra` is a user-facing alias for Claude Code's actual `max` setting and must be reported as that mapping. Route Fable with `--planner-fable --planner-effort <normalized-effort>` or `--advisor-fable --advisor-effort <normalized-effort>`, not through the Codex model catalog. Resolve every other display name to an exact ID only through the executing host's model catalog, picker, a loaded custom agent, or official provider documentation. Never invent an ID. For persistent direct routing, resolve `auto` to the catalog's concrete default.
+Normalize `Extra High` to `xhigh`. For Claude Fable 5, accept `Low`, `Medium`, `High`, `XHigh`, `Max`, or `Ultra`. Omission or `Auto` means `High`; `Ultra` is a user-facing alias for Claude Code's actual `max` setting and must be reported as that mapping. Route Fable with `--planner-fable --planner-effort <normalized-effort>` or `--advisor-fable --advisor-effort <normalized-effort>`, not through the Codex model catalog. For `Designer: Kimi K3`, omission, `Auto`, or explicit `Max` means the pinned subscription route `--designer-kimi`; reject every other effort. Resolve every other display name to an exact ID only through the executing host's model catalog, picker, a loaded custom agent, or official provider documentation. Never invent an ID. For persistent direct routing, resolve `auto` to the catalog's concrete default.
 
-Persistent Designer accepts only a direct same-provider model, not a Fable MCP
-or unqualified custom-agent route. Route it with `--designer-model` plus
-`--designer-effort`. A Designer route may share a model with another seat; only
-Planner and Advisor require independent routes. For a cross-provider Designer,
-create and invoke a task-local External Model role named `designer`; `resolve` must
-reject matching project agents in the current workspace or any ancestor immediately
-before returning its route. Codex does not yet expose a scope-qualified agent identity,
-so persisting an agent name would let a later project's agent shadow it.
+Persistent Designer accepts either a direct same-provider model or the audited Kimi
+Code subscription bridge. Route a direct model with `--designer-model` plus
+`--designer-effort`; route Kimi K3 with `--designer-kimi`. A Designer route may share
+a model with another seat; only Planner and Advisor require independent routes. Other
+cross-provider Designers still use a task-local External Model role whose project
+shadowing is validated immediately before the bounded call.
 
 Read [providers-and-models.md](references/providers-and-models.md) before setup, when clients disagree, when a model is absent, when providers differ, or when custom agents or legacy migration are involved.
 
@@ -194,55 +183,36 @@ name, shell command, project file, or subscription CLI into a provider. Resolve 
 exact model and supported efforts from the manifest and its cited evidence. Reject
 all unsupported effort values; never clamp, alias, or silently fall back.
 
-### External models supplied as seat labels
+### Kimi K3 supplied as the Designer label
 
-Treat a supplied built-in seat whose model unambiguously matches a bundled external
-model as an explicit External Model seat assignment. In particular, normalize
-`Designer: Kimi K3`, case-insensitively, to role `designer`, provider `openrouter`,
-model `moonshotai/kimi-k3`, and effort `max`; an omitted or `auto` effort also means
-`max`. Reject every other explicit Kimi K3 effort. This is a manifest-backed display
-name mapping, not permission to guess model IDs or accept fuzzy, dated, or `latest`
-aliases.
+Normalize `Designer: Kimi K3`, case-insensitively, to the persistent audited
+subscription route `--designer-kimi`. Omitted effort, `auto`, or `max` resolves to
+`max`; reject every other explicit effort. Do not prepare OpenRouter, ask for an API
+key, run Gate 0, create a provider-pinned custom agent, or pass Kimi to
+`--designer-model` for this label.
 
-An external Designer is not a native direct-model Designer: never pass it to `--designer-model`,
-the root-provider model catalog, or the persistent routing schema; always inspect `external status` first and compare the requested role, provider,
-model, and effort with the strict registry result. Then follow exactly one state:
+Before previewing setup, require the official `kimi` CLI, Kimi Code CLI 0.27.0 or
+newer, acpx 0.12.0 or newer, and the exact local catalog tuple checked by
+`kimi_designer_mcp.check_prerequisites`. The route must use the managed Kimi Code
+OAuth subscription with `kimi-code/k3`, not an ambient API key or `KIMI_MODEL_*`
+override. Setup enables exactly one disabled-by-default Kimi Designer MCP launcher
+and persists a schema-validated `kimi_cli` Designer route.
 
-- If the exact role is `READY`, run read-only `resolve` and delegate only to the
-  returned agent name.
-- If the exact role is `RESTART_REQUIRED`, tell the user to fully quit and reopen
-  Codex and start a new task. In that new task, preview and apply `ready`; run `ready` and then `resolve`, and delegate only after both succeed.
-- If the provider is exact, authenticated, and `CAPABILITY_VERIFIED` or `READY`, but
-  role `designer` is absent, the explicit seat assignment authorizes clean role
-  creation: preview and apply `connect` with the bounded purpose "Produce a design
-  handoff for the root; do not edit implementation code, direct other roles, or
-  spawn descendants." Report the resulting `RESTART_REQUIRED` boundary. It does
-  not authorize replacing or disconnecting an existing role.
-- If the provider is absent, treat the explicit seat assignment like a literal
-  configure request: preview and apply only clean provider preparation, then follow
-  the existing hidden authentication flow. Preparation may add the exact audited
-  OpenRouter provider entry when absent, but never modifies or removes a pre-existing provider entry. If authentication is missing, print the required no-paste message
-  and enrollment command, then stop.
-- If the exact tuple is not qualified, request separate explicit billing approval
-  immediately before Gate 0. A seat assignment never authorizes Gate 0 billing,
-  credential entry, retries after a failed probe, or any other spend.
-- If the role exists with another provider/model, any file or helper drifts, a
-  project agent shadows it, or status is ambiguous, stop with the exact collision or
-  integrity blocker. Never overwrite, repair, disconnect, or substitute a route.
+After setup, start a new Codex task. The root calls `create_design_handoff` with a
+self-contained approved packet. Each call starts a fresh `acpx` ACP session in an
+empty temporary directory, disables terminal capability, denies every permission,
+passes no MCP servers, rejects tool events and filesystem or terminal requests,
+requires ACP runtime model `kimi-code/k3`, and requires the first non-empty output
+line `DESIGN_HANDOFF`. The bridge rechecks the catalog's `max` default before every
+call and returns only sanitized route evidence plus the handoff. It never reads or
+copies the OAuth token.
 
-At every non-ready state, describe the next exact action; do not report the requested external seat as unavailable merely because its personal agent has not been created
-or loaded yet; preserve the original task and every supplied seat while crossing an
-authentication, qualification, or restart boundary. A seat-only invocation is a
-role-provisioning request only when it contains only External Model seat labels; that
-form does not require Executor. If the invocation also supplies any native seat or
-contains task work, preserve every supplied seat and that work, then collect a missing Executor using the existing question and ready-to-copy invocation after reporting
-or progressing the external role state.
+Explicit forms that name `OpenRouter model moonshotai/kimi-k3` remain ordinary
+External Model requests and follow the provider lifecycle below. They are separate
+from the subscription-backed `Designer: Kimi K3` seat and must never be silently
+substituted for it.
 
-External seat assignments remain task-local. The returned custom-agent name must not be persisted in native routing state because a project agent could shadow that
-unqualified name in a later workspace. This rule does not change native same-provider
-Designer setup or Claude Fable 5 Planner/Advisor routing.
-
-Native setup is preview-first and uses
+External Model setup is preview-first and uses
 `scripts/external_configurator.py` from this skill's real installed directory. Its
 stages are `prepare`, external authentication, explicitly authorized billable
 `gate0`, `connect`, a new Codex task, and `ready`. A literal configure request
@@ -293,6 +263,12 @@ no-tools, no-session-persistence, runtime-model-metadata contract. Do not route 
 through the native External Model provider configurator and do not generalize its
 adapter to arbitrary CLIs.
 
+Kimi K3 is the second sealed subscription adapter and only for Designer. It uses
+the official Kimi Code CLI through acpx/ACP, the existing OAuth session, a disposable
+workspace, deny-all permissions, no terminal capability, exact catalog validation,
+and runtime model confirmation. Do not generalize this allowance to arbitrary ACP
+agents or subscription CLIs.
+
 ## Create arbitrary custom roles
 
 Use native Codex custom-agent files for roles beyond the built-in planner, advisor, designer, and executor seats. Examples include researcher, reviewer, writer, supervisor, security auditor, browser debugger, or domain expert.
@@ -321,7 +297,7 @@ If the user combines a workflow with a Codex Goal, leave Goal lifecycle and limi
 
 ## One-time native setup
 
-Use this path for a current same-provider setup such as Sol root to Luna or Terra children. Claude Fable 5 is the one built-in cross-provider Planner or Advisor exception because it runs through the bundled read-only MCP bridge and the user's authenticated Claude Code CLI.
+Use this path for a current same-provider setup such as Sol root to Luna or Terra children. Claude Fable 5 is the bundled cross-provider Planner or Advisor exception; Kimi K3 is the bundled subscription-backed Designer exception. Both run through bounded MCP bridges and existing first-party CLI login state.
 
 1. Identify the Codex binary used by the active host. Do not assume the shell `codex` is the Desktop binary.
 2. Resolve the exact executor and optional Planner, Advisor, and Designer IDs and efforts from that host.
@@ -349,10 +325,10 @@ Add `--advisor-model` and `--advisor-effort` for a same-provider Codex advisor. 
 Add `--planner-model` and `--planner-effort` for a same-provider Planner. For Claude Fable 5, use `--planner-fable`; add `--planner-effort low|medium|high|xhigh|max` when the user chooses one. Planner omission persists no Planner route and means the root plans. A configured Planner and Advisor must not resolve to the same model or agent route; independent review is required.
 
 Add `--designer-model` and `--designer-effort` for a persistent same-provider
-Designer. Designer omission persists `designer: none`. Designer cannot use the
-Fable MCP route or a persistent custom-agent name. Use a task-local External Model
-role named `designer` for cross-provider design work so the root can validate its
-personal file and reject project shadowing immediately before the bounded call.
+Designer, or `--designer-kimi` for Kimi K3 Max through the existing Kimi Code OAuth
+subscription. Designer omission persists `designer: none`. Designer cannot use the
+Fable MCP route or a persistent custom-agent name. Other cross-provider design work
+uses a task-local External Model role.
 
 The configurator capability-tests the complete four-field preset on the active target, `codex` on PATH when different, the known macOS Desktop binary when present, and every explicit `--compat-bin`. A successful isolated config probe means that client can parse the preset; it is not a live child-model confirmation. Report `route accepted` or `used and confirmed` only from the exact live spawn evidence defined below. Ask about other Codex/IDE installations that share this config only when the environment suggests they exist, and pass their binaries explicitly. If the request or active host indicates a named `--profile`, explain that normal setup manages the default user layer and is not verified for that profile; do not add a routine question for users with no profile signal. If a checked client rejects any managed field, stop before apply. Recommend updating it or using the task-local fallback. `--allow-incompatible-client` requires a separate explicit user decision because it can make the shared config unreadable to that client.
 
@@ -365,9 +341,9 @@ Do not add `enabled = true` for a Sol or Terra root. Their current model metadat
 - `features.multi_agent_v2.multi_agent_mode_hint_text`;
 - `features.multi_agent_v2.usage_hint_text`.
 
-When Claude Fable 5 is selected, it additionally manages only the plugin-scoped `enabled` override for the chosen bundled MCP launcher and any launcher variant already overridden by the user. All bundled variants are disabled by default. The original override values are stored and restored by `disable`. Codex's TOML editor may retain an inert empty table header after deleting the last override; never rewrite the file merely to remove that cosmetic header.
+When Claude Fable 5 or Kimi K3 Designer is selected, setup additionally manages only the plugin-scoped `enabled` override for each chosen bundled MCP launcher and any launcher variant already overridden by the user. All bundled variants are disabled by default. The original override values are stored and restored by `disable`. Codex's TOML editor may retain an inert empty table header after deleting the last override; never rewrite the file merely to remove that cosmetic header.
 
-It uses Codex App Server's `config/read` and `config/batchWrite` APIs, not a home-grown TOML rewrite. It preserves unrelated settings and comments, validates the whole effective config, and uses the user-layer version to detect races. Restore snapshots cover the four routing fields plus the narrowly scoped MCP overrides only when Fable is selected; the namespaced state also records schema/version markers, config path, selected seats, and scalar-conversion metadata when needed. If the user explicitly replaces existing hint text, the exact prior text is stored for restoration; warn them never to place credentials in routing hints.
+It uses Codex App Server's `config/read` and `config/batchWrite` APIs, not a home-grown TOML rewrite. It preserves unrelated settings and comments, validates the whole effective config, and uses the user-layer version to detect races. Restore snapshots cover the four routing fields plus narrowly scoped bundled MCP overrides only when Fable or Kimi is selected; the namespaced state also records schema/version markers, config path, selected seats, and scalar-conversion metadata when needed. If the user explicitly replaces existing hint text, the exact prior text is stored for restoration; warn them never to place credentials in routing hints.
 
 If a user-authored mode or usage hint already exists, do not replace it automatically. Show the conflict. Use `--replace-existing-policy` only after the user explicitly approves replacing and later restoring those exact values.
 
@@ -385,7 +361,7 @@ python3 <skill-dir>/scripts/configure_native_routing.py \
   --status --require-effective
 ```
 
-Run status from the target project. The first form is descriptive. Use `--require-effective` for automation and release gates; it returns nonzero for incompatible clients, conflicts, overrides, incomplete controls, an unavailable Fable or custom-agent route, or orphaned v0.4+ personal roles. Report the current task model as the orchestrator, Planner (`root` when omitted), configured Advisor, Designer, and Executor, whether the personal policy is installed and effective in that workspace, whether effective spawn controls are visible, whether the effective tool namespace is `agents`, the target config path, and checked-client compatibility. State that neither status form proves a live route or infers v2 activation for the model selected in a task; current Sol or Terra is the intended root.
+Run status from the target project. The first form is descriptive. Use `--require-effective` for automation and release gates; it returns nonzero for incompatible clients, conflicts, overrides, incomplete controls, an unavailable Fable, Kimi, or custom-agent route, or orphaned v0.4+ personal roles. Report the current task model as the orchestrator, Planner (`root` when omitted), configured Advisor, Designer, and Executor, whether the personal policy is installed and effective in that workspace, whether effective spawn controls are visible, whether the effective tool namespace is `agents`, the target config path, and checked-client compatibility. State that status proves configuration and local prerequisites, not a live Kimi/Fable model call or v2 child route; current Sol or Terra is the intended root.
 
 When status reports `managed fields conflict with local restore state`, do not run
 setup or disable over the conflict and do not assume authentication failed. A literal
@@ -404,7 +380,7 @@ python3 <skill-dir>/scripts/configure_native_routing.py \
 ```
 
 Repair must require valid saved state and both live hints to retain the plugin
-ownership marker. It must refuse namespace, spawn-metadata, Fable launcher,
+ownership marker. It must refuse namespace, spawn-metadata, bundled MCP launcher,
 scalar-shape, missing/unmarked hint, or other managed drift. It writes only the
 different mode/usage fields through App Server compare-and-swap, leaves the original
 restore snapshot and seat records byte-for-byte unchanged, checks user and effective
@@ -460,6 +436,36 @@ installed bridge, policy, and saved state load together. Ask for login only when
 fresh status check itself reports authentication unavailable.
 
 The managed workflow reserves these MCP calls for the root Codex model. Current MCP requests do not carry caller identity, so the bridge cannot independently authenticate root versus child; caller isolation is instruction-enforced. The bridge still mechanically prevents tools, edits, permission prompts, and session persistence. Never describe the caller boundary as engine-enforced.
+
+## Kimi K3 subscription Designer
+
+Use this built-in route only when the user names Kimi K3 as Designer. Do not create
+an OpenRouter provider or request a Kimi API key for this route.
+
+Prerequisites:
+
+- official Kimi Code CLI 0.27.0 or newer with the existing Kimi Code OAuth login;
+- the local provider catalog exposes `managed:kimi-code` and `kimi-code/k3` with
+  default effort `max`;
+- acpx 0.12.0 or newer;
+- Python 3.11 or newer.
+
+Setup uses `--designer-kimi`, enables exactly one bundled Kimi launcher, and makes
+no model call. Status rechecks versions and the non-secret catalog contract. Each
+design call uses `acpx --deny-all --no-terminal --allowed-tools=` with an empty
+temporary cwd, a temporary ACP session, model `kimi-code/k3`, and no MCP servers.
+The bridge rejects permission, filesystem, terminal, and tool events; requires
+normal `end_turn`; mechanically verifies the ACP session's selected model; and
+requires `DESIGN_HANDOFF`. K3 effort is `max` because the active audited Kimi catalog
+declares that default and the bridge rechecks it before every call. Never claim ACP
+echoes a separate effort value when it does not.
+
+The bridge never reads, exports, or rewrites the OAuth credential and scrubs ambient
+provider keys and `KIMI_MODEL_*` overrides. Authentication errors are reported as
+bridge failures with subprocess output withheld. The root/child caller boundary is
+instruction-enforced because MCP requests lack caller identity; tool denial,
+disposable cwd, model selection, transcript validation, and output gating are
+mechanical.
 
 ## Durable or cross-provider custom agents
 
@@ -656,10 +662,11 @@ Never call that 65% fewer raw tokens, a guaranteed five-hour or weekly-limit sav
 
 - `scripts/configure_native_routing.py`: one-time native setup, status, seat changes, and disable.
 - `scripts/fable_advisor_mcp.py`: fail-closed Claude Fable 5 planning and review bridge.
+- `scripts/kimi_designer_mcp.py`: fail-closed Kimi K3 subscription Designer bridge through acpx/ACP.
 - `scripts/configure_orchestration.py`: namespaced custom agents, provider pins, safe removal, and legacy migration.
 - `scripts/inspect_models.py`: fallible host-catalog diagnostics.
 - `scripts/external_configurator.py`: preview-first External Model provider, Gate 0, role, status, recovery, and removal lifecycle.
 - `scripts/external_auth_helper.py`: stable OS credential-store reader for documented command-backed provider auth.
 - `scripts/external_subscription.py`: sealed dispatch through the existing Claude Fable 5 bridge.
 - [providers-and-models.md](references/providers-and-models.md): detailed capability, provider, compatibility, persistence, and usage boundaries.
-- [external-models.md](references/external-models.md): External Model trust lanes, lifecycle, commands, secret handling, Kimi status, and adapter-extension contract.
+- [external-models.md](references/external-models.md): API-backed External Model trust lanes, lifecycle, commands, secret handling, and adapter-extension contract.

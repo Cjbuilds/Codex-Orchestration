@@ -22,8 +22,18 @@ FABLE_SERVERS = frozenset(
         "fable-advisor-py",
     }
 )
+KIMI_MODEL = "kimi-code/k3"
+KIMI_EFFORTS = frozenset({"max"})
+KIMI_SERVERS = frozenset(
+    {
+        "kimi-designer-python3",
+        "kimi-designer-python",
+        "kimi-designer-py",
+    }
+)
+BUNDLED_MCP_SERVERS = FABLE_SERVERS | KIMI_SERVERS
 
-_SCHEMA_POLICY_PAIRS = {1: 1, 2: 2, 3: 3, 4: 4}
+_SCHEMA_POLICY_PAIRS = {1: 1, 2: 2, 3: 3, 4: 4, 5: 5}
 _MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+/@-]{0,199}$")
 _AGENT_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 _EFFORT_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
@@ -135,6 +145,24 @@ def _validate_route(route: Any, *, seat: str, schema: int) -> str:
             type(route["server"]) is str and route["server"] in FABLE_SERVERS,
             "Fable server is unsupported",
         )
+    elif kind == "kimi_cli":
+        _require(
+            seat == "designer" and schema >= 5,
+            f"{seat} cannot use Kimi CLI in schema {schema}",
+        )
+        _require(
+            set(route) == {"kind", "model", "effort", "server"},
+            f"{seat} Kimi CLI route has the wrong shape",
+        )
+        _require(route["model"] == KIMI_MODEL, "Kimi CLI model is not pinned")
+        _require(
+            type(route["effort"]) is str and route["effort"] in KIMI_EFFORTS,
+            "Kimi CLI effort is unsupported",
+        )
+        _require(
+            type(route["server"]) is str and route["server"] in KIMI_SERVERS,
+            "Kimi Designer server is unsupported",
+        )
     else:
         raise RoutingStateError(f"{seat} route kind is unsupported")
     return kind
@@ -203,7 +231,7 @@ def _validate_scalar_conversion(state: dict[str, Any], managed: dict[str, Any]) 
 
 
 def validate_routing_state(value: Any) -> dict[str, Any]:
-    """Validate and return one exact, complete persisted schema 1 through 4.
+    """Validate and return one exact, complete persisted schema 1 through 5.
 
     Unknown keys and future extensions are rejected intentionally. Callers must
     perform their own secure file read and any caller-specific path/seat checks.
@@ -247,8 +275,8 @@ def validate_routing_state(value: Any) -> dict[str, Any]:
     if designer is not None:
         designer_kind = _validate_route(designer, seat="designer", schema=schema)
         _require(
-            designer_kind == "model",
-            "persistent Designer must use a direct model route",
+            designer_kind in {"model", "kimi_cli"},
+            "persistent Designer must use a direct model or audited Kimi CLI route",
         )
     _validate_route_separation(planner, advisor)
 
@@ -297,7 +325,7 @@ def validate_routing_state(value: Any) -> dict[str, Any]:
         _require(type(previous_mcp) is dict, "MCP restore state must be an object")
         _require(
             set(managed_mcp) == set(previous_mcp)
-            and set(managed_mcp).issubset(FABLE_SERVERS),
+            and set(managed_mcp).issubset(BUNDLED_MCP_SERVERS),
             "MCP state has unsupported or unpaired servers",
         )
         _require(
@@ -310,14 +338,15 @@ def validate_routing_state(value: Any) -> dict[str, Any]:
     else:
         true_servers = []
 
-    if fable_routes:
-        selected_server = fable_routes[0]["server"]
-        _require(
-            true_servers == [selected_server],
-            "MCP state must enable exactly the selected Fable launcher",
-        )
-    else:
-        _require(not true_servers, "MCP state enables a launcher without a Fable seat")
+    selected_servers = {
+        route["server"] for route in fable_routes
+    }
+    if type(designer) is dict and designer.get("kind") == "kimi_cli":
+        selected_servers.add(designer["server"])
+    _require(
+        set(true_servers) == selected_servers,
+        "MCP state must enable exactly the selected bundled launchers",
+    )
 
     _validate_scalar_conversion(value, managed)
     return value

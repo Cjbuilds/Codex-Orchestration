@@ -72,9 +72,9 @@ identity. Native providers remain
 `ROUTE_ACCEPTED` unless the host exposes mechanical provider/model metadata; model
 self-report is never confirmation.
 
-Native setup/status/repair/disable and Fable authorization retain their full-state
+Native setup/status/repair/disable and bundled bridge authorization retain their full-state
 validators. Repair is allowed only when valid saved state exists, both live hint
-strings retain the ownership marker, and namespace, spawn metadata, Fable launcher
+strings retain the ownership marker, and namespace, spawn metadata, bundled launcher
 enablement, scalar-conversion shape, and all other managed values still match. It
 restores only drifted mode/usage bytes through App Server compare-and-swap, verifies
 user and effective readback, rolls back on an override, preserves a concurrent edit,
@@ -87,10 +87,23 @@ Code helpers. The managed workflow authorizes only root to call planning tools, 
 MCP does not provide caller identity; that caller boundary remains
 instruction-enforced rather than server-authenticated.
 
-Routing schema/policy version 4 adds the optional Designer field while retaining
-strict validation for schemas 1–3. Legacy schemas cannot smuggle a Designer key,
-and persistent Designer accepts only a direct same-provider model, never the
-privileged Fable MCP route or a project-shadowable unqualified agent name.
+The bundled Kimi K3 Designer bridge accepts only the exact local Kimi Code OAuth
+catalog route and rejects API-key-backed or ambiently overridden configurations. It
+scrubs provider keys and `KIMI_MODEL_*`, invokes `acpx` with permissions denied,
+terminal disabled, no MCP servers, one turn, and a disposable empty working
+directory, then rejects tool, permission, filesystem, and terminal events in the
+ACP transcript. It mechanically verifies the ACP-selected `kimi-code/k3` model and
+requires a bounded `DESIGN_HANDOFF` result. ACP does not emit a separate effort
+identity; the bridge therefore re-attests the catalog's exact `max` default before
+every call and never represents that check as runtime effort telemetry. The OAuth
+credential remains owned by Kimi Code CLI and is never read, copied, logged, or
+returned by the plugin.
+
+Routing schema/policy version 5 adds the sealed `kimi_cli` Designer route while
+retaining strict validation for schemas 1–4. Legacy schemas cannot smuggle newer
+fields. Persistent Designer accepts only a direct same-provider model or the exact
+bundled Kimi route, never the privileged Fable MCP route or a project-shadowable
+unqualified agent name.
 Cross-provider/custom Designers remain task-local and require current-project
 validation immediately before use. Designer authority is
 policy-bounded: it reports only to root, cannot contact other seats or spawn
