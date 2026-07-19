@@ -70,6 +70,23 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("Fable Advisor uses `review_plan`", SKILL)
         self.assertIn("Advisor: none", SKILL)
 
+    def test_ready_role_selection_uses_concise_activation_confirmation(self) -> None:
+        expected = """```text
+Planner — Fable 5 high: Activated
+Designer — Kimi K3: Activated
+Executor — GPT-5.6 Sol high: Activated
+```"""
+
+        self.assertIn(expected, SKILL)
+        self.assertIn("one plain line per explicitly supplied model-bearing seat", SKILL)
+        self.assertIn("preserve the user's seat order", SKILL)
+        self.assertIn("Do not print omitted, `none`, or implicit-root seats", SKILL)
+        self.assertIn("Use `Activated` only after that exact route is ready", SKILL)
+        self.assertIn("lifecycle state and next action instead of `Activated`", SKILL)
+        self.assertIn(
+            "activation confirmation preserves the supplied `Fable 5` label", SKILL
+        )
+
     def test_designer_is_optional_bounded_and_first_class(self) -> None:
         self.assertIn("omitted designer means `designer: none`", SKILL)
         self.assertIn("--designer-model", SKILL)

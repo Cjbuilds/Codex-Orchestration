@@ -1,6 +1,6 @@
 {
   "name": "codex-orchestration",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "Give Codex and audited external models safe, provider-pinned roles.",
   "author": {
     "name": "CJ Zafir",
