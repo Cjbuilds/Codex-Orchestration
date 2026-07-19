@@ -269,7 +269,7 @@ The Claude Fable 5 bridge is mechanically narrower than a child: its tools accep
 
 Planner or Advisor failure is never approval. Configured seats are required for a non-trivial Executor plan unless the user explicitly marks one best-effort for the current task. Transport failure, malformed output, missing context, stale plan versions, or wrong routes stop Executor work by default.
 
-Every Advisor call is fresh and stateless. The root carries the canonical current plan, numbered version, and compact cumulative findings ledger. `PLAN_REVISE` returns to the same Planner route; `PLAN_APPROVED` stops the loop. The root allows at most five Advisor reviews. Review five without approval halts with the current plan, ledger, and unresolved findings instead of silently executing.
+Every Advisor call is fresh and stateless. The root carries the canonical current plan, numbered version, and compact cumulative findings ledger. `PLAN_REVISE` returns to the same Planner route; `PLAN_APPROVED` stops the loop. The root allows at most eight Advisor reviews. Review eight without approval halts with the current plan, ledger, and unresolved findings instead of silently executing.
 
 ## Goals and task lifetime
 

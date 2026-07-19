@@ -572,15 +572,15 @@ Advisor is optional. If none is configured, the root validates the Planner's dra
 4. For `PLAN_REVISE`, assign stable IDs to material findings and send the canonical current version, latest critique, and compact cumulative findings ledger back to the same Planner route. If Planner is omitted, the root revises.
 5. Require `PLAN_REVISION`, a complete `FINDINGS_LEDGER`, and the revised plan. Every latest finding must be `INCORPORATED` or `REJECTED` with a concrete reason. Reject stale source versions, missing or duplicated findings, and empty rationales.
 6. Increment the version and send the new current plan plus compact ledger to a fresh Advisor call. Ask it to confirm or contest prior dispositions rather than repeat accepted findings.
-7. Stop early on approval. Never exceed five total Advisor reviews.
+7. Stop early on approval. Never exceed eight total Advisor reviews.
 
 Carry only the original constraints, current plan, and compact ledger between fresh calls; do not duplicate complete transcripts. The root owns the canonical plan, versions, ledger, round count, semantic validation, and Executor release. Planner and Advisor never contact one another directly.
 
-If review five still returns `PLAN_REVISE`, halt before Executor work. Give the user the latest plan and version, complete ledger, latest unresolved findings, and choices to override, re-scope, or change a route. Never label it approved.
+If review eight still returns `PLAN_REVISE`, halt before Executor work. Give the user the latest plan and version, complete ledger, latest unresolved findings, and choices to override, re-scope, or change a route. Never label it approved.
 
 A configured Planner or Advisor is required by default. Route failure, malformed output, missing context, stale version, or invalid ledger halts before Executor work. Only an explicit current-task best-effort instruction permits degradation:
 
-- if the configured Planner fails, disclose it and let the root assume Planner duties for the remaining rounds without resetting the five-review budget;
+- if the configured Planner fails, disclose it and let the root assume Planner duties for the remaining rounds without resetting the eight-review budget;
 - if the Advisor fails, disclose it, end the loop, and label the latest validated plan `NOT_ADVISOR_APPROVED` before any allowed continuation.
 
 Do not persist a best-effort flag. An explicit task override applies only to that task.

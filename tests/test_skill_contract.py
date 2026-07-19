@@ -311,7 +311,7 @@ Executor — GPT-5.6 Sol high: Activated
         self.assertIn("report only to the root", SKILL)
         self.assertIn("contact Executors", SKILL)
         self.assertIn("it never counts as approval", SKILL)
-        self.assertIn("Never exceed five total Advisor reviews", SKILL)
+        self.assertIn("Never exceed eight total Advisor reviews", SKILL)
         self.assertIn("NOT_ADVISOR_APPROVED", SKILL)
         self.assertNotIn("at most one confirmation pass", SKILL)
 
