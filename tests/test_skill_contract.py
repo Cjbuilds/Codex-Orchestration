@@ -115,8 +115,8 @@ Executor — GPT-5.6 Sol high: Activated
         self.assertIn("fresh `acpx` ACP session", SKILL)
         self.assertIn("rejects tool events and filesystem or terminal requests", SKILL)
         self.assertIn("requires ACP runtime model `kimi-code/k3`", SKILL)
-        self.assertIn("The bridge rechecks the catalog's `max` default", SKILL)
-        self.assertIn("never reads or\ncopies the OAuth token", SKILL)
+        self.assertIn("KIMI_MODEL_THINKING_EFFORT=max", SKILL)
+        self.assertIn("never reads or copies the OAuth token", SKILL)
         self.assertIn("Never silently substitute one lane for the other", EXTERNAL_REFERENCE)
 
     def test_natural_kimi_availability_question_uses_read_only_native_status(self) -> None:
@@ -129,7 +129,7 @@ Executor — GPT-5.6 Sol high: Activated
         )
         self.assertIn("saved Designer route is `kimi_cli`", SKILL)
         self.assertIn("managed:kimi-code", SKILL)
-        self.assertIn("default effort `max`", SKILL)
+        self.assertIn("support for effort `max`", SKILL)
         self.assertIn("Status makes no model call", SKILL)
         self.assertIn("read-only status inspection only and never", README)
         self.assertIn("authorizes configuration, credentials, or spend", README)

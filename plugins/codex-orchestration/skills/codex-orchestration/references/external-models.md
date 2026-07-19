@@ -250,10 +250,11 @@ custom agent. Omitted effort, `auto`, and `max` all select the audited `max` rou
 every other explicit effort is rejected.
 
 Setup verifies the non-secret local catalog tuple `managed:kimi-code`,
-`kimi-code/k3`, OAuth, and default effort `max`, then enables one disabled-by-default
+`kimi-code/k3`, OAuth, and support for effort `max`, then enables one disabled-by-default
 MCP launcher. Each call starts a fresh ACP session in an empty temporary directory,
 pins K3, denies permissions, disables terminal capability, passes no MCP servers,
 rejects any tool/filesystem/terminal request or event, verifies the ACP-selected
 runtime model, and requires a `DESIGN_HANDOFF` signal. ACP does not expose a separate
-runtime effort field, so the adapter rechecks the catalog's audited `max` default on
-every call and reports that distinction honestly.
+runtime effort field, so the adapter rechecks catalog support and injects the
+documented `KIMI_MODEL_THINKING_EFFORT=max` wire override on every call while
+reporting the ACP evidence boundary honestly.

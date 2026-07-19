@@ -1,13 +1,20 @@
 # Changelog
 
+## 0.8.1 — Unreleased
+
+- Keep the subscription-backed Kimi K3 Designer pinned to `max` when the
+  managed Kimi catalog changes its UI default. The bridge now verifies that
+  `max` remains supported, scrubs ambient model overrides, and injects its own
+  documented `KIMI_MODEL_THINKING_EFFORT=max` wire override for every ACP call.
+
 ## 0.8.0 — Unreleased
 
 - Add a sealed, subscription-backed Kimi K3 Designer route through the official
   Kimi Code CLI and ACP. `Designer: Kimi K3` now uses the existing Kimi Code OAuth
   login and never asks for an API key, prepares OpenRouter, or runs a billable Gate
   0.
-- Pin Kimi Code CLI 0.27.0+, `acpx` 0.12.0+, model `kimi-code/k3`, and the local
-  catalog's `max` default. Each design call uses a fresh deny-all, no-terminal ACP
+- Pin Kimi Code CLI 0.27.0+, `acpx` 0.12.0+, model `kimi-code/k3`, and catalog
+  support for `max`. Each design call uses a fresh deny-all, no-terminal ACP
   session in an empty temporary directory and rejects tool, permission, filesystem,
   terminal, malformed-transcript, or wrong-model activity.
 - Add routing schema/policy version 5, reversible plugin-scoped Kimi MCP launcher

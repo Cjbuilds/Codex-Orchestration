@@ -89,13 +89,15 @@ instruction-enforced rather than server-authenticated.
 
 The bundled Kimi K3 Designer bridge accepts only the exact local Kimi Code OAuth
 catalog route and rejects API-key-backed or ambiently overridden configurations. It
-scrubs provider keys and `KIMI_MODEL_*`, invokes `acpx` with permissions denied,
+scrubs provider keys and every caller-supplied `KIMI_MODEL_*` value, then injects
+only its own documented `KIMI_MODEL_THINKING_EFFORT=max` wire control. It invokes
+`acpx` with permissions denied,
 terminal disabled, no MCP servers, one turn, and a disposable empty working
 directory, then rejects tool, permission, filesystem, and terminal events in the
 ACP transcript. It mechanically verifies the ACP-selected `kimi-code/k3` model and
 requires a bounded `DESIGN_HANDOFF` result. ACP does not emit a separate effort
-identity; the bridge therefore re-attests the catalog's exact `max` default before
-every call and never represents that check as runtime effort telemetry. The OAuth
+identity; the bridge therefore requires catalog support for `max`, controls the
+wire effort itself, and never represents that as runtime effort telemetry. The OAuth
 credential remains owned by Kimi Code CLI and is never read, copied, logged, or
 returned by the plugin.
 

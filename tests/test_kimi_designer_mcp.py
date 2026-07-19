@@ -153,7 +153,7 @@ class KimiDesignerMcpTests(unittest.TestCase):
         with self.assertRaisesRegex(KIMI.KimiDesignerError, "state is invalid"):
             KIMI.load_designer_route(self.home)
 
-    def test_prerequisites_require_oauth_k3_and_max_without_api_key(self) -> None:
+    def test_prerequisites_require_oauth_k3_with_max_support_without_api_key(self) -> None:
         catalog = {
             "providers": {
                 "managed:kimi-code": {
@@ -166,7 +166,7 @@ class KimiDesignerMcpTests(unittest.TestCase):
                 "kimi-code/k3": {
                     "provider": "managed:kimi-code",
                     "model": "k3",
-                    "defaultEffort": "max",
+                    "defaultEffort": "high",
                     "supportEfforts": ["low", "high", "max"],
                 }
             },
@@ -178,6 +178,8 @@ class KimiDesignerMcpTests(unittest.TestCase):
             ready = KIMI.check_prerequisites()
         self.assertEqual(ready["auth_method"], "kimi-code-oauth")
         self.assertEqual(ready["model"], "kimi-code/k3")
+        self.assertEqual(ready["effort"], "max")
+        self.assertEqual(ready["catalog_default_effort"], "high")
 
         catalog["providers"]["managed:kimi-code"]["apiKey"] = "secret"
         outputs = ["0.27.0\n", "0.12.0\n", json.dumps(catalog)]
@@ -198,6 +200,15 @@ class KimiDesignerMcpTests(unittest.TestCase):
 
         catalog["providers"]["managed:kimi-code"]["apiKey"] = ""
         catalog["models"]["kimi-code/k3"]["supportEfforts"] = None
+        outputs = ["0.27.0\n", "0.12.0\n", json.dumps(catalog)]
+        with mock.patch.object(
+            KIMI, "_resolve_command", side_effect=lambda name: Path(name)
+        ), mock.patch.object(
+            KIMI, "_run_probe", side_effect=outputs
+        ), self.assertRaisesRegex(KIMI.KimiDesignerError, "audited contract"):
+            KIMI.check_prerequisites()
+
+        catalog["models"]["kimi-code/k3"]["supportEfforts"] = ["low", "high"]
         outputs = ["0.27.0\n", "0.12.0\n", json.dumps(catalog)]
         with mock.patch.object(
             KIMI, "_resolve_command", side_effect=lambda name: Path(name)
@@ -255,6 +266,7 @@ class KimiDesignerMcpTests(unittest.TestCase):
             os.environ,
             {
                 "KIMI_MODEL_API_KEY": "secret",
+                "KIMI_MODEL_THINKING_EFFORT": "low",
                 "OPENROUTER_API_KEY": "secret",
                 "SAFE_VALUE": "kept",
             },
@@ -263,6 +275,7 @@ class KimiDesignerMcpTests(unittest.TestCase):
             env = KIMI.sanitized_environment()
         self.assertNotIn("KIMI_MODEL_API_KEY", env)
         self.assertNotIn("OPENROUTER_API_KEY", env)
+        self.assertEqual(env["KIMI_MODEL_THINKING_EFFORT"], "max")
         self.assertEqual(env["SAFE_VALUE"], "kept")
         self.assertEqual(env["KIMI_CODE_NO_AUTO_UPDATE"], "1")
 

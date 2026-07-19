@@ -43,7 +43,7 @@ implicitly and run native `status` from the installed skill before answering. Ki
 is callable only when the saved Designer route is `kimi_cli`, its selected MCP
 launcher is effective, Kimi Code CLI and acpx pass the audited version checks, and
 the local Kimi catalog reports `managed:kimi-code` OAuth with model `kimi-code/k3`
-and default effort `max`. Status makes no model call. Never infer availability from
+and support for effort `max`. Status makes no model call. Never infer availability from
 the visible tool list alone; a bridge loaded before setup or update may be stale.
 
 `--update` securely refreshes this plugin from its canonical Git marketplace. `setup` installs or updates the personal one-time routing policy. `create project role` or `create personal role` creates native Codex custom-agent files. `status` inspects built-in routing. `repair` restores only saved managed hint bytes after narrow drift validation. `disable` restores pre-setup values.
@@ -203,9 +203,10 @@ self-contained approved packet. Each call starts a fresh `acpx` ACP session in a
 empty temporary directory, disables terminal capability, denies every permission,
 passes no MCP servers, rejects tool events and filesystem or terminal requests,
 requires ACP runtime model `kimi-code/k3`, and requires the first non-empty output
-line `DESIGN_HANDOFF`. The bridge rechecks the catalog's `max` default before every
-call and returns only sanitized route evidence plus the handoff. It never reads or
-copies the OAuth token.
+line `DESIGN_HANDOFF`. The bridge rechecks that the catalog supports `max`, scrubs
+ambient model overrides, and injects the documented
+`KIMI_MODEL_THINKING_EFFORT=max` wire override before every call. It returns only
+sanitized route evidence plus the handoff and never reads or copies the OAuth token.
 
 Explicit forms that name `OpenRouter model moonshotai/kimi-k3` remain ordinary
 External Model requests and follow the provider lifecycle below. They are separate
@@ -446,7 +447,7 @@ Prerequisites:
 
 - official Kimi Code CLI 0.27.0 or newer with the existing Kimi Code OAuth login;
 - the local provider catalog exposes `managed:kimi-code` and `kimi-code/k3` with
-  default effort `max`;
+  support for effort `max`;
 - acpx 0.12.0 or newer;
 - Python 3.11 or newer.
 
@@ -456,8 +457,9 @@ design call uses `acpx --deny-all --no-terminal --allowed-tools=` with an empty
 temporary cwd, a temporary ACP session, model `kimi-code/k3`, and no MCP servers.
 The bridge rejects permission, filesystem, terminal, and tool events; requires
 normal `end_turn`; mechanically verifies the ACP session's selected model; and
-requires `DESIGN_HANDOFF`. K3 effort is `max` because the active audited Kimi catalog
-declares that default and the bridge rechecks it before every call. Never claim ACP
+requires `DESIGN_HANDOFF`. K3 effort is `max`: the bridge verifies that the active
+catalog supports it, scrubs ambient model overrides, and supplies the documented
+`KIMI_MODEL_THINKING_EFFORT=max` wire override before every call. Never claim ACP
 echoes a separate effort value when it does not.
 
 The bridge never reads, exports, or rewrites the OAuth credential and scrubs ambient

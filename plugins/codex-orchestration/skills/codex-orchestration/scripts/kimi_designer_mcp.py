@@ -71,6 +71,9 @@ def sanitized_environment() -> dict[str, str]:
         if upper in SENSITIVE_ENV_EXACT or upper.startswith("KIMI_MODEL_"):
             env.pop(name, None)
     env["KIMI_CODE_NO_AUTO_UPDATE"] = "1"
+    # Kimi's managed catalog default is mutable. Pin the audited route on the
+    # wire after scrubbing every ambient model override supplied by the caller.
+    env["KIMI_MODEL_THINKING_EFFORT"] = KIMI_EFFORT
     env["NO_COLOR"] = "1"
     return env
 
@@ -142,7 +145,6 @@ def check_prerequisites() -> dict[str, str]:
         or oauth.get("key") != "oauth/kimi-code"
         or model.get("provider") != KIMI_PROVIDER
         or model.get("model") != KIMI_EFFECTIVE_MODEL
-        or model.get("defaultEffort") != KIMI_EFFORT
         or not isinstance(support_efforts, list)
         or not all(isinstance(item, str) for item in support_efforts)
         or KIMI_EFFORT not in support_efforts
@@ -155,6 +157,7 @@ def check_prerequisites() -> dict[str, str]:
         "acpx_version": ".".join(map(str, acpx_version)),
         "model": KIMI_MODEL,
         "effort": KIMI_EFFORT,
+        "catalog_default_effort": str(model.get("defaultEffort", "")),
         "auth_method": "kimi-code-oauth",
     }
 

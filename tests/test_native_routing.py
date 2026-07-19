@@ -318,7 +318,7 @@ class NativeRoutingTests(unittest.TestCase):
                             "kimi-code/k3": {
                                 "provider": "managed:kimi-code",
                                 "model": "k3",
-                                "defaultEffort": "max",
+                                "defaultEffort": "high",
                                 "supportEfforts": ["low", "high", "max"],
                             }
                         },
