@@ -27,6 +27,7 @@ These facts were source-checked and runtime-tested on July 10, 2026. Always capa
 | `usage_hint_text` | Appended to the spawn tool description | Carries the exact Planner/Advisor/Executor routes where the root chooses children. |
 | `multi_agent_mode_hint_text` | Replaces the default proactive/explicit mode hint and is sent to root and child tasks | Must contain both root and child boundaries. |
 | Claude Fable 5 MCP route | Root-directed `create_plan`, `revise_plan`, and `review_plan` tools invoke the authenticated Claude Code CLI headlessly with no model tools | Built-in cross-provider Planner or Advisor exception; current MCP requests do not provide caller identity, so caller isolation is policy-enforced. |
+| Qwen 3.8 Max Preview MCP route | Root-directed `review_plan` uses the exact model through an allowlisted Alibaba Token Plan Chat Completions endpoint, JSON mode, no tools, and disabled session caching | Built-in subscription-backed Advisor exception. The bridge retrieves the regional key from the OS credential store, validates response model/tool metadata, and requires a plan decision. |
 | Kimi K3 MCP route | Root-directed `create_design_handoff` invokes the authenticated Kimi Code CLI through a fresh ACP session with permissions denied, terminal disabled, an empty temporary cwd, and tool-event rejection | Built-in subscription-backed Designer exception. The bridge verifies the ACP-selected `kimi-code/k3` model, requires catalog support for `max`, and injects the documented `KIMI_MODEL_THINKING_EFFORT=max` wire override; ACP does not echo a separate effort value. |
 | `fork_turns` default | `all` | Different model/effort/role overrides are rejected unless the call uses `none` or a positive partial fork. |
 | Effective concurrency | Determined by the active Codex version and `agents.max_threads` configuration | This plugin never changes the limit or forces a worker count. |
@@ -81,7 +82,7 @@ agent_type="codex_orchestration_executor", fork_turns="none"
 agent_type="codex_orchestration_advisor", fork_turns="none"
 ```
 
-For Claude Fable 5 it names the enabled bundled MCP server and tells the root to use `create_plan`/`revise_plan` for the Planner seat or `review_plan` for the Advisor seat. For Kimi K3 Designer it names the enabled bundled MCP server and tells the root to use `create_design_handoff`. These are root tool calls, not `spawn_agent`, so `fork_turns` does not apply.
+For Claude Fable 5 it names the enabled bundled MCP server and tells the root to use `create_plan`/`revise_plan` for the Planner seat or `review_plan` for the Advisor seat. For Qwen Advisor it names its enabled server and `review_plan`; for Kimi K3 Designer it names the enabled server and `create_design_handoff`. These are root tool calls, not `spawn_agent`, so `fork_turns` does not apply.
 
 The custom mode text is visible in spawned children too. That is why it says: if root, orchestrate; if child, stay within the packet and never spawn.
 
@@ -151,7 +152,7 @@ The configurator writes each owned nested field separately, except when converti
 `--repair` is a separate, preview-first recovery path for a valid saved state whose
 live mode and/or usage hint bytes changed while every other owned control still
 matches. Both live strings must retain the plugin marker. Namespace, spawn metadata,
-plugin-scoped Fable enablement, and any scalar-conversion table shape must match the
+plugin-scoped bundled-bridge enablement, and any scalar-conversion table shape must match the
 saved state exactly. Repair writes only the differing hint fields using the user
 layer version, leaves seat and restore records byte-for-byte unchanged, verifies both
 user and effective readback, restores the pre-repair hints after an effective-layer
@@ -166,7 +167,7 @@ Restore state lives at:
 ~/.codex/.codex-orchestration-routing.json
 ```
 
-It contains the prior and managed values of the four routing fields, chosen Planner/Advisor/Executor routes, schema/version markers, scalar-conversion metadata when needed, and config path. When Claude Fable 5 is selected for either planning seat, it also records only the plugin-scoped MCP launcher overrides that setup touched. It never copies provider definitions, auth stores, account identifiers, or credentials. A normal clean setup contains generated policy text, the namespace value, seat IDs, and restoration metadata. Explicit replacement must retain the user's exact old hint text so disable can restore it; routing hints must never contain credentials. State is written with a same-directory atomic replacement and restrictive file mode where supported. If persistence fails after config apply, the configurator rolls the config back using the returned version.
+It contains the prior and managed values of the four routing fields, chosen Planner/Advisor/Designer/Executor routes, schema/version markers, scalar-conversion metadata when needed, and config path. When a bundled bridge is selected, it also records only the plugin-scoped MCP launcher overrides that setup touched. It never copies provider definitions, auth stores, account identifiers, endpoints, or credentials. A normal clean setup contains generated policy text, the namespace value, seat IDs, region name where applicable, and restoration metadata. Explicit replacement must retain the user's exact old hint text so disable can restore it; routing hints must never contain credentials. State is written with a same-directory atomic replacement and restrictive file mode where supported. If persistence fails after config apply, the configurator rolls the config back using the returned version.
 
 Disable compares every current managed value before restoration. If the user edited a managed field after setup, it stops instead of erasing that work. Without state, each surviving marker proves ownership only of that hint string. Disable may safely remove the marked string or strings, but it leaves metadata visibility and the tool namespace unchanged because their previous values are unknown.
 
@@ -228,23 +229,35 @@ On Windows, in-place update and removal stage the replacement beside the existin
 
 Direct v2 `model` overrides retain the parent's provider. They are the simplest route for an OpenAI root and OpenAI Luna/Terra child.
 
-Claude Fable 5 is the explicit built-in exception for Planner or Advisor. The plugin does not pretend it is a Codex model or translate Anthropic into the Responses protocol. Instead, a disabled-by-default local MCP server invokes the official `claude` CLI with the user's first-party Pro or Max login. Kimi K3 is the explicit built-in exception for Designer: a separate disabled-by-default MCP server invokes the official Kimi Code CLI through `acpx` and the existing Kimi Code OAuth subscription. Setup enables exactly one Python 3.11+ launcher for each selected bridge, and disable restores every prior plugin override value. Codex's TOML editor can retain an inert empty table header after its final key is deleted; the configurator does not risk a broad TOML rewrite for cosmetic cleanup.
+Claude Fable 5 is an explicit built-in exception for Planner or Advisor. The plugin does not pretend it is a Codex model or translate Anthropic into the Responses protocol. Instead, a disabled-by-default local MCP server invokes the official `claude` CLI with the user's first-party Pro or Max login. Qwen 3.8 Max Preview is a separate Advisor exception: its MCP server calls Alibaba's official Token Plan Chat Completions endpoint with an OS-stored regional credential. Kimi K3 is the Designer exception: its MCP server invokes official Kimi Code through `acpx` and the existing OAuth subscription. Setup enables exactly one Python 3.11+ launcher for each selected bridge, and disable restores every prior plugin override value. Codex's TOML editor can retain an inert empty table header after its final key is deleted; the configurator does not risk a broad TOML rewrite for cosmetic cleanup.
 
 The bridge removes `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and Bedrock/Vertex/Foundry selection variables from the child environment. It re-checks `claude auth status`, pins `claude-fable-5` and the saved effort, disables tools and session persistence, disables prompt suggestions, and requires JSON runtime metadata to contain that primary model. Claude Code currently reports the internal helper `claude-haiku-4-5-20251001` during valid Fable calls; the bridge permits only that exact helper ID and returns every observed ID in `used_models`. Missing Fable or any unknown additional model fails closed. Helper rotation therefore requires a reviewed plugin update rather than a wildcard. Setup and status never make a model call.
+
+The Qwen bridge requires Python 3.11 or newer, the exact model
+`qwen3.8-max-preview`, and either the fixed Global or China Token Plan endpoint.
+`--prepare-qwen` installs the exact stable OS-credential helper; the user enrolls
+the matching key through a hidden trusted-terminal prompt. Each call scrubs ambient
+OpenAI, Alibaba, DashScope, model, and Qwen settings; injects the key and allowlisted
+endpoint only into the child; disables custom context and chat recording; permits
+zero tool calls; and uses a disposable empty cwd. JSON output must confirm the exact
+model, contain no tool-linked events or nonzero tool count, and finish with a strict
+two-key JSON review envelope whose decision is `PLAN_APPROVED` or `PLAN_REVISE`.
+Setup and status make no model call.
 
 The Kimi bridge requires Kimi Code CLI 0.27.0 or newer, `acpx` 0.12.0 or newer, and the exact local catalog tuple `managed:kimi-code` / `kimi-code/k3` / OAuth / support for effort `max` with no API key. It scrubs ambient provider keys and `KIMI_MODEL_*` overrides, injects its own documented `KIMI_MODEL_THINKING_EFFORT=max` wire override, starts one stateless ACP session in an empty temporary directory, pins `kimi-code/k3`, disables terminal capability, denies permissions, passes no MCP servers, and rejects tool, filesystem, terminal, or permission events. It accepts only a normal `end_turn` whose first non-empty response line is `DESIGN_HANDOFF`. ACP mechanically confirms the selected model but not a separate effort value, so the bridge re-attests catalog support and controls the wire effort before every call. Setup and status make no model call and the bridge never reads or copies the OAuth credential.
 
 An MCP process is loaded for the lifetime of its Codex task. Updating the plugin or
 repairing policy state cannot replace that already loaded process. If a current-task
 Fable call fails after either operation while a fresh native status check still
-reports a ready first-party login, or a Kimi call fails while status still reports
-the exact OAuth/K3/max tuple, the loaded bridge is stale; fully quit and reopen
+reports a ready first-party login, a Qwen call fails while status still reports its
+exact CLI/helper/credential route ready, or a Kimi call fails while status still
+reports the exact OAuth/K3/max tuple, the loaded bridge is stale; fully quit and reopen
 Codex and start a new task. Do not re-authenticate unless the fresh status check
 itself reports authentication unavailable.
 
-The saved policy authorizes the root to call the selected bridge tools and prohibits children from doing so. Current MCP requests provide no caller identity to the server, so that specific caller boundary is instruction-enforced, not server-authenticated. Both bridges mechanically use the same full saved-state validator as native status/repair/disable and restrict their operation surfaces; Fable runs without tools or persistence, while Kimi runs in a deny-all, no-terminal ACP session and rejects any tool event.
+The saved policy authorizes the root to call the selected bridge tools and prohibits children from doing so. Current MCP requests provide no caller identity to the server, so that specific caller boundary is instruction-enforced, not server-authenticated. All three bridges mechanically use the same full saved-state validator as native status/repair/disable and restrict their operation surfaces; Fable runs without tools or persistence, Qwen permits zero tool calls with custom context and recording disabled, and Kimi runs in a deny-all, no-terminal ACP session that rejects every tool event.
 
-Saved state compatibility is explicit: schema 1 must carry policy version 1 and predates Fable and Planner; schema 2 must carry policy version 2 and may authorize only the historical Fable Advisor shape; schema 3 must carry policy version 3 and adds Planner; schema 4 must carry policy version 4 and adds the optional direct-model Designer route; schema 5 must carry policy version 5 and adds only the sealed `kimi_cli` Designer route. Schema and policy values must be actual JSON integers, not booleans or floats. Legacy state cannot contain fields introduced later; nested snapshots, scalar conversion, MCP launchers, and routes must match an emitted contract; and managed policy strings must carry the plugin marker before status, seat change, disable, or either bridge trusts them. Designer cannot use Fable or a persistent unqualified agent name, and `kimi_cli` is valid only for Designer with exact model, effort, and managed server values. Planner/Advisor independence remains the only route-separation rule. Unknown extensions intentionally fail closed.
+Saved state compatibility is explicit: schema 1 must carry policy version 1 and predates Fable and Planner; schema 2 must carry policy version 2 and may authorize only the historical Fable Advisor shape; schema 3 must carry policy version 3 and adds Planner; schema 4 must carry policy version 4 and adds the optional direct-model Designer route; schema 5 must carry policy version 5 and adds only the sealed `kimi_cli` Designer route; schema 6 must carry policy version 6 and adds only the sealed `qwen_cli` Advisor route. Schema and policy values must be actual JSON integers, not booleans or floats. Legacy state cannot contain fields introduced later; nested snapshots, scalar conversion, MCP launchers, and routes must match an emitted contract; and managed policy strings must carry the plugin marker before status, seat change, disable, or a bridge trusts them. Designer cannot use a planning bridge or persistent unqualified agent name; `kimi_cli` is valid only for Designer; and `qwen_cli` is valid only for Advisor with exact model, native effort, region, and managed server values. Planner/Advisor independence also rejects a direct Qwen Planner paired with the sealed Qwen Advisor. Unknown extensions intentionally fail closed.
 
 Fable setup defaults to `high`. It accepts the Claude Code effort values `low`, `medium`, `high`, `xhigh`, and `max`; the user-facing label `ultra` normalizes to the effective Claude Code value `max` because the CLI has no separate Ultra setting. Setup checks the installed CLI's advertised choices before persisting the route. The bridge reads only the normalized saved value, so tool callers cannot raise the effort at review time. Existing saved `max` routes remain compatible.
 

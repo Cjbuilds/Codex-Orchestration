@@ -31,9 +31,29 @@ KIMI_SERVERS = frozenset(
         "kimi-designer-py",
     }
 )
-BUNDLED_MCP_SERVERS = FABLE_SERVERS | KIMI_SERVERS
+QWEN_MODEL = "qwen3.8-max-preview"
+QWEN_EFFORTS = frozenset({"native"})
+QWEN_REGION_CONFIG = {
+    "global": {
+        "endpoint": "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+        "credential_provider": "qwen-token-plan-global",
+    },
+    "china": {
+        "endpoint": "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+        "credential_provider": "qwen-token-plan-china",
+    },
+}
+QWEN_REGIONS = frozenset(QWEN_REGION_CONFIG)
+QWEN_SERVERS = frozenset(
+    {
+        "qwen-advisor-python3",
+        "qwen-advisor-python",
+        "qwen-advisor-py",
+    }
+)
+BUNDLED_MCP_SERVERS = FABLE_SERVERS | KIMI_SERVERS | QWEN_SERVERS
 
-_SCHEMA_POLICY_PAIRS = {1: 1, 2: 2, 3: 3, 4: 4, 5: 5}
+_SCHEMA_POLICY_PAIRS = {1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6}
 _MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+/@-]{0,199}$")
 _AGENT_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 _EFFORT_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
@@ -163,6 +183,28 @@ def _validate_route(route: Any, *, seat: str, schema: int) -> str:
             type(route["server"]) is str and route["server"] in KIMI_SERVERS,
             "Kimi Designer server is unsupported",
         )
+    elif kind == "qwen_cli":
+        _require(
+            seat == "advisor" and schema >= 6,
+            f"{seat} cannot use Qwen CLI in schema {schema}",
+        )
+        _require(
+            set(route) == {"kind", "model", "effort", "region", "server"},
+            f"{seat} Qwen CLI route has the wrong shape",
+        )
+        _require(route["model"] == QWEN_MODEL, "Qwen CLI model is not pinned")
+        _require(
+            type(route["effort"]) is str and route["effort"] in QWEN_EFFORTS,
+            "Qwen CLI effort is unsupported",
+        )
+        _require(
+            type(route["region"]) is str and route["region"] in QWEN_REGIONS,
+            "Qwen CLI region is unsupported",
+        )
+        _require(
+            type(route["server"]) is str and route["server"] in QWEN_SERVERS,
+            "Qwen Advisor server is unsupported",
+        )
     else:
         raise RoutingStateError(f"{seat} route kind is unsupported")
     return kind
@@ -179,7 +221,11 @@ def _validate_route_separation(planner: Any, advisor: Any) -> None:
     ) or (
         planner_kind == advisor_kind == "agent"
         and planner["agent"] == advisor["agent"]
-    ) or planner_kind == advisor_kind == "fable"
+    ) or planner_kind == advisor_kind == "fable" or (
+        planner_kind == "model"
+        and advisor_kind == "qwen_cli"
+        and planner["model"] == advisor["model"]
+    )
     _require(not same_route, "Planner and Advisor routes are not independent")
 
 
@@ -231,7 +277,7 @@ def _validate_scalar_conversion(state: dict[str, Any], managed: dict[str, Any]) 
 
 
 def validate_routing_state(value: Any) -> dict[str, Any]:
-    """Validate and return one exact, complete persisted schema 1 through 5.
+    """Validate and return one exact, complete persisted schema 1 through 6.
 
     Unknown keys and future extensions are rejected intentionally. Callers must
     perform their own secure file read and any caller-specific path/seat checks.
@@ -341,6 +387,8 @@ def validate_routing_state(value: Any) -> dict[str, Any]:
     selected_servers = {
         route["server"] for route in fable_routes
     }
+    if type(advisor) is dict and advisor.get("kind") == "qwen_cli":
+        selected_servers.add(advisor["server"])
     if type(designer) is dict and designer.get("kind") == "kimi_cli":
         selected_servers.add(designer["server"])
     _require(

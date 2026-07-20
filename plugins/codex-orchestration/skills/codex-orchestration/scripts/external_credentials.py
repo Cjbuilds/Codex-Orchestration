@@ -217,3 +217,51 @@ def credential_ready(
     except (OSError, subprocess.TimeoutExpired):
         return False
     return completed.returncode == 0 and completed.stdout.strip() == "configured"
+
+
+def read_credential(
+    helper: Path,
+    provider_id: str,
+    *,
+    platform: str | None = None,
+    python_executable: Path | None = None,
+) -> str:
+    """Read one credential for a trusted local adapter without decorating it.
+
+    The helper is the only process allowed to print the value. This wrapper
+    captures that stdout in memory, rejects multiline or oversized values, and
+    never includes helper output in an exception.
+    """
+
+    try:
+        completed = subprocess.run(
+            _helper_command(
+                helper,
+                "get",
+                provider_id,
+                platform=platform,
+                python_executable=python_executable,
+            ),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=20,
+            shell=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise CredentialSetupError(
+            "The OS credential store could not be queried."
+        ) from exc
+    if completed.returncode != 0:
+        raise CredentialSetupError(
+            "No usable credential is configured for this provider."
+        )
+    value = completed.stdout.rstrip("\r\n")
+    _require(bool(value), "The OS credential store returned an empty credential.")
+    _require(
+        len(value) <= 8_192 and "\x00" not in value and "\r" not in value and "\n" not in value,
+        "The OS credential store returned an invalid credential.",
+    )
+    return value

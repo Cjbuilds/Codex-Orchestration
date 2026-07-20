@@ -109,15 +109,20 @@ def _bounded(value: str) -> str:
 
 def _git(root: Path, arguments: list[str], *, binary: bool = False) -> str | bytes:
     command = ["git", *arguments]
+    text_options: dict[str, object] = (
+        {"text": True, "encoding": "utf-8", "errors": "strict"}
+        if not binary
+        else {"text": False}
+    )
     try:
         result = subprocess.run(
             command,
             cwd=root,
             capture_output=True,
-            text=not binary,
             check=False,
             timeout=GIT_TIMEOUT_SECONDS,
             shell=False,
+            **text_options,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ReleaseCheckError(f"could not run {command!r}: {exc}") from exc

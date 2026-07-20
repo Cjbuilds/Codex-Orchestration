@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.9.0 — Unreleased
+
+- Add Qwen 3.8 Max Preview as a sealed, independent Advisor through the official
+  Qwen Code CLI and an existing Alibaba Token Plan subscription. The route pins
+  the exact runtime model, uses provider-native reasoning, disables custom context,
+  tools, and chat recording, and requires structured runtime/model evidence plus a
+  `PLAN_APPROVED` or `PLAN_REVISE` decision.
+- Keep the plan credential outside plugin state and routing hints in the operating
+  system credential store. Each call scrubs ambient provider overrides, injects an
+  allowlisted regional Token Plan endpoint only into the child process, runs from a
+  disposable empty directory, and rejects tool-linked, malformed, or wrong-model
+  output.
+- Add routing schema/policy version 6, reversible plugin-scoped Qwen MCP launcher
+  management, Global and China plan-region selection, no-call readiness status,
+  negative security tests, and exact Qwen Code 0.20.0 capability pinning.
+
 ## 0.8.1 — Unreleased
 
 - Keep the subscription-backed Kimi K3 Designer pinned to `max` when the

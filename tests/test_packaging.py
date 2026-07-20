@@ -205,7 +205,7 @@ class PackagingTests(unittest.TestCase):
 
         self.assertEqual(manifest["name"], "codex-orchestration")
         self.assertEqual(manifest["skills"], "./skills/")
-        self.assertEqual(manifest["version"], "0.8.1")
+        self.assertEqual(manifest["version"], "0.9.0")
         self.assertEqual(manifest["mcpServers"], "./.mcp.json")
         self.assertRegex(
             manifest["version"],
@@ -228,7 +228,7 @@ class PackagingTests(unittest.TestCase):
         self.assertFalse((SKILL_ROOT / "scripts" / "update_plugin.py").exists())
         self.assertIn("config/batchWrite", native.read_text(encoding="utf-8"))
         self.assertIn('"--repair"', native.read_text(encoding="utf-8"))
-        self.assertIn('"version": "0.8.1"', native.read_text(encoding="utf-8"))
+        self.assertIn('"version": "0.9.0"', native.read_text(encoding="utf-8"))
         self.assertIn("validate_routing_state", routing_state.read_text(encoding="utf-8"))
         self.assertIn("Standalone custom agent", custom.read_text(encoding="utf-8"))
 
@@ -273,19 +273,23 @@ class PackagingTests(unittest.TestCase):
                 "kimi-designer-python3",
                 "kimi-designer-python",
                 "kimi-designer-py",
+                "qwen-advisor-python3",
+                "qwen-advisor-python",
+                "qwen-advisor-py",
             },
         )
         for name, server in servers.items():
             self.assertFalse(server["enabled"])
             self.assertEqual(server["cwd"], ".")
-            expected = (
-                "fable_advisor_mcp.py"
-                if name.startswith("fable-")
-                else "kimi_designer_mcp.py"
-            )
+            expected = {
+                "fable": "fable_advisor_mcp.py",
+                "kimi": "kimi_designer_mcp.py",
+                "qwen": "qwen_advisor_mcp.py",
+            }[name.split("-", 1)[0]]
             self.assertIn(expected, server["args"][-1])
         self.assertTrue((SKILL_ROOT / "scripts" / "fable_advisor_mcp.py").is_file())
         self.assertTrue((SKILL_ROOT / "scripts" / "kimi_designer_mcp.py").is_file())
+        self.assertTrue((SKILL_ROOT / "scripts" / "qwen_advisor_mcp.py").is_file())
 
     def test_explicit_and_natural_language_invocation_metadata_is_consistent(self) -> None:
         metadata = (SKILL_ROOT / "agents" / "openai.yaml").read_text(encoding="utf-8")
@@ -296,10 +300,10 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("allow_implicit_invocation: true", metadata)
         self.assertNotIn("allow_implicit_invocation: false", metadata)
         self.assertIn(
-            "Use for natural-language questions or requests about whether subscription-backed Kimi K3",
+            "Use for natural-language questions or requests about whether subscription-backed Qwen 3.8 Max Preview",
             skill,
         )
-        self.assertIn("available or callable as Designer", skill)
+        self.assertIn("available or callable as Advisor, Designer", skill)
         self.assertIn("is Kimi available to use as Designer?", readme)
         self.assertIn("/codex-orchestration setup executor:", readme)
         self.assertIn("GPT-5.6 Luna Extra High", readme)
@@ -341,7 +345,7 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("@openai/codex@0.144.1", workflow)
         smoke_text = smoke.read_text(encoding="utf-8")
         self.assertIn('OLD_VERSION = "0.5.0"', smoke_text)
-        self.assertIn('NEW_VERSION = "0.8.1"', smoke_text)
+        self.assertIn('NEW_VERSION = "0.9.0"', smoke_text)
         self.assertIn("old Advisor-only cache unexpectedly supports Planner", smoke_text)
         self.assertIn("Upgraded installed skill is missing Planner contract", smoke_text)
         self.assertIn("reused the Advisor-only 0.5.0 cache directory", smoke_text)
@@ -349,6 +353,7 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("configure_orchestration.py", smoke_text)
         self.assertIn("fable_advisor_mcp.py", smoke_text)
         self.assertIn("kimi_designer_mcp.py", smoke_text)
+        self.assertIn("qwen_advisor_mcp.py", smoke_text)
         self.assertIn('"method": "initialize"', smoke_text)
         self.assertIn('"method": "tools/list"', smoke_text)
         self.assertIn('"marketplace",\n                    "upgrade"', smoke_text)
@@ -374,7 +379,7 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("never creates credentials or bypasses permissions", readme)
         self.assertIn("Codex decides when delegation or parallel work is useful", readme)
         self.assertIn(
-            "Fable 5 and the Kimi K3 Designer bridge are the two sealed subscription exceptions",
+            "Qwen Advisor, Fable 5, and the Kimi K3 Designer bridge are the three sealed subscription exceptions",
             readme,
         )
         self.assertIn('ROUTING_TOOL_NAMESPACE = "agents"', routing_state)

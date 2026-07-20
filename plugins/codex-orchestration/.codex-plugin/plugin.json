@@ -1,6 +1,6 @@
 {
   "name": "codex-orchestration",
-  "version": "0.8.1",
+  "version": "0.9.0",
   "description": "Give Codex and audited external or subscription models safe, bounded roles.",
   "author": {
     "name": "CJ Zafir",
@@ -21,7 +21,7 @@
   "interface": {
     "displayName": "Codex Orchestration",
     "shortDescription": "Plan, review, design, and build with multiple models",
-    "longDescription": "Bring Fable 5, Kimi K3 through Kimi Code OAuth, and audited API models into Codex as bounded Planner, Advisor, Designer, Executor, or custom roles without changing the root model or Desktop model picker.",
+    "longDescription": "Bring Qwen 3.8 Max Preview, Fable 5, Kimi K3 through Kimi Code OAuth, and audited API models into Codex as bounded Planner, Advisor, Designer, Executor, or custom roles without changing the root model or Desktop model picker.",
     "developerName": "CJ Zafir",
     "category": "Productivity",
     "websiteURL": "https://github.com/Cjbuilds/Codex-Orchestration",
@@ -38,7 +38,7 @@
     "defaultPrompt": [
       "/codex-orchestration setup designer: GPT-5.6 Sol High, executor: GPT-5.6 Luna Extra High",
       "/codex-orchestration --update",
-      "/codex-orchestration Planner: Claude Fable 5 High, Designer: Kimi K3"
+      "/codex-orchestration setup advisor: Qwen 3.8 Max Preview, designer: Kimi K3, executor: GPT-5.6 Luna Extra High"
     ]
   }
 }

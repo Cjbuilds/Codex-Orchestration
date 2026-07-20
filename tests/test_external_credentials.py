@@ -133,6 +133,39 @@ class ExternalCredentialTests(unittest.TestCase):
             ):
                 CREDENTIALS.verify_stable_helper(home)
 
+    def test_read_credential_returns_one_undecorated_secret_in_memory(self) -> None:
+        helper = Path(tempfile.gettempdir()).resolve() / "helper.py"
+        completed = mock.Mock(returncode=0, stdout="secret-value\n", stderr="")
+        with mock.patch.object(
+            CREDENTIALS.subprocess, "run", return_value=completed
+        ) as run:
+            value = CREDENTIALS.read_credential(
+                helper, "qwen-token-plan-global", platform="linux"
+            )
+        self.assertEqual(value, "secret-value")
+        self.assertEqual(
+            run.call_args.args[0],
+            [str(helper), "get", "--provider", "qwen-token-plan-global"],
+        )
+
+    def test_read_credential_rejects_output_without_echoing_it(self) -> None:
+        helper = Path(tempfile.gettempdir()).resolve() / "helper.py"
+        secret = "sensitive-test-value"
+        cases = [
+            mock.Mock(returncode=1, stdout=secret, stderr=secret),
+            mock.Mock(returncode=0, stdout=f"{secret}\nsecond", stderr=""),
+            mock.Mock(returncode=0, stdout="x" * 8193, stderr=""),
+        ]
+        for completed in cases:
+            with self.subTest(returncode=completed.returncode), mock.patch.object(
+                CREDENTIALS.subprocess, "run", return_value=completed
+            ):
+                with self.assertRaises(CREDENTIALS.CredentialSetupError) as failure:
+                    CREDENTIALS.read_credential(
+                        helper, "qwen-token-plan-global", platform="linux"
+                    )
+                self.assertNotIn(secret, str(failure.exception))
+
     def test_macos_enrollment_uses_native_prompt_and_never_an_argument(self) -> None:
         calls: list[list[str]] = []
 

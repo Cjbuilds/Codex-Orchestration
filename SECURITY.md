@@ -87,6 +87,21 @@ Code helpers. The managed workflow authorizes only root to call planning tools, 
 MCP does not provide caller identity; that caller boundary remains
 instruction-enforced rather than server-authenticated.
 
+The bundled Qwen Advisor bridge accepts only schema-validated Advisor state, exact
+`qwen3.8-max-preview`, and one allowlisted Global or China Token Plan endpoint. Its
+credential is retrieved from the operating-system credential store only for a review
+and sent only in the HTTPS Authorization header. The bridge disables ambient proxies
+and redirects, sets the API's session cache to disabled, sends no tool definitions or
+conversation ID, and requests server-enforced JSON mode. Structured output must
+report the pinned model, one completed assistant choice, no tool or function call,
+consistent usage metadata, and an exact two-key review envelope with
+`PLAN_APPROVED` or `PLAN_REVISE`. Unknown models, regions, credential types, HTTP
+responses, helper bytes, and output shapes fail closed. The credential, helper
+output, HTTP error body, and endpoint response outside the validated review are never
+returned or persisted by the plugin. An immutable Python string cannot be securely
+erased from process memory; short request lifetime is the confidentiality boundary
+after retrieval.
+
 The bundled Kimi K3 Designer bridge accepts only the exact local Kimi Code OAuth
 catalog route and rejects API-key-backed or ambiently overridden configurations. It
 scrubs provider keys and every caller-supplied `KIMI_MODEL_*` value, then injects
@@ -101,11 +116,14 @@ wire effort itself, and never represents that as runtime effort telemetry. The O
 credential remains owned by Kimi Code CLI and is never read, copied, logged, or
 returned by the plugin.
 
-Routing schema/policy version 5 adds the sealed `kimi_cli` Designer route while
-retaining strict validation for schemas 1–4. Legacy schemas cannot smuggle newer
-fields. Persistent Designer accepts only a direct same-provider model or the exact
-bundled Kimi route, never the privileged Fable MCP route or a project-shadowable
-unqualified agent name.
+Routing schema/policy version 6 adds the sealed `qwen_cli` Advisor route (a stable
+saved-state tag for the Token Plan transport) while
+retaining strict validation for schemas 1–5; schema 5 introduced only the sealed
+`kimi_cli` Designer route. Legacy schemas cannot smuggle newer fields. Persistent
+Designer accepts only a direct same-provider model or the exact bundled Kimi route,
+never a privileged planning bridge or project-shadowable unqualified agent name.
+Planner and Advisor must remain independent, including rejecting a direct Qwen
+Planner paired with the sealed Qwen Advisor.
 Cross-provider/custom Designers remain task-local and require current-project
 validation immediately before use. Designer authority is
 policy-bounded: it reports only to root, cannot contact other seats or spawn

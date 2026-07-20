@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import queue
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -24,12 +25,16 @@ import threading
 import time
 from typing import Any
 
+import external_credentials
 from routing_state import (
     BUNDLED_MCP_SERVERS,
     FABLE_EFFORTS,
     FABLE_MODEL,
     KIMI_MODEL,
     MANAGED_MARKER,
+    QWEN_MODEL,
+    QWEN_REGION_CONFIG,
+    QWEN_REGIONS,
     ROUTING_TOOL_NAMESPACE,
     RoutingStateError,
     validate_routing_state,
@@ -41,8 +46,8 @@ except ModuleNotFoundError as exc:  # pragma: no cover - Python < 3.11
     raise SystemExit("Python 3.11 or newer is required (missing tomllib).") from exc
 
 
-POLICY_VERSION = 5
-STATE_SCHEMA = 5
+POLICY_VERSION = 6
+STATE_SCHEMA = 6
 STATE_FILENAME = ".codex-orchestration-routing.json"
 PROBE_VALUE = "CODEX_ORCHESTRATION_CAPABILITY_PROBE"
 PLUGIN_ID = "codex-orchestration@codex-orchestration"
@@ -58,6 +63,11 @@ KIMI_SERVERS = {
     "kimi-designer-python3": ("python3", []),
     "kimi-designer-python": ("python", []),
     "kimi-designer-py": ("py", ["-3.11"]),
+}
+QWEN_SERVERS = {
+    "qwen-advisor-python3": ("python3", []),
+    "qwen-advisor-python": ("python", []),
+    "qwen-advisor-py": ("py", ["-3.11"]),
 }
 RPC_TIMEOUT_SECONDS = 20
 PROBE_TIMEOUT_SECONDS = 15
@@ -95,6 +105,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     action.add_argument("--disable", action="store_true")
+    action.add_argument(
+        "--prepare-qwen",
+        action="store_true",
+        help=(
+            "Install the stable OS-credential helper for Qwen Advisor and print "
+            "the trusted-terminal enrollment command."
+        ),
+    )
     parser.add_argument(
         "--require-effective",
         action="store_true",
@@ -138,10 +156,21 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use the bundled Claude Fable 5 advisor through Claude Code.",
     )
+    advisor.add_argument(
+        "--advisor-qwen",
+        action="store_true",
+        help="Use Qwen 3.8 Max Preview as a sealed Token Plan API Advisor.",
+    )
     parser.add_argument(
         "--advisor-effort",
         default="auto",
         help="Exact supported advisor effort, or auto.",
+    )
+    parser.add_argument(
+        "--qwen-region",
+        choices=tuple(sorted(QWEN_REGIONS)),
+        default="global",
+        help="Alibaba plan region for --advisor-qwen (default: global).",
     )
 
     designer = parser.add_mutually_exclusive_group()
@@ -203,6 +232,7 @@ def _validate_args(args: argparse.Namespace) -> None:
             args.advisor_model,
             args.advisor_agent,
             args.advisor_fable,
+            args.advisor_qwen,
             args.designer_model,
             args.designer_kimi,
             args.executor_effort != "auto",
@@ -215,6 +245,7 @@ def _validate_args(args: argparse.Namespace) -> None:
         ("--status", args.status),
         ("--repair", args.repair),
         ("--disable", args.disable),
+        ("--prepare-qwen", args.prepare_qwen),
     ):
         if selected and seat_settings:
             raise ConfigurationError(f"{action} does not accept seat settings.")
@@ -224,7 +255,15 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ConfigurationError(
             "--repair cannot be combined with setup replacement or model controls."
         )
-    if not args.status and not args.repair and not args.disable and not (
+    if args.prepare_qwen and (
+        args.replace_existing_policy
+        or args.confirm_unlisted_models
+        or args.allow_incompatible_client
+    ):
+        raise ConfigurationError(
+            "--prepare-qwen does not accept routing replacement or client controls."
+        )
+    if not args.status and not args.repair and not args.disable and not args.prepare_qwen and not (
         args.executor_model or args.executor_agent
     ):
         raise ConfigurationError(
@@ -247,6 +286,13 @@ def _validate_args(args: argparse.Namespace) -> None:
         normalize_fable_effort(args.planner_effort)
     if args.advisor_fable:
         normalize_fable_effort(args.advisor_effort)
+    if args.advisor_qwen and args.advisor_effort not in {"auto", "native"}:
+        raise ConfigurationError(
+            "Qwen 3.8 Max Preview uses provider-native reasoning; omit "
+            "--advisor-effort or use native."
+        )
+    if not (args.advisor_qwen or args.prepare_qwen) and args.qwen_region != "global":
+        raise ConfigurationError("--qwen-region requires --advisor-qwen or --prepare-qwen.")
     if args.planner_fable and args.advisor_fable:
         raise ConfigurationError(
             "Planner and Advisor routes must be distinct; both cannot use Claude Fable 5."
@@ -421,7 +467,7 @@ class AppServer:
                     "clientInfo": {
                         "name": "codex_orchestration_installer",
                         "title": "Codex Orchestration Installer",
-                        "version": "0.8.1",
+                        "version": "0.9.0",
                     },
                     "capabilities": {"experimentalApi": True},
                 },
@@ -614,11 +660,16 @@ def validate_planning_routes(
     ) or (
         planner_kind == advisor_kind == "agent"
         and planner.get("agent") == advisor.get("agent")
-    ) or planner_kind == advisor_kind == "fable"
+    ) or planner_kind == advisor_kind == "fable" or (
+        planner_kind == "model"
+        and advisor_kind == "qwen_cli"
+        and planner.get("model") == advisor.get("model")
+    )
     if identical:
         raise ConfigurationError(
             "Planner and Advisor routes must be distinct (different direct model IDs, "
-            "different custom-agent names, and at most one Claude Fable 5 seat)."
+            "different custom-agent names, at most one Claude Fable 5 seat, and "
+            "no direct Planner duplicate of the sealed Qwen Advisor)."
         )
 
 
@@ -884,6 +935,30 @@ def select_kimi_server() -> str:
     )
 
 
+def select_qwen_server() -> str:
+    for server, (launcher, prefix) in QWEN_SERVERS.items():
+        executable = shutil.which(launcher)
+        if not executable:
+            continue
+        try:
+            result = subprocess.run(
+                [executable, *prefix, "--version"],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=PROBE_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        match = re.search(r"Python\s+(\d+)\.(\d+)", result.stdout)
+        if result.returncode == 0 and match and tuple(map(int, match.groups())) >= (3, 11):
+            return server
+    raise ConfigurationError(
+        "Qwen Advisor requires a Python 3.11+ launcher named python3, python, or py."
+    )
+
+
 def verify_fable_prerequisites(effort: str) -> dict[str, str]:
     try:
         from fable_advisor_mcp import AdvisorError, check_claude_auth, resolve_claude
@@ -950,6 +1025,57 @@ def verify_kimi_prerequisites() -> dict[str, str]:
         raise ConfigurationError(str(exc)) from exc
 
 
+def verify_qwen_prerequisites(region: str) -> dict[str, str]:
+    try:
+        from qwen_advisor_mcp import QwenAdvisorError, check_prerequisites
+    except ImportError as exc:  # pragma: no cover - corrupt package
+        raise ConfigurationError("The bundled Qwen Advisor bridge is missing.") from exc
+    try:
+        return check_prerequisites(region)
+    except QwenAdvisorError as exc:
+        raise ConfigurationError(str(exc)) from exc
+
+
+def prepare_qwen_credential(
+    codex_home_override: Path | None,
+    region: str,
+    *,
+    apply: bool,
+) -> int:
+    home = (
+        codex_home_override.expanduser().absolute()
+        if codex_home_override is not None
+        else Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
+        .expanduser()
+        .absolute()
+    )
+    selected = QWEN_REGION_CONFIG[region]
+    provider = selected["credential_provider"]
+    target = home / "codex-orchestration" / "bin" / external_credentials.HELPER_NAME
+    print(f"Qwen Advisor region: {region}")
+    print(f"Credential store label: {provider}")
+    print(f"Stable helper: {target}")
+    if not apply:
+        print(
+            "Dry run only. Re-run with --prepare-qwen --apply to install or verify "
+            "the helper and receive the trusted-terminal enrollment command."
+        )
+        return 0
+    try:
+        helper, _ = external_credentials.install_stable_helper(home)
+    except external_credentials.CredentialSetupError as exc:
+        raise ConfigurationError(f"Could not prepare the Qwen credential helper: {exc}") from exc
+    if external_credentials.credential_ready(helper, provider):
+        print("Qwen Advisor credential: configured in the OS credential store")
+        return 0
+    command = external_credentials.enrollment_command(helper, provider)
+    rendered = subprocess.list2cmdline(command) if os.name == "nt" else shlex.join(command)
+    print("Qwen Advisor credential: not configured")
+    print("Run this command in a trusted local terminal; the secret prompt is hidden:")
+    print(rendered)
+    return 0
+
+
 def _route_summary(route: dict[str, Any]) -> str:
     if route["kind"] == "agent":
         return f"custom agent {route['agent']}"
@@ -957,6 +1083,8 @@ def _route_summary(route: dict[str, Any]) -> str:
         return f"Claude Fable 5 {route['effort']}"
     if route["kind"] == "kimi_cli":
         return "Kimi K3 max (Kimi Code subscription)"
+    if route["kind"] == "qwen_cli":
+        return f"Qwen 3.8 Max Preview native ({route['region']} plan)"
     return f"{route['model']}@{route['effort']}"
 
 
@@ -1093,7 +1221,7 @@ On PLAN_REVISE, record the latest finding IDs before revision. After the Planner
 
 When executor delegation materially improves speed, cost, quality, or context isolation, use only the configured executor route. Give each executor one bounded, self-contained packet with objective, relevant facts, constraints, owned files or read-only scope, dependencies, acceptance criteria, verification, and handoff format. Inspect every handoff, integrate it, and run final checks yourself.
 
-Explicit user instructions win, including no-subagents and task-local seat overrides. Persistent and task-local Planner and Advisor routes must remain distinct: reject the same direct model ID, the same custom-agent name, or Fable in both seats. This policy does not create or change a Goal, weaken approvals, alter permissions, or force a worker count.
+Explicit user instructions win, including no-subagents and task-local seat overrides. Persistent and task-local Planner and Advisor routes must remain distinct: reject the same direct model ID, the same custom-agent name, Fable in both seats, or a direct Qwen Planner paired with the sealed Qwen Advisor. This policy does not create or change a Goal, weaken approvals, alter permissions, or force a worker count.
 
 Planner and Advisor are policy-isolated, root-directed seats: they cannot contact each other, Designer, or Executors, spawn descendants, edit files, execute work, or release Executor. They return only to the root. Designer is also root-directed: it cannot contact Planner, Advisor, or Executor, spawn descendants, redesign the root plan, change implementation code, or release Executor. Designer may edit only explicitly delegated design artifacts. Bundled MCP requests do not carry caller identity, so caller isolation is instruction-enforced even when a bridge disables tools and persistence. If you are a spawned child, stay inside the supplied packet, report only to the root, never call planning tools, and never spawn descendants. An Executor never redesigns the root plan or contacts Planner, Advisor, or Designer.
 """
@@ -1115,7 +1243,17 @@ Planner and Advisor are policy-isolated, root-directed seats: they cannot contac
         )
     else:
         planner_hint = "No Planner route is configured; the root drafts and revises."
-    if advisor is not None and advisor["kind"] == "fable":
+    if advisor is not None and advisor["kind"] == "qwen_cli":
+        advisor_hint = (
+            "For an advisor review, call `review_plan` from MCP server "
+            f"{json.dumps(advisor['server'])} with the round's self-contained packet. "
+            "This is a sealed read-only root tool call through Alibaba's Token Plan "
+            "JSON API, not a "
+            "spawned child. Require PLAN_APPROVED or PLAN_REVISE and runtime model "
+            "qwen3.8-max-preview; fail closed unless the user explicitly made "
+            "Advisor failure best-effort for the current task."
+        )
+    elif advisor is not None and advisor["kind"] == "fable":
         advisor_hint = (
             "For an advisor review, call `review_plan` from MCP server "
             f"{json.dumps(advisor['server'])} with the round's self-contained packet. "
@@ -1161,7 +1299,7 @@ For delegated executor work, call this tool with {_spawn_route(executor)}, fork_
 
 {provider_guard}
 
-Never use fork_turns = "all" with model, reasoning_effort, or agent_type: a full-history fork inherits the root route and rejects those overrides. Never silently substitute the root model when an exact child route is unavailable. Report the unavailable route to the root. A user's explicit current-task model, effort, agent, or no-subagents instruction overrides this saved default, but a task-local Planner and Advisor must still be distinct: reject the same direct model ID, the same custom-agent name, or Fable in both seats.
+Never use fork_turns = "all" with model, reasoning_effort, or agent_type: a full-history fork inherits the root route and rejects those overrides. Never silently substitute the root model when an exact child route is unavailable. Report the unavailable route to the root. A user's explicit current-task model, effort, agent, or no-subagents instruction overrides this saved default, but a task-local Planner and Advisor must still be distinct: reject the same direct model ID, the same custom-agent name, Fable in both seats, or a direct Qwen Planner paired with the sealed Qwen Advisor.
 
 If you are a spawned child, do not call this tool or create descendants. Finish only your assigned packet and return to the root.
 """
@@ -1354,6 +1492,7 @@ def _status(
         print(f"Config: {app.config_path}")
         fable_available = True
         kimi_available = True
+        qwen_available = True
         if state_matches:
             print(f"Executor: {_route_summary(state['executor'])}")
             planner = state.get("planner")
@@ -1376,6 +1515,18 @@ def _status(
                 else:
                     print(
                         "Claude Fable 5: ready — first-party login; no model call made"
+                    )
+            if isinstance(advisor, dict) and advisor.get("kind") == "qwen_cli":
+                try:
+                    ready = verify_qwen_prerequisites(advisor["region"])
+                except ConfigurationError as exc:
+                    qwen_available = False
+                    print(f"Qwen Advisor: unavailable — {exc}")
+                else:
+                    print(
+                        "Qwen Advisor: ready — OS credential store and sealed "
+                        f"{ready['protocol']} {advisor['region']} route; "
+                        "no model call made"
                     )
             if isinstance(designer, dict) and designer.get("kind") == "kimi_cli":
                 try:
@@ -1451,6 +1602,7 @@ def _status(
             and agent_routes_available
             and fable_available
             and kimi_available
+            and qwen_available
             and not role_issues
             and not orphaned_roles
         )
@@ -1627,7 +1779,8 @@ def _prepare_setup_state(
     bundled_routes = [
         route
         for route in (planner, advisor, designer)
-        if isinstance(route, dict) and route.get("kind") in {"fable", "kimi_cli"}
+        if isinstance(route, dict)
+        and route.get("kind") in {"fable", "kimi_cli", "qwen_cli"}
     ]
     manage_mcp = (
         bool(bundled_routes)
@@ -2011,6 +2164,12 @@ def main() -> int:
     args = parse_args()
     try:
         _validate_args(args)
+        if args.prepare_qwen:
+            return prepare_qwen_credential(
+                args.codex_home,
+                args.qwen_region,
+                apply=args.apply,
+            )
         target = resolve_binary(args.codex_bin)
         binaries = discover_compatibility_binaries(target, args.compat_bin)
         if args.status:
@@ -2092,6 +2251,7 @@ def main() -> int:
                 else None
             )
             kimi_server = select_kimi_server() if args.designer_kimi else None
+            qwen_server = select_qwen_server() if args.advisor_qwen else None
             if args.planner_model:
                 planner_effort = resolve_model_effort(
                     "Planner",
@@ -2137,6 +2297,14 @@ def main() -> int:
                     "effort": normalize_fable_effort(args.advisor_effort),
                     "server": fable_server,
                 }
+            elif args.advisor_qwen:
+                advisor = {
+                    "kind": "qwen_cli",
+                    "model": QWEN_MODEL,
+                    "effort": "native",
+                    "region": args.qwen_region,
+                    "server": qwen_server,
+                }
 
             if args.designer_model:
                 designer_effort = resolve_model_effort(
@@ -2166,6 +2334,11 @@ def main() -> int:
             }
             for effort in sorted(fable_efforts):
                 fable_auth = verify_fable_prerequisites(effort)
+            qwen_ready = (
+                verify_qwen_prerequisites(args.qwen_region)
+                if args.advisor_qwen
+                else None
+            )
             kimi_ready = verify_kimi_prerequisites() if args.designer_kimi else None
 
             verified_agents = verify_agent_routes(
@@ -2207,6 +2380,12 @@ def main() -> int:
             if fable_auth is not None:
                 print(
                     "Claude Fable 5 login: ready — first-party; "
+                    "setup makes no model call"
+                )
+            if qwen_ready is not None:
+                print(
+                    "Qwen Advisor: ready — OS credential store and sealed "
+                    f"{qwen_ready['protocol']} {args.qwen_region} route; "
                     "setup makes no model call"
                 )
             if kimi_ready is not None:

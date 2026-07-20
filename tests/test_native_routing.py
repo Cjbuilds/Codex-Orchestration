@@ -445,6 +445,24 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertNotIn("tool_namespace", mode + usage)
         self.assertNotIn("enabled = true", mode + usage)
 
+    def test_policy_routes_qwen_advisor_through_sealed_root_tool(self) -> None:
+        executor = {"kind": "model", "model": "gpt-5.6-luna", "effort": "xhigh"}
+        planner = {"kind": "model", "model": "gpt-5.6-sol", "effort": "xhigh"}
+        advisor = {
+            "kind": "qwen_cli",
+            "model": NATIVE.QWEN_MODEL,
+            "effort": "native",
+            "region": "global",
+            "server": "qwen-advisor-python3",
+        }
+        mode, usage = NATIVE.build_policy(executor, planner, advisor, None)
+
+        self.assertIn("direct Qwen Planner paired with the sealed Qwen Advisor", mode)
+        self.assertIn("qwen-advisor-python3", usage)
+        self.assertIn("Token Plan JSON API", usage)
+        self.assertIn("runtime model qwen3.8-max-preview", usage)
+        self.assertIn("not a spawned child", usage)
+
     def test_policy_root_fallback_planner_without_advisor_and_fable_hints(self) -> None:
         executor = {"kind": "model", "model": "gpt-5.6-luna", "effort": "high"}
         advisor = {"kind": "model", "model": "gpt-5.6-terra", "effort": "high"}
@@ -633,8 +651,8 @@ class NativeRoutingTests(unittest.TestCase):
         state = json.loads(
             (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
         )
-        self.assertEqual(state["schema"], 5)
-        self.assertEqual(state["policy_version"], 5)
+        self.assertEqual(state["schema"], 6)
+        self.assertEqual(state["policy_version"], 6)
         self.assertEqual(state["planner"]["effort"], "xhigh")
         self.assertEqual(state["designer"]["effort"], "medium")
 
@@ -660,7 +678,7 @@ class NativeRoutingTests(unittest.TestCase):
         state = json.loads(
             (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
         )
-        self.assertEqual(state["schema"], 5)
+        self.assertEqual(state["schema"], 6)
         self.assertEqual(state["designer"]["kind"], "kimi_cli")
         self.assertEqual(state["designer"]["model"], "kimi-code/k3")
         self.assertEqual(state["designer"]["effort"], "max")
@@ -684,8 +702,41 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertNotIn("enabled", restored_servers[planner_selected])
         self.assertFalse((self.home / NATIVE.STATE_FILENAME).exists())
 
-    def test_legacy_state_schemas_upgrade_to_five_without_losing_restore(self) -> None:
-        for legacy_schema in (1, 2, 3, 4):
+    def test_prepare_qwen_installs_only_stable_helper_and_prints_hidden_prompt_lane(self) -> None:
+        target = (
+            self.home
+            / "codex-orchestration"
+            / "bin"
+            / NATIVE.external_credentials.HELPER_NAME
+        )
+        preview = self.run_script(
+            "--prepare-qwen",
+            "--qwen-region",
+            "china",
+            allow_incompatible=False,
+        )
+        self.assertIn("Dry run only", preview.stdout)
+        self.assertFalse(target.exists())
+
+        applied = self.run_script(
+            "--prepare-qwen",
+            "--qwen-region",
+            "china",
+            "--apply",
+            allow_incompatible=False,
+        )
+        self.assertTrue(target.is_file())
+        packaged = Path(NATIVE.external_credentials.__file__).with_name(
+            NATIVE.external_credentials.HELPER_NAME
+        )
+        self.assertEqual(target.read_bytes(), packaged.read_bytes())
+        self.assertTrue(
+            "credential: configured" in applied.stdout
+            or "secret prompt is hidden" in applied.stdout
+        )
+
+    def test_legacy_state_schemas_upgrade_to_six_without_losing_restore(self) -> None:
+        for legacy_schema in (1, 2, 3, 4, 5):
             with self.subTest(schema=legacy_schema):
                 setup_arguments = ["--executor-model", "gpt-5.6-luna"]
                 if legacy_schema == 2:
@@ -727,8 +778,8 @@ class NativeRoutingTests(unittest.TestCase):
                     "--apply",
                 )
                 upgraded = json.loads(state_path.read_text(encoding="utf-8"))
-                self.assertEqual(upgraded["schema"], 5)
-                self.assertEqual(upgraded["policy_version"], 5)
+                self.assertEqual(upgraded["schema"], 6)
+                self.assertEqual(upgraded["policy_version"], 6)
                 self.assertEqual(upgraded["previous"], original_previous)
                 self.assertEqual(upgraded["planner"]["model"], "gpt-5.6-sol")
                 self.assertEqual(upgraded["designer"]["model"], "gpt-5.6-luna")
@@ -747,7 +798,15 @@ class NativeRoutingTests(unittest.TestCase):
         state_path = self.home / NATIVE.STATE_FILENAME
         current = json.loads(state_path.read_text(encoding="utf-8"))
 
-        for schema, wrong_policy in ((1, 2), (2, 3), (3, 4), (4, 5), (5, 1), (5, True)):
+        for schema, wrong_policy in (
+            (1, 2),
+            (2, 3),
+            (3, 4),
+            (4, 5),
+            (5, 6),
+            (6, 1),
+            (6, True),
+        ):
             with self.subTest(schema=schema, policy=wrong_policy):
                 state = json.loads(json.dumps(current))
                 state["schema"] = schema

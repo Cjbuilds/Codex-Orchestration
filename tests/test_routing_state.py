@@ -36,6 +36,16 @@ def fable_route(server: str = "fable-advisor-python3") -> dict[str, str]:
     }
 
 
+def qwen_route(server: str = "qwen-advisor-python3") -> dict[str, str]:
+    return {
+        "kind": "qwen_cli",
+        "model": STATE.QWEN_MODEL,
+        "effort": "native",
+        "region": "global",
+        "server": server,
+    }
+
+
 def genuine_state(schema: int) -> dict[str, object]:
     managed: dict[str, object] = {
         "mode": f"{STATE.MANAGED_MARKER}\nmode body",
@@ -71,13 +81,15 @@ def genuine_state(schema: int) -> dict[str, object]:
             "model": "gpt-designer",
             "effort": "high",
         }
-    elif schema == 5:
+    elif schema >= 5:
         state["designer"] = {
             "kind": "kimi_cli",
             "model": STATE.KIMI_MODEL,
             "effort": "max",
             "server": "kimi-designer-python3",
         }
+    if schema == 6:
+        state["advisor"] = qwen_route()
     if schema >= 2:
         managed["mcp"] = {
             "fable-advisor-python3": True,
@@ -87,15 +99,18 @@ def genuine_state(schema: int) -> dict[str, object]:
             "fable-advisor-python3": snapshot(),
             "fable-advisor-python": snapshot(False, present=True),
         }
-        if schema == 5:
+        if schema >= 5:
             managed["mcp"]["kimi-designer-python3"] = True
             previous["mcp"]["kimi-designer-python3"] = snapshot()
+        if schema == 6:
+            managed["mcp"]["qwen-advisor-python3"] = True
+            previous["mcp"]["qwen-advisor-python3"] = snapshot()
     return state
 
 
 class RoutingStateTests(unittest.TestCase):
-    def test_genuine_schemas_one_through_five_are_accepted(self) -> None:
-        for schema in (1, 2, 3, 4, 5):
+    def test_genuine_schemas_one_through_six_are_accepted(self) -> None:
+        for schema in (1, 2, 3, 4, 5, 6):
             with self.subTest(schema=schema):
                 state = genuine_state(schema)
                 self.assertIs(STATE.validate_routing_state(state), state)
@@ -226,10 +241,42 @@ class RoutingStateTests(unittest.TestCase):
             "server": "kimi-designer-python3",
         }
         scenarios.append(("schema 4 Kimi", schema_four))
+        schema_five = genuine_state(5)
+        schema_five["advisor"] = qwen_route()
+        schema_five["managed"]["mcp"]["qwen-advisor-python3"] = True
+        schema_five["previous"]["mcp"]["qwen-advisor-python3"] = snapshot()
+        scenarios.append(("schema 5 Qwen", schema_five))
 
         for label, state in scenarios:
             with self.subTest(label=label), self.assertRaises(STATE.RoutingStateError):
                 STATE.validate_routing_state(state)
+
+    def test_qwen_route_fails_closed_on_every_pinned_field(self) -> None:
+        baseline = genuine_state(6)
+        mutations = [
+            ("wrong model", lambda route: route.update(model="qwen3.7-max")),
+            ("wrong effort", lambda route: route.update(effort="high")),
+            ("wrong region", lambda route: route.update(region="future")),
+            ("wrong server", lambda route: route.update(server="future-server")),
+            ("extra key", lambda route: route.update(future=True)),
+        ]
+        for label, mutate in mutations:
+            with self.subTest(label=label):
+                state = deepcopy(baseline)
+                mutate(state["advisor"])
+                with self.assertRaises(STATE.RoutingStateError):
+                    STATE.validate_routing_state(state)
+
+    def test_direct_qwen_planner_cannot_duplicate_sealed_qwen_advisor(self) -> None:
+        state = genuine_state(6)
+        state["planner"] = {
+            "kind": "model",
+            "model": STATE.QWEN_MODEL,
+            "effort": "high",
+        }
+        state["managed"]["mcp"]["fable-advisor-python3"] = False
+        with self.assertRaises(STATE.RoutingStateError):
+            STATE.validate_routing_state(state)
 
 
 if __name__ == "__main__":

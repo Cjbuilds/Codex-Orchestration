@@ -74,6 +74,7 @@ class SkillContractTests(unittest.TestCase):
     def test_ready_role_selection_uses_concise_activation_confirmation(self) -> None:
         expected = """```text
 Planner — Fable 5 high: Activated
+Advisor — Qwen 3.8 Max Preview: Activated
 Designer — Kimi K3: Activated
 Executor — GPT-5.6 Sol high: Activated
 ```"""
@@ -117,7 +118,19 @@ Executor — GPT-5.6 Sol high: Activated
         self.assertIn("requires ACP runtime model `kimi-code/k3`", SKILL)
         self.assertIn("KIMI_MODEL_THINKING_EFFORT=max", SKILL)
         self.assertIn("never reads or copies the OAuth token", SKILL)
-        self.assertIn("Never silently substitute one lane for the other", EXTERNAL_REFERENCE)
+        self.assertIn("Never silently substitute one lane for\nanother", EXTERNAL_REFERENCE)
+
+    def test_qwen_advisor_label_uses_sealed_subscription_bridge(self) -> None:
+        self.assertIn("Advisor: Qwen 3.8 Max Preview", SKILL)
+        self.assertIn("audited subscription route `--advisor-qwen`", SKILL)
+        self.assertIn("Token Plan JSON API", SKILL)
+        self.assertIn("--prepare-qwen", SKILL)
+        self.assertIn("operating-system credential store", SKILL)
+        self.assertIn("qwen3.8-max-preview", SKILL)
+        self.assertIn("it contains no tools", SKILL)
+        self.assertIn("PLAN_APPROVED", SKILL)
+        self.assertIn("PLAN_REVISE", SKILL)
+        self.assertIn('"qwen_cli"', ROUTING_STATE)
 
     def test_natural_kimi_availability_question_uses_read_only_native_status(self) -> None:
         self.assertIn("is Kimi available to use as Designer?", SKILL)
@@ -127,7 +140,7 @@ Executor — GPT-5.6 Sol high: Activated
             "Never infer availability from\nthe visible tool list alone",
             SKILL,
         )
-        self.assertIn("saved Designer route is `kimi_cli`", SKILL)
+        self.assertIn("`kimi_cli` Designer route", SKILL)
         self.assertIn("managed:kimi-code", SKILL)
         self.assertIn("support for effort `max`", SKILL)
         self.assertIn("Status makes no model call", SKILL)

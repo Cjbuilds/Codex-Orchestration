@@ -345,6 +345,8 @@ class FableAdvisorMcpTests(unittest.TestCase):
         with self.assertRaisesRegex(FABLE.AdvisorError, "state is invalid"):
             FABLE.load_fable_route(self.home)
         self.write_state(schema=6, advisor=self.route())
+        self.assertEqual(FABLE.load_fable_route(self.home)["effort"], "high")
+        self.write_state(schema=7, advisor=self.route())
         with self.assertRaisesRegex(FABLE.AdvisorError, "state is invalid"):
             FABLE.load_fable_route(self.home)
 

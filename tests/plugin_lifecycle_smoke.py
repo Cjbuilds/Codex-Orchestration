@@ -32,7 +32,7 @@ PLUGIN_ID = "codex-orchestration@codex-orchestration"
 MARKETPLACE_NAME = "codex-orchestration"
 OLD_RELEASE = "a1d9c546665c3253cdcaa8fe5c0c060199a6126c"
 OLD_VERSION = "0.5.0"
-NEW_VERSION = "0.8.1"
+NEW_VERSION = "0.9.0"
 COMMAND_TIMEOUT_SECONDS = 60
 
 
@@ -539,6 +539,7 @@ def main() -> int:
                 "Fable Planner uses `create_plan` and `revise_plan`",
                 "Designer may edit only explicitly delegated design artifacts",
                 "is Kimi available to use as Designer?",
+                "Qwen 3.8 Max Preview",
                 "Implicit invocation is discovery, not mutation authority",
                 "/codex-orchestration repair",
                 "/codex-orchestration --update",
@@ -588,6 +589,21 @@ def main() -> int:
                 env=env,
                 expected_server="codex-orchestration-kimi-designer",
                 expected_tools={"create_design_handoff", "status"},
+            )
+
+            installed_qwen_mcp = (
+                installed_root
+                / "skills"
+                / "codex-orchestration"
+                / "scripts"
+                / "qwen_advisor_mcp.py"
+            )
+            probe_mcp_subprocess(
+                installed_qwen_mcp,
+                cwd=project,
+                env=env,
+                expected_server="codex-orchestration-qwen-advisor",
+                expected_tools={"review_plan", "status"},
             )
 
             native_configurator = (
