@@ -23,7 +23,7 @@ FABLE_SERVERS = frozenset(
     }
 )
 
-_SCHEMA_POLICY_PAIRS = {1: 1, 2: 2, 3: 3, 4: 4}
+_SCHEMA_POLICY_PAIRS = {1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6}
 _MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+/@-]{0,199}$")
 _AGENT_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 _EFFORT_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
@@ -43,6 +43,11 @@ _BASE_TOP_LEVEL_KEYS = frozenset(
 )
 _BASE_MANAGED_KEYS = frozenset({"mode", "usage", "metadata", "namespace"})
 _BASE_PREVIOUS_KEYS = frozenset({"mode", "usage", "metadata", "namespace"})
+_RISK_MATRIX_MODELS = {
+    "low": ("gpt-5.6-luna", ("low", "medium", "high")),
+    "medium": ("gpt-5.6-terra", ("low", "medium", "high")),
+    "high": ("gpt-5.6-sol", ("low", "low", "low")),
+}
 
 
 class RoutingStateError(ValueError):
@@ -203,7 +208,7 @@ def _validate_scalar_conversion(state: dict[str, Any], managed: dict[str, Any]) 
 
 
 def validate_routing_state(value: Any) -> dict[str, Any]:
-    """Validate and return one exact, complete persisted schema 1 through 4.
+    """Validate and return one exact, complete persisted schema 1 through 6.
 
     Unknown keys and future extensions are rejected intentionally. Callers must
     perform their own secure file read and any caller-specific path/seat checks.
@@ -227,6 +232,10 @@ def validate_routing_state(value: Any) -> dict[str, Any]:
         expected_top.add("planner")
     if schema >= 4:
         expected_top.add("designer")
+    if schema >= 5:
+        expected_top.add("executor_matrix")
+    if schema >= 6:
+        expected_top.add("retained_executor")
     _require(set(value) == expected_top, "top-level state shape is unsupported")
     _require(value["managed_by"] == "codex-orchestration", "state owner is invalid")
     _require(
@@ -237,6 +246,56 @@ def validate_routing_state(value: Any) -> dict[str, Any]:
     )
 
     _validate_route(value["executor"], seat="executor", schema=schema)
+    if schema >= 5:
+        _require(
+            value["executor"]
+            == {
+                "kind": "agent",
+                "agent": "codex_orchestration_executor_risk_low_0",
+            },
+            "schema 5 executor must use the balanced matrix entry route",
+        )
+        matrix = value["executor_matrix"]
+        retained = value["retained_executor"] if schema >= 6 else None
+        _require(
+            retained is None
+            or (
+                type(retained) is str
+                and re.fullmatch(
+                    r"codex_orchestration_executor_[0-9a-f]{12}",
+                    retained,
+                )
+                is not None
+            ),
+            "retained executor is invalid",
+        )
+        _require(
+            type(matrix) is dict and set(matrix) == set(_RISK_MATRIX_MODELS),
+            "executor matrix has the wrong tiers",
+        )
+        for tier, (model, efforts) in _RISK_MATRIX_MODELS.items():
+            cells = matrix[tier]
+            _require(
+                type(cells) is list and len(cells) == 3,
+                f"{tier} executor matrix must contain three attempts",
+            )
+            for attempt, (cell, effort) in enumerate(zip(cells, efforts)):
+                _require(
+                    type(cell) is dict
+                    and set(cell) == {"agent", "model", "effort"},
+                    f"{tier} executor matrix cell has the wrong shape",
+                )
+                _require(
+                    cell
+                    == {
+                        "agent": (
+                            f"codex_orchestration_executor_risk_{tier}_{attempt}"
+                        ),
+                        "model": model,
+                        "effort": effort,
+                    },
+                    f"{tier} executor matrix cell is not pinned",
+                )
     planner = value.get("planner")
     advisor = value["advisor"]
     designer = value.get("designer")

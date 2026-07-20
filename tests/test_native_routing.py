@@ -2164,5 +2164,175 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertIn("shadowed by a project role", shadowed.stderr)
 
 
+class BalancedRiskMatrixContractTests(unittest.TestCase):
+    def test_policy_requires_material_revision_and_post_research_authorization(self) -> None:
+        mode, _ = NATIVE.build_policy(
+            {
+                "kind": "agent",
+                "agent": NATIVE.risk_matrix_agent_name("low", 0),
+            },
+            None,
+            None,
+            balanced_risk_matrix=True,
+        )
+        self.assertIn("Every retry requires a materially revised approach", mode)
+        self.assertIn(
+            "An attempt is consumed only after an independent gate rejects a completed approach",
+            mode,
+        )
+        self.assertIn(
+            "Low risk uses GPT-5.6 Luna with attempts at low, medium, then high effort",
+            mode,
+        )
+        self.assertIn(
+            "medium risk uses GPT-5.6 Terra with low, medium, then high effort",
+            mode,
+        )
+        self.assertIn(
+            "high risk uses GPT-5.6 Sol with low effort for all three attempts",
+            mode,
+        )
+        self.assertIn(
+            "perform research and replanning, and then obtain explicit current-task user authorization",
+            mode,
+        )
+
+    def test_matrix_role_paths_have_one_generator_owner(self) -> None:
+        legacy_generator = SCRIPT.with_name("configure_orchestration.py")
+        self.assertNotIn(
+            "codex_orchestration_executor_risk_",
+            legacy_generator.read_text(encoding="utf-8"),
+        )
+
+    def test_exact_nine_cells(self) -> None:
+        routes = NATIVE.risk_matrix_routes()
+        self.assertEqual(sum(len(cells) for cells in routes.values()), 9)
+        self.assertEqual(
+            [(c["model"], c["effort"]) for c in routes["low"]],
+            [("gpt-5.6-luna", "low"), ("gpt-5.6-luna", "medium"), ("gpt-5.6-luna", "high")],
+        )
+        self.assertEqual(
+            [(c["model"], c["effort"]) for c in routes["medium"]],
+            [("gpt-5.6-terra", "low"), ("gpt-5.6-terra", "medium"), ("gpt-5.6-terra", "high")],
+        )
+        self.assertEqual([c["model"] for c in routes["high"]], ["gpt-5.6-sol"] * 3)
+        self.assertEqual([c["effort"] for c in routes["high"]], ["low"] * 3)
+
+    def test_role_files_pin_each_cell(self) -> None:
+        for tier, cells in NATIVE.risk_matrix_routes().items():
+            for attempt, cell in enumerate(cells):
+                text = NATIVE.build_risk_matrix_agent_file(tier, attempt)
+                parsed = NATIVE.tomllib.loads(text)
+                self.assertEqual(parsed["name"], NATIVE.risk_matrix_agent_name(tier, attempt))
+                self.assertEqual(parsed["model"], cell["model"])
+                self.assertEqual(parsed["model_reasoning_effort"], cell["effort"])
+                self.assertEqual(parsed["service_tier"], "default")
+
+    def test_balanced_matrix_rejects_singular_executor_flags(self) -> None:
+        args = mock.Mock(
+            status=False, repair=False, disable=False, apply=False,
+            require_effective=False, replace_existing_policy=False,
+            confirm_unlisted_models=False, executor_model="gpt-5.6-luna",
+            executor_agent=None, balanced_risk_matrix=True,
+            planner_model=None, planner_agent=None, planner_fable=False,
+            advisor_model=None, advisor_agent=None, advisor_fable=False,
+            designer_model=None, executor_effort="auto", planner_effort="auto",
+            advisor_effort="auto", designer_effort="auto",
+        )
+        with self.assertRaises(NATIVE.ConfigurationError):
+            NATIVE._validate_args(args)
+
+        args.balanced_risk_matrix = False
+        args.executor_model = None
+        args.executor_agent = NATIVE.risk_matrix_agent_name("low", 0)
+        with self.assertRaises(NATIVE.ConfigurationError):
+            NATIVE._validate_args(args)
+
+    def test_install_retires_legacy_role_and_restores_byte_for_byte(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            agents = home / "agents"
+            agents.mkdir()
+            legacy_name = "codex_orchestration_executor_123456789abc"
+            legacy = agents / "legacy.toml"
+            legacy_payload = (
+                NATIVE.CUSTOM_AGENT_MANAGED_MARKER
+                + "\n"
+                + f'name = "{legacy_name}"\n'
+            ).encode()
+            legacy.write_bytes(legacy_payload)
+            state = {"executor": {"kind": "agent", "agent": legacy_name}}
+
+            snapshots = NATIVE.install_risk_matrix_roles(home, state)
+
+            self.assertEqual(legacy.read_bytes(), legacy_payload)
+            for path in NATIVE.risk_matrix_agent_paths(home).values():
+                self.assertTrue(path.is_file())
+            NATIVE.restore_retired_role_snapshots(home, snapshots)
+            self.assertEqual(legacy.read_bytes(), legacy_payload)
+            for path in NATIVE.risk_matrix_agent_paths(home).values():
+                self.assertTrue(path.is_file())
+            NATIVE.restore_role_snapshots(snapshots)
+            self.assertEqual(legacy.read_bytes(), legacy_payload)
+            for path in NATIVE.risk_matrix_agent_paths(home).values():
+                self.assertFalse(path.exists())
+
+    def test_install_refuses_unmanaged_collision_without_partial_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            paths = NATIVE.risk_matrix_agent_paths(home)
+            collision = next(iter(paths.values()))
+            collision.parent.mkdir()
+            collision.write_text('name = "user_owned"\n', encoding="utf-8")
+
+            with self.assertRaises(NATIVE.ConfigurationError):
+                NATIVE.install_risk_matrix_roles(home, None)
+
+            self.assertEqual(collision.read_text(encoding="utf-8"), 'name = "user_owned"\n')
+            self.assertEqual(
+                [path for path in paths.values() if path.exists()],
+                [collision],
+            )
+
+    def test_remove_and_restore_matrix_roles_is_lossless(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            NATIVE.install_risk_matrix_roles(home, None)
+            before = {
+                path: path.read_bytes()
+                for path in NATIVE.risk_matrix_agent_paths(home).values()
+            }
+
+            snapshots = NATIVE.remove_risk_matrix_roles(home)
+
+            self.assertFalse(any(path.exists() for path in before))
+            NATIVE.restore_role_snapshots(snapshots)
+            self.assertEqual(
+                {path: path.read_bytes() for path in before},
+                before,
+            )
+
+    def test_remove_resolves_retained_role_by_managed_name(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            agents = home / "agents"
+            agents.mkdir()
+            name = "codex_orchestration_executor_123456789abc"
+            retained = agents / "legacy-custom-filename.toml"
+            payload = (
+                NATIVE.CUSTOM_AGENT_MANAGED_MARKER
+                + "\n"
+                + f'name = "{name}"\n'
+            ).encode()
+            retained.write_bytes(payload)
+            NATIVE.install_risk_matrix_roles(home, None)
+
+            snapshots = NATIVE.remove_risk_matrix_roles(home, {name})
+
+            self.assertFalse(retained.exists())
+            NATIVE.restore_role_snapshots(snapshots)
+            self.assertEqual(retained.read_bytes(), payload)
+
+
 if __name__ == "__main__":
     unittest.main()

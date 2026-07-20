@@ -65,12 +65,30 @@ def genuine_state(schema: int) -> dict[str, object]:
         state["advisor"] = fable_route()
     if schema >= 3:
         state["planner"] = fable_route()
-    if schema == 4:
+    if schema >= 4:
         state["designer"] = {
             "kind": "model",
             "model": "gpt-designer",
             "effort": "high",
         }
+    if schema >= 5:
+        state["executor"] = {
+            "kind": "agent",
+            "agent": "codex_orchestration_executor_risk_low_0",
+        }
+        state["executor_matrix"] = {
+            tier: [
+                {
+                    "agent": f"codex_orchestration_executor_risk_{tier}_{attempt}",
+                    "model": model,
+                    "effort": effort,
+                }
+                for attempt, effort in enumerate(efforts)
+            ]
+            for tier, (model, efforts) in STATE._RISK_MATRIX_MODELS.items()
+        }
+        if schema >= 6:
+            state["retained_executor"] = None
     if schema >= 2:
         managed["mcp"] = {
             "fable-advisor-python3": True,
@@ -84,11 +102,29 @@ def genuine_state(schema: int) -> dict[str, object]:
 
 
 class RoutingStateTests(unittest.TestCase):
-    def test_genuine_schemas_one_through_four_are_accepted(self) -> None:
-        for schema in (1, 2, 3, 4):
+    def test_genuine_schemas_one_through_six_are_accepted(self) -> None:
+        for schema in (1, 2, 3, 4, 5, 6):
             with self.subTest(schema=schema):
                 state = genuine_state(schema)
                 self.assertIs(STATE.validate_routing_state(state), state)
+
+    def test_schema_five_matrix_is_exact_and_pinned(self) -> None:
+        for mutate in (
+            lambda state: state.pop("executor_matrix"),
+            lambda state: state["executor_matrix"].pop("medium"),
+            lambda state: state["executor_matrix"]["low"].pop(),
+            lambda state: state["executor_matrix"]["medium"][1].update(
+                model="gpt-5.6-luna"
+            ),
+            lambda state: state["executor_matrix"]["high"][2].update(
+                effort="high"
+            ),
+        ):
+            with self.subTest(mutate=mutate):
+                state = genuine_state(5)
+                mutate(state)
+                with self.assertRaises(STATE.RoutingStateError):
+                    STATE.validate_routing_state(state)
 
     def test_scalar_conversion_and_retained_disabled_mcp_are_accepted(self) -> None:
         state = genuine_state(3)
@@ -115,7 +151,7 @@ class RoutingStateTests(unittest.TestCase):
             return lambda state: state.__setitem__("policy_version", value)
 
         mutations = [
-            *( (f"schema {value!r}", schema(value)) for value in (True, 1.0, "4", None, 0, 5) ),
+            *( (f"schema {value!r}", schema(value)) for value in (True, 1.0, "4", None, 0, 7) ),
             *( (f"policy {value!r}", policy(value)) for value in (True, 4.0, "4", None, 0, 5, 3) ),
             ("missing top key", lambda state: state.pop("managed_by")),
             ("extra top key", lambda state: state.__setitem__("future", True)),

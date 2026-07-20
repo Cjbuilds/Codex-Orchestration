@@ -1,6 +1,11 @@
 # Changelog
 
-## 0.7.2 — Unreleased
+## 0.8.0 — Unreleased
+
+- Add opt-in balanced risk routing with generator-owned Luna, Terra, and Sol
+  executor attempts, exact persisted state, and transactional lifecycle repair.
+
+## 0.7.2
 
 - Enable implicit skill discovery for natural-language Kimi K3, External Model,
   and model-role availability questions. The previous metadata required an explicit

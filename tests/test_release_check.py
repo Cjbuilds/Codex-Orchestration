@@ -69,7 +69,7 @@ class TempRepository:
 
 class ReleaseCheckTests(unittest.TestCase):
     def test_checkout_release_metadata_is_consistent(self) -> None:
-        self.assertEqual(RELEASE.run_check(REPO_ROOT, require_tag=False), "0.7.2")
+        self.assertEqual(RELEASE.run_check(REPO_ROOT, require_tag=False), "0.8.0")
 
     def test_unreleased_checkout_is_not_tag_ready(self) -> None:
         with self.assertRaisesRegex(RELEASE.ReleaseCheckError, "not tagged"):

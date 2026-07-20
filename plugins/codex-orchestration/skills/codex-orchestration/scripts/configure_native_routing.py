@@ -39,8 +39,8 @@ except ModuleNotFoundError as exc:  # pragma: no cover - Python < 3.11
     raise SystemExit("Python 3.11 or newer is required (missing tomllib).") from exc
 
 
-POLICY_VERSION = 4
-STATE_SCHEMA = 4
+POLICY_VERSION = 6
+STATE_SCHEMA = 6
 STATE_FILENAME = ".codex-orchestration-routing.json"
 PROBE_VALUE = "CODEX_ORCHESTRATION_CAPABILITY_PROBE"
 PLUGIN_ID = "codex-orchestration@codex-orchestration"
@@ -58,12 +58,191 @@ MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+/@-]{0,199}$")
 AGENT_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 EFFORT_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 PERSONAL_MANAGED_ROLE_RE = re.compile(
-    r"^codex_orchestration_(?:executor|advisor|planner|designer)_[0-9a-f]{12}$"
+    r"^codex_orchestration_(?:executor|advisor|planner|designer)_[0-9a-f]{12}$|^codex_orchestration_executor_risk_(?:low|medium|high)_[0-2]$"
 )
 CUSTOM_AGENT_MANAGED_MARKER = (
     "# Managed by codex-orchestration. Standalone custom agent v2."
 )
+RISK_ROUTING_MATRIX = {
+    "low": {"model": "gpt-5.6-luna", "efforts": ("low", "medium", "high")},
+    "medium": {"model": "gpt-5.6-terra", "efforts": ("low", "medium", "high")},
+    "high": {"model": "gpt-5.6-sol", "efforts": ("low", "low", "low")},
+}
 MISSING = object()
+
+
+def risk_matrix_routes() -> dict[str, tuple[dict[str, str], ...]]:
+    """Return immutable route descriptors used by the opt-in policy text."""
+    return {
+        tier: tuple({"model": spec["model"], "effort": effort} for effort in spec["efforts"])
+        for tier, spec in RISK_ROUTING_MATRIX.items()
+    }
+
+
+def risk_matrix_state() -> dict[str, list[dict[str, str]]]:
+    return {
+        tier: [
+            {
+                "agent": risk_matrix_agent_name(tier, attempt),
+                "model": cell["model"],
+                "effort": cell["effort"],
+            }
+            for attempt, cell in enumerate(cells)
+        ]
+        for tier, cells in risk_matrix_routes().items()
+    }
+
+
+def risk_matrix_agent_name(tier: str, attempt: int) -> str:
+    if tier not in RISK_ROUTING_MATRIX or attempt not in (0, 1, 2):
+        raise ConfigurationError("Risk matrix tier/attempt is invalid.")
+    return f"codex_orchestration_executor_risk_{tier}_{attempt}"
+
+
+def build_risk_matrix_agent_file(tier: str, attempt: int) -> str:
+    route = risk_matrix_routes()[tier][attempt]
+    name = risk_matrix_agent_name(tier, attempt)
+    return "\n".join(
+        (
+            CUSTOM_AGENT_MANAGED_MARKER,
+            f"name = {json.dumps(name)}",
+            f"description = {json.dumps(f'Generator-owned {tier}-risk executor attempt {attempt + 1}.')}",
+            f"model = {json.dumps(route['model'])}",
+            f"model_reasoning_effort = {json.dumps(route['effort'])}",
+            'service_tier = "default"',
+            f"developer_instructions = {json.dumps('Execute only the bounded packet from the root; report completion and verification evidence to the root.')}",
+            "",
+        )
+    )
+
+
+def risk_matrix_agent_paths(codex_home: Path) -> dict[str, Path]:
+    directory = codex_home / "agents"
+    return {
+        risk_matrix_agent_name(tier, attempt): directory
+        / f"{risk_matrix_agent_name(tier, attempt)}.toml"
+        for tier in RISK_ROUTING_MATRIX
+        for attempt in range(3)
+    }
+
+
+def _atomic_write_bytes(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    temp_path = Path(temporary)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        temp_path.unlink(missing_ok=True)
+
+
+def install_risk_matrix_roles(
+    codex_home: Path,
+    existing_state: dict[str, Any] | None,
+) -> dict[Path, bytes | None]:
+    """Install all matrix roles and retire a matching legacy executor atomically."""
+    paths = risk_matrix_agent_paths(codex_home)
+    snapshots: dict[Path, bytes | None] = {}
+    for path in paths.values():
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            raise ConfigurationError(f"Risk-matrix role path is unsafe: {path}")
+        previous = path.read_bytes() if path.exists() else None
+        if previous is not None and not previous.startswith(
+            (CUSTOM_AGENT_MANAGED_MARKER + "\n").encode()
+        ):
+            raise ConfigurationError(f"Refusing to replace unmanaged custom agent {path}.")
+        snapshots[path] = previous
+
+    legacy_path: Path | None = None
+    if isinstance(existing_state, dict):
+        route = existing_state.get("executor")
+        if isinstance(route, dict) and route.get("kind") == "agent":
+            name = route.get("agent")
+            if isinstance(name, str) and name not in paths:
+                managed_roles, issues = _managed_personal_roles(codex_home)
+                if issues:
+                    raise ConfigurationError("; ".join(issues))
+                legacy_path = managed_roles.get(name)
+                if legacy_path is not None:
+                    snapshots[legacy_path] = legacy_path.read_bytes()
+
+    try:
+        for tier in RISK_ROUTING_MATRIX:
+            for attempt in range(3):
+                name = risk_matrix_agent_name(tier, attempt)
+                _atomic_write_bytes(
+                    paths[name],
+                    build_risk_matrix_agent_file(tier, attempt).encode(),
+                )
+    except OSError:
+        restore_role_snapshots(snapshots)
+        raise
+    return snapshots
+
+
+def restore_role_snapshots(snapshots: dict[Path, bytes | None]) -> None:
+    for path, payload in snapshots.items():
+        if payload is None:
+            path.unlink(missing_ok=True)
+        else:
+            _atomic_write_bytes(path, payload)
+
+
+def restore_retired_role_snapshots(
+    codex_home: Path,
+    snapshots: dict[Path, bytes | None],
+) -> None:
+    matrix_paths = set(risk_matrix_agent_paths(codex_home).values())
+    for path, payload in snapshots.items():
+        if path not in matrix_paths and payload is not None:
+            _atomic_write_bytes(path, payload)
+
+
+def remove_risk_matrix_roles(
+    codex_home: Path,
+    extra_names: set[str] | None = None,
+) -> dict[Path, bytes | None]:
+    snapshots: dict[Path, bytes | None] = {}
+    paths = set(risk_matrix_agent_paths(codex_home).values())
+    if extra_names:
+        managed_roles, issues = _managed_personal_roles(codex_home)
+        if issues:
+            raise ConfigurationError("; ".join(issues))
+        paths.update(
+            managed_roles[name]
+            for name in extra_names
+            if name in managed_roles
+        )
+    for path in paths:
+        if not path.exists():
+            snapshots[path] = None
+            continue
+        if path.is_symlink() or not path.is_file():
+            raise ConfigurationError(f"Risk-matrix role path is unsafe: {path}")
+        payload = path.read_bytes()
+        if not payload.startswith((CUSTOM_AGENT_MANAGED_MARKER + "\n").encode()):
+            raise ConfigurationError(f"Refusing to remove unmanaged custom agent {path}.")
+        snapshots[path] = payload
+    try:
+        for path, payload in snapshots.items():
+            if payload is not None:
+                path.unlink()
+    except OSError:
+        restore_role_snapshots(snapshots)
+        raise
+    return snapshots
 
 
 class ConfigurationError(RuntimeError):
@@ -95,6 +274,11 @@ def parse_args() -> argparse.Namespace:
             "With --status, return 1 unless the policy is installed, effective, "
             "client-compatible, complete, and free of unavailable or orphaned roles."
         ),
+    )
+    parser.add_argument(
+        "--balanced-risk-matrix",
+        action="store_true",
+        help="Opt in to generator-owned low/medium/high executor risk routing.",
     )
 
     executor = parser.add_mutually_exclusive_group()
@@ -212,10 +396,26 @@ def _validate_args(args: argparse.Namespace) -> None:
         )
     if not args.status and not args.repair and not args.disable and not (
         args.executor_model or args.executor_agent
-    ):
+    ) and not args.balanced_risk_matrix:
         raise ConfigurationError(
             "Setup requires --executor-model or --executor-agent. "
             "Advisor omission means none. Designer omission means none."
+        )
+    if args.balanced_risk_matrix and (
+        args.executor_model
+        or args.executor_agent
+        or args.executor_effort != "auto"
+    ):
+        raise ConfigurationError(
+            "--balanced-risk-matrix owns Executor models and efforts; "
+            "do not combine it with singular Executor options."
+        )
+    if args.executor_agent and args.executor_agent.startswith(
+        "codex_orchestration_executor_risk_"
+    ):
+        raise ConfigurationError(
+            "Generator-owned risk-matrix roles cannot be selected as a singular "
+            "Executor; use --balanced-risk-matrix."
         )
     if args.executor_agent and args.executor_effort != "auto":
         raise ConfigurationError(
@@ -405,7 +605,7 @@ class AppServer:
                     "clientInfo": {
                         "name": "codex_orchestration_installer",
                         "title": "Codex Orchestration Installer",
-                        "version": "0.7.2",
+                        "version": "0.8.0",
                     },
                     "capabilities": {"experimentalApi": True},
                 },
@@ -952,6 +1152,19 @@ def _referenced_agent_names(state: dict[str, Any] | None) -> set[str]:
             name = route.get("agent")
             if isinstance(name, str):
                 names.add(name)
+    matrix = state.get("executor_matrix")
+    if isinstance(matrix, dict):
+        for cells in matrix.values():
+            if isinstance(cells, list):
+                names.update(
+                    cell["agent"]
+                    for cell in cells
+                    if isinstance(cell, dict)
+                    and isinstance(cell.get("agent"), str)
+                )
+    retained = state.get("retained_executor")
+    if isinstance(retained, str):
+        names.add(retained)
     return names
 
 
@@ -969,6 +1182,7 @@ def build_policy(
     planner: dict[str, Any] | None,
     advisor: dict[str, Any] | None,
     designer: dict[str, Any] | None = None,
+    balanced_risk_matrix: bool = False,
 ) -> tuple[str, str]:
     has_direct_route = executor["kind"] == "model" or (
         planner is not None and planner["kind"] == "model"
@@ -1034,6 +1248,8 @@ If you are the root task model, you are the orchestrator. Own intent, planning, 
 
 {designer_mode}
 
+{"Risk routing matrix (opt-in): classify each delegated task as low, medium, or high before selecting an executor. Low risk uses GPT-5.6 Luna with attempts at low, medium, then high effort; medium risk uses GPT-5.6 Terra with low, medium, then high effort; high risk uses GPT-5.6 Sol with low effort for all three attempts. The root remains selected and owns classification, attempt accounting, and release. An attempt is consumed only after an independent gate rejects a completed approach; do not spend an attempt for transport errors, partial work, or a root decision to revise. Every retry requires a materially revised approach that addresses the prior rejection. After attempt three is rejected, stop, perform research and replanning, and then obtain explicit current-task user authorization before another attempt. Keep the default service tier pinned to default." if balanced_risk_matrix else ""}
+
 The root owns the plan version, cumulative findings ledger, review count, validation, adjudication, and release to Executor. There is no Finalizer seat. For Advisor rounds two through five, send only the current plan and version plus a compact cumulative ledger, not prior transcripts. Ask the Advisor to confirm or contest dispositions without blindly repeating accepted findings. Reject a stale plan version or an invalid or incomplete ledger and halt before Executor.
 
 On PLAN_REVISE, record the latest finding IDs before revision. After the Planner returns, validate and merge each INCORPORATED or reasoned REJECTED disposition into the cumulative ledger before another Advisor call. A round-five PLAN_REVISE halts before Executor and produces a non-approval artifact containing the latest plan and version, full ledger, latest findings, and choices available to the user. It must not claim approval. Any required Planner or Advisor route failure also halts before Executor. Only an explicit current-task best-effort instruction changes failure handling: Planner failure permits the root to take over planning for the remaining rounds; Advisor failure may proceed only with the result labeled NOT_ADVISOR_APPROVED. No best-effort setting is persisted.
@@ -1097,6 +1313,8 @@ For delegated executor work, call this tool with {_spawn_route(executor)}, fork_
 {advisor_hint}
 
 {designer_hint}
+
+{"When --balanced-risk-matrix is enabled, route only through the generator-owned risk matrix roles. Preserve the root as orchestrator; Fable Advisor behavior is unchanged. Select the role matching the risk tier and current attempt, and report the tier, attempt, independent-gate result, and remaining budget to the root." if balanced_risk_matrix else ""}
 
 {provider_guard}
 
@@ -1323,6 +1541,23 @@ def _status(
                     planner,
                     advisor,
                 )
+                if isinstance(state.get("executor_matrix"), dict):
+                    for name in sorted(_referenced_agent_names(state)):
+                        if not name.startswith(
+                            "codex_orchestration_executor_risk_"
+                        ):
+                            continue
+                        if name == risk_matrix_agent_name("low", 0):
+                            continue
+                        verified.extend(
+                            verify_agent_routes(
+                                app.codex_home,
+                                workspace,
+                                {"kind": "agent", "agent": name},
+                                None,
+                                None,
+                            )
+                        )
             except (ConfigurationError, KeyError, TypeError) as exc:
                 print(f"Custom-agent route: unavailable — {exc}")
                 agent_routes_available = False
@@ -1393,6 +1628,8 @@ def _prepare_setup_state(
     designer: dict[str, Any] | None,
     config_path: Path,
     replace_existing: bool,
+    balanced_risk_matrix: bool = False,
+    retained_executor: str | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     current = _current_values(config)
     feature = current["feature"]
@@ -1612,8 +1849,8 @@ def _prepare_setup_state(
         managed["mcp"] = managed_mcp
 
     state = {
-        "schema": STATE_SCHEMA,
-        "policy_version": POLICY_VERSION,
+        "schema": STATE_SCHEMA if balanced_risk_matrix else 4,
+        "policy_version": POLICY_VERSION if balanced_risk_matrix else 4,
         "managed_by": "codex-orchestration",
         "config_file": str(config_path),
         "executor": executor,
@@ -1625,6 +1862,9 @@ def _prepare_setup_state(
         "scalar_origin": scalar_origin,
         "managed_feature": managed_feature,
     }
+    if balanced_risk_matrix:
+        state["executor_matrix"] = risk_matrix_state()
+        state["retained_executor"] = retained_executor
     return state, edits, rollback
 
 
@@ -1927,10 +2167,124 @@ def _disable(
     if not apply:
         print("Dry run only. Re-run with --disable --apply after reviewing this preview.")
         return 0
-    result = _batch_write(app, edits, version, reload_user_config=True)
-    if result.get("status") not in {"ok", "okOverridden"}:
+    matrix_enabled = isinstance(state, dict) and isinstance(
+        state.get("executor_matrix"),
+        dict,
+    )
+    current_by_key = {
+        "features.multi_agent_v2.hide_spawn_agent_metadata": current["metadata"],
+        "features.multi_agent_v2.tool_namespace": current["namespace"],
+        "features.multi_agent_v2.multi_agent_mode_hint_text": current["mode"],
+        "features.multi_agent_v2.usage_hint_text": current["usage"],
+    }
+    disable_rollback: list[dict[str, Any]] = []
+    for edit in edits:
+        key_path = edit["keyPath"]
+        if key_path == "features.multi_agent_v2":
+            disable_rollback.append(
+                {
+                    "keyPath": key_path,
+                    "value": current["feature"],
+                    "mergeStrategy": "replace",
+                }
+            )
+        elif key_path in current_by_key:
+            inverse = snapshot_edit(
+                key_path,
+                snapshot(current_by_key[key_path]),
+            )
+            if inverse is not None:
+                disable_rollback.append(inverse)
+        else:
+            server = next(
+                (
+                    candidate
+                    for candidate in FABLE_SERVERS
+                    if key_path == fable_key_path(candidate)
+                ),
+                None,
+            )
+            if server is None:
+                raise ConfigurationError(
+                    f"Cannot construct disable rollback for {key_path!r}."
+                )
+            inverse = snapshot_edit(
+                key_path,
+                snapshot(current["mcp"][server]),
+            )
+            if inverse is not None:
+                disable_rollback.append(inverse)
+    retained = state.get("retained_executor") if matrix_enabled else None
+    previous_payload = (
+        json.dumps(state.get("previous"), sort_keys=True)
+        if matrix_enabled
+        else ""
+    )
+    remove_retained = (
+        isinstance(retained, str) and retained not in previous_payload
+    )
+    role_snapshots = (
+        remove_risk_matrix_roles(
+            app.codex_home,
+            {retained} if remove_retained else set(),
+        )
+        if matrix_enabled
+        else {}
+    )
+    try:
+        result = _batch_write(app, edits, version, reload_user_config=True)
+    except Exception:
+        restore_role_snapshots(role_snapshots)
+        raise
+    if result.get("status") == "okOverridden":
+        try:
+            rollback_result = _batch_write(
+                app,
+                disable_rollback,
+                result.get("version"),
+                reload_user_config=True,
+            )
+            if rollback_result.get("status") not in {"ok", "okOverridden"}:
+                raise ConfigurationError(
+                    "unexpected rollback status "
+                    f"{rollback_result.get('status')!r}"
+                )
+        finally:
+            restore_role_snapshots(role_snapshots)
+        raise ConfigurationError(
+            "A higher-priority config layer overrides disable; the user-layer "
+            "change and role removal were rolled back, and routing state was retained."
+        )
+    if result.get("status") != "ok":
+        restore_role_snapshots(role_snapshots)
         raise ConfigurationError(f"Unexpected config write status: {result.get('status')!r}")
-    _remove_state(state_path)
+    try:
+        _remove_state(state_path)
+    except (ConfigurationError, OSError) as state_exc:
+        rollback_error: Exception | None = None
+        try:
+            rollback_result = _batch_write(
+                app,
+                disable_rollback,
+                result.get("version"),
+                reload_user_config=True,
+            )
+            if rollback_result.get("status") not in {"ok", "okOverridden"}:
+                raise ConfigurationError(
+                    "unexpected rollback status "
+                    f"{rollback_result.get('status')!r}"
+                )
+        except (ConfigurationError, OSError) as exc:
+            rollback_error = exc
+        restore_role_snapshots(role_snapshots)
+        detail = (
+            f"; config rollback also failed: {rollback_error}"
+            if rollback_error is not None
+            else "; config and roles were restored"
+        )
+        raise ConfigurationError(
+            f"Could not remove routing state during disable: {state_exc}{detail}"
+        ) from state_exc
     print("Native routing disabled. Start a new Codex task to clear the loaded policy.")
     return 0
 
@@ -2008,7 +2362,13 @@ def main() -> int:
                     "effort": executor_effort,
                 }
             else:
-                executor = {"kind": "agent", "agent": args.executor_agent}
+                if args.balanced_risk_matrix:
+                    executor = {
+                        "kind": "agent",
+                        "agent": risk_matrix_agent_name("low", 0),
+                    }
+                else:
+                    executor = {"kind": "agent", "agent": args.executor_agent}
 
             planner: dict[str, Any] | None = None
             advisor: dict[str, Any] | None = None
@@ -2087,14 +2447,52 @@ def main() -> int:
             for effort in sorted(fable_efforts):
                 fable_auth = verify_fable_prerequisites(effort)
 
-            verified_agents = verify_agent_routes(
-                app.codex_home,
-                workspace,
+            mode, usage = build_policy(
                 executor,
                 planner,
                 advisor,
+                designer,
+                balanced_risk_matrix=args.balanced_risk_matrix,
             )
-            mode, usage = build_policy(executor, planner, advisor, designer)
+            role_snapshots: dict[Path, bytes | None] = {}
+            replacing_matrix = (
+                isinstance(state, dict)
+                and isinstance(state.get("executor_matrix"), dict)
+                and not args.balanced_risk_matrix
+            )
+            if args.balanced_risk_matrix:
+                verified_agents = list(
+                    risk_matrix_agent_paths(app.codex_home).values()
+                )
+            else:
+                verified_agents = verify_agent_routes(
+                    app.codex_home, workspace, executor, planner, advisor
+                )
+            retained_executor: str | None = None
+            if args.balanced_risk_matrix and isinstance(state, dict):
+                saved_retained = state.get("retained_executor")
+                if isinstance(saved_retained, str):
+                    retained_executor = saved_retained
+                prior_executor = state.get("executor")
+                if (
+                    retained_executor is None
+                    and isinstance(prior_executor, dict)
+                    and prior_executor.get("kind") == "agent"
+                ):
+                    prior_name = prior_executor.get("agent")
+                    managed_roles, role_issues = _managed_personal_roles(
+                        app.codex_home
+                    )
+                    if role_issues:
+                        raise ConfigurationError("; ".join(role_issues))
+                    if (
+                        isinstance(prior_name, str)
+                        and not prior_name.startswith(
+                            "codex_orchestration_executor_risk_"
+                        )
+                        and prior_name in managed_roles
+                    ):
+                        retained_executor = prior_name
             new_state, edits, rollback = _prepare_setup_state(
                 config,
                 state,
@@ -2106,6 +2504,8 @@ def main() -> int:
                 designer,
                 app.config_path,
                 args.replace_existing_policy,
+                balanced_risk_matrix=args.balanced_risk_matrix,
+                retained_executor=retained_executor,
             )
             print(f"Config: {app.config_path}")
             print("Orchestrator: model selected when each Codex task starts")
@@ -2143,7 +2543,46 @@ def main() -> int:
                 print("Dry run only. Re-run with --apply after reviewing this preview.")
                 return 0
 
-            result = _batch_write(app, edits, version, reload_user_config=True)
+            if args.balanced_risk_matrix:
+                role_snapshots = install_risk_matrix_roles(app.codex_home, state)
+                try:
+                    verified_agents = []
+                    for name in sorted(risk_matrix_agent_paths(app.codex_home)):
+                        verify_companion_routes = (
+                            name == risk_matrix_agent_name("low", 0)
+                        )
+                        verified_agents.extend(
+                            verify_agent_routes(
+                                app.codex_home,
+                                workspace,
+                                {"kind": "agent", "agent": name},
+                                planner if verify_companion_routes else None,
+                                advisor if verify_companion_routes else None,
+                            )
+                        )
+                except Exception:
+                    restore_role_snapshots(role_snapshots)
+                    raise
+            elif replacing_matrix:
+                retained = state.get("retained_executor")
+                replacement_name = (
+                    executor.get("agent")
+                    if executor.get("kind") == "agent"
+                    else None
+                )
+                role_snapshots = remove_risk_matrix_roles(
+                    app.codex_home,
+                    {retained}
+                    if isinstance(retained, str)
+                    and retained != replacement_name
+                    else set(),
+                )
+
+            try:
+                result = _batch_write(app, edits, version, reload_user_config=True)
+            except Exception:
+                restore_role_snapshots(role_snapshots)
+                raise
             if result.get("status") == "okOverridden":
                 try:
                     rollback_result = _batch_write(
@@ -2158,16 +2597,28 @@ def main() -> int:
                             f"{rollback_result.get('status')!r}"
                         )
                 except ConfigurationError as rollback_exc:
+                    # A failed rollback may leave the newly written matrix policy
+                    # active. Keep its roles available; restoring them here would
+                    # delete the executors that config may still reference.
+                    if not args.balanced_risk_matrix:
+                        restore_role_snapshots(role_snapshots)
+                    else:
+                        restore_retired_role_snapshots(
+                            app.codex_home,
+                            role_snapshots,
+                        )
                     raise ConfigurationError(
                         "A higher-priority config layer overrides this routing policy, "
                         "and automatic rollback failed. The user layer may still contain "
                         f"the managed fields; run status before continuing: {rollback_exc}"
                     ) from rollback_exc
+                restore_role_snapshots(role_snapshots)
                 raise ConfigurationError(
                     "A higher-priority config layer overrides this routing policy; "
                     "the user config change was rolled back."
                 )
             if result.get("status") != "ok":
+                restore_role_snapshots(role_snapshots)
                 raise ConfigurationError(
                     f"Unexpected config write status: {result.get('status')!r}"
                 )
@@ -2187,11 +2638,19 @@ def main() -> int:
                             f"{rollback_result.get('status')!r}"
                         )
                 except ConfigurationError as rollback_exc:
+                    if not args.balanced_risk_matrix:
+                        restore_role_snapshots(role_snapshots)
+                    else:
+                        restore_retired_role_snapshots(
+                            app.codex_home,
+                            role_snapshots,
+                        )
                     raise ConfigurationError(
                         "Config was written but state persistence and automatic rollback "
                         "both failed; the user config may still contain managed fields. "
                         f"State error: {state_exc}; rollback: {rollback_exc}"
                     ) from state_exc
+                restore_role_snapshots(role_snapshots)
                 raise ConfigurationError(
                     f"Could not persist restore state; config write was rolled back: {state_exc}"
                 ) from state_exc
@@ -2233,11 +2692,19 @@ def main() -> int:
                     else:
                         _write_state(state_path, state)
                 except (ConfigurationError, OSError) as rollback_exc:
+                    if not args.balanced_risk_matrix:
+                        restore_role_snapshots(role_snapshots)
+                    else:
+                        restore_retired_role_snapshots(
+                            app.codex_home,
+                            role_snapshots,
+                        )
                     raise ConfigurationError(
                         "Codex accepted the write but current-workspace effective "
                         "readback did not match, and "
                         f"automatic rollback failed: {rollback_exc}"
                     ) from rollback_exc
+                restore_role_snapshots(role_snapshots)
                 raise ConfigurationError(
                     "Codex accepted the user-layer write, but current-workspace "
                     "effective readback did not match; the prior config and restore "
