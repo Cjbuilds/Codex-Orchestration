@@ -1056,8 +1056,9 @@ Planner and Advisor are policy-isolated, root-directed seats: they cannot contac
             "from that server. These are root tool calls. Require PLAN_DRAFT from "
             "creation, then assign the canonical version. Require PLAN_REVISION, "
             "FINDINGS_LEDGER, and REVISED_PLAN from each revision. Supply a stable "
-            "caller-known `operation_id` for each revision; retry identical inputs "
-            "with that ID or call `get_plan_revision` after a caller-side timeout."
+            "caller-generated random UUID v4 `operation_id` for each revision; retry "
+            "identical inputs with that ID or call `get_plan_revision` with that ID "
+            "and the same revision inputs after a caller-side timeout."
         )
     elif planner is not None:
         planner_hint = (

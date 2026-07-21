@@ -8,8 +8,9 @@
 - Give long plan revisions an 1800-second subprocess timeout, a 1900-second
   Codex MCP host timeout, and bounded process-local
   idempotency: callers may supply an operation ID, retry identical inputs, or
-  retrieve a completed revision without another model call; changed-input reuse
-  fails closed and no plan result is written to disk.
+  retrieve a completed revision without another model call. Caller IDs are
+  random UUID v4 capabilities, retrieval is bound to the original inputs, only
+  fully validated results enter the cache, and no plan result is written to disk.
 
 ## 0.8.0 — Unreleased
 

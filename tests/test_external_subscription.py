@@ -77,7 +77,7 @@ class ExternalSubscriptionTests(unittest.TestCase):
         revision = {
             **expected,
             "signal": "PLAN_REVISION",
-            "operation_id": "revision-42",
+            "operation_id": "00000000-0000-4000-8000-000000000042",
             "cache_hit": False,
         }
         with mock.patch.object(
@@ -90,7 +90,7 @@ class ExternalSubscriptionTests(unittest.TestCase):
                     "current_plan": "v1 plan",
                     "critique": "F-1",
                     "history": "none",
-                    "operation_id": "revision-42",
+                    "operation_id": "00000000-0000-4000-8000-000000000042",
                 },
             )
         revise.assert_called_once_with(
@@ -98,7 +98,7 @@ class ExternalSubscriptionTests(unittest.TestCase):
             current_plan="v1 plan",
             critique="F-1",
             history="none",
-            operation_id="revision-42",
+            operation_id="00000000-0000-4000-8000-000000000042",
         )
         self.assertIs(result, revision)
 

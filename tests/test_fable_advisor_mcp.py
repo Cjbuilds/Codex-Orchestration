@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -26,6 +27,10 @@ SPEC = importlib.util.spec_from_file_location("fable_advisor_mcp", SCRIPT)
 assert SPEC and SPEC.loader
 FABLE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(FABLE)
+
+
+def revision_operation_id(index: int) -> str:
+    return f"00000000-0000-4000-8000-{index:012x}"
 
 
 class FableAdvisorMcpTests(unittest.TestCase):
@@ -448,7 +453,7 @@ class FableAdvisorMcpTests(unittest.TestCase):
             "Version v1\nplan",
             "F-1: missing verification",
             "F-0 incorporated",
-            "revision-valid",
+            revision_operation_id(1),
             model_response="Free-form text without a plan signal is ignored.",
             structured_output=structured,
         )
@@ -500,7 +505,7 @@ class FableAdvisorMcpTests(unittest.TestCase):
                         "v1 plan",
                         "F-1",
                         "history",
-                        f"malformed-{index}",
+                        revision_operation_id(10 + index),
                         model_response="ignored",
                         structured_output=structured_output,
                     )
@@ -521,7 +526,9 @@ class FableAdvisorMcpTests(unittest.TestCase):
 
     def test_revision_retry_and_fetch_are_idempotent_and_fail_closed(self) -> None:
         self.write_state(planner=self.route())
-        inputs = ("task", "v1 plan", "F-1", "history", "revision-retry")
+        operation_id = revision_operation_id(20)
+        revision_inputs = ("task", "v1 plan", "F-1", "history")
+        inputs = (*revision_inputs, operation_id)
         structured = {
             "signal": "PLAN_REVISION",
             "findings_ledger": "F-1 — INCORPORATED: reason",
@@ -541,7 +548,7 @@ class FableAdvisorMcpTests(unittest.TestCase):
         )
         self.assertFalse(first["cache_hit"])
         self.assertTrue(second["cache_hit"])
-        self.assertEqual(first["operation_id"], "revision-retry")
+        self.assertEqual(first["operation_id"], operation_id)
         self.assertEqual(first["revision"], second["revision"])
         command = first_calls[1][0]
         self.assertEqual(command.count("--no-session-persistence"), 1)
@@ -553,6 +560,9 @@ class FableAdvisorMcpTests(unittest.TestCase):
         with (
             mock.patch.dict(os.environ, {"CODEX_HOME": str(self.home)}),
             mock.patch.object(
+                FABLE, "resolve_claude", return_value=Path("/fake/claude")
+            ),
+            mock.patch.object(
                 FABLE,
                 "check_claude_auth",
                 return_value={
@@ -561,11 +571,31 @@ class FableAdvisorMcpTests(unittest.TestCase):
                 },
             ),
         ):
-            fetched = FABLE.get_plan_revision("revision-retry")
+            fetched = FABLE.get_plan_revision(operation_id, *revision_inputs)
             with self.assertRaisesRegex(FABLE.AdvisorError, "No completed"):
-                FABLE.get_plan_revision("revision-missing")
+                FABLE.get_plan_revision(
+                    revision_operation_id(21), *revision_inputs
+                )
+            with self.assertRaisesRegex(FABLE.AdvisorError, "No completed"):
+                FABLE.get_plan_revision(
+                    operation_id, "task", "changed plan", "F-1", "history"
+                )
         self.assertTrue(fetched["cache_hit"])
         self.assertEqual(fetched["revision"], first["revision"])
+
+        with (
+            mock.patch.dict(os.environ, {"CODEX_HOME": str(self.home)}),
+            mock.patch.object(
+                FABLE, "resolve_claude", return_value=Path("/fake/claude")
+            ),
+            mock.patch.object(
+                FABLE,
+                "check_claude_auth",
+                side_effect=FABLE.AdvisorError("authentication drifted"),
+            ),
+        ):
+            with self.assertRaisesRegex(FABLE.AdvisorError, "authentication drifted"):
+                FABLE.get_plan_revision(operation_id, *revision_inputs)
 
         with self.assertRaisesRegex(FABLE.AdvisorError, "different inputs"):
             self.invoke_with_results(
@@ -574,13 +604,118 @@ class FableAdvisorMcpTests(unittest.TestCase):
                 "changed plan",
                 "F-1",
                 "history",
-                "revision-retry",
+                operation_id,
                 model_response="must not be used",
             )
 
+        self.write_state(planner=self.route("max"))
+        with mock.patch.dict(os.environ, {"CODEX_HOME": str(self.home)}):
+            with self.assertRaisesRegex(FABLE.AdvisorError, "No completed"):
+                FABLE.get_plan_revision(operation_id, *revision_inputs)
+
+    def test_revision_is_cached_only_after_complete_contract_validation(self) -> None:
+        self.write_state(planner=self.route())
+        operation_id = revision_operation_id(30)
+        poisoned = {
+            "signal": "PLAN_REVISION",
+            "findings_ledger": "F-1 — INCORPORATED: reason",
+            "revised_plan": "v2 plan\n## REVISED_PLAN\nnested envelope heading",
+        }
+        with self.assertRaisesRegex(FABLE.AdvisorError, "exactly one"):
+            self.invoke_with_results(
+                FABLE.revise_plan,
+                "task",
+                "v1 plan",
+                "F-1",
+                "history",
+                operation_id,
+                model_response="ignored",
+                structured_output=poisoned,
+            )
+        self.assertNotIn(operation_id, FABLE._REVISION_CACHE)
+
+        valid = {
+            "signal": "PLAN_REVISION",
+            "findings_ledger": "F-1 — INCORPORATED: reason",
+            "revised_plan": "v2 plan",
+        }
+        retried, calls = self.invoke_with_results(
+            FABLE.revise_plan,
+            "task",
+            "v1 plan",
+            "F-1",
+            "history",
+            operation_id,
+            model_response="ignored",
+            structured_output=valid,
+        )
+        self.assertFalse(retried["cache_hit"])
+        self.assertEqual(len(calls), 2)
+        self.assertIn(operation_id, FABLE._REVISION_CACHE)
+
+    def test_completed_revision_can_be_fetched_after_caller_stops_waiting(self) -> None:
+        self.write_state(planner=self.route())
+        operation_id = revision_operation_id(31)
+        revision_inputs = ("task", "v1 plan", "F-1", "history")
+        model_started = threading.Event()
+        release_model = threading.Event()
+        model_calls = 0
+        result: dict[str, object] = {}
+        structured = {
+            "signal": "PLAN_REVISION",
+            "findings_ledger": "F-1 — INCORPORATED: reason",
+            "revised_plan": "v2 plan",
+        }
+
+        def fake_run(
+            command: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            nonlocal model_calls
+            if command[-2:] == ["auth", "status"]:
+                return self.auth_result()
+            model_calls += 1
+            model_started.set()
+            if not release_model.wait(timeout=2):
+                raise AssertionError("test did not release the model call")
+            return self.model_result("ignored", structured_output=structured)
+
+        def invoke_revision() -> None:
+            result.update(
+                FABLE.revise_plan(*revision_inputs, operation_id=operation_id)
+            )
+
+        with (
+            mock.patch.dict(os.environ, {"CODEX_HOME": str(self.home)}),
+            mock.patch.object(
+                FABLE, "resolve_claude", return_value=Path("/fake/claude")
+            ),
+            mock.patch.object(FABLE.subprocess, "run", side_effect=fake_run),
+        ):
+            worker = threading.Thread(target=invoke_revision)
+            worker.start()
+            self.assertTrue(model_started.wait(timeout=1))
+            worker.join(timeout=0.01)
+            self.assertTrue(worker.is_alive())
+            release_model.set()
+            worker.join(timeout=2)
+            self.assertFalse(worker.is_alive())
+            fetched = FABLE.get_plan_revision(operation_id, *revision_inputs)
+
+        self.assertEqual(model_calls, 1)
+        self.assertEqual(fetched["revision"], result["revision"])
+        self.assertTrue(fetched["cache_hit"])
+
     def test_revision_operation_ids_and_completed_cache_are_bounded(self) -> None:
         self.write_state(planner=self.route())
-        for operation_id in ("", "contains space", "x" * 129):
+        with self.assertRaisesRegex(FABLE.AdvisorError, "derive"):
+            FABLE._revision_operation_id(None, fingerprint="")
+        for operation_id in (
+            "",
+            "predictable-revision-id",
+            "00000000-0000-1000-8000-000000000000",
+            "00000000-0000-4000-7000-000000000000",
+            "x" * 72,
+        ):
             with self.subTest(operation_id=operation_id):
                 with self.assertRaisesRegex(FABLE.AdvisorError, "operation_id"):
                     self.invoke_with_results(
@@ -738,7 +873,10 @@ class FableAdvisorMcpTests(unittest.TestCase):
             tools[1]["inputSchema"]["required"],
             ["task", "current_plan", "critique", "history"],
         )
-        self.assertEqual(tools[2]["inputSchema"]["required"], ["operation_id"])
+        self.assertEqual(
+            tools[2]["inputSchema"]["required"],
+            ["operation_id", "task", "current_plan", "critique", "history"],
+        )
         self.assertEqual(tools[3]["inputSchema"]["required"], ["packet"])
         self.assertEqual(
             tools[1]["inputSchema"]["properties"]["operation_id"]["maxLength"],
@@ -746,17 +884,56 @@ class FableAdvisorMcpTests(unittest.TestCase):
         )
         self.assertEqual(
             tools[1]["inputSchema"]["properties"]["operation_id"]["pattern"],
-            FABLE.OPERATION_ID_RE.pattern,
+            FABLE.CALLER_OPERATION_ID_RE.pattern,
         )
         self.assertEqual(
             tools[2]["inputSchema"]["properties"]["operation_id"]["pattern"],
-            FABLE.OPERATION_ID_RE.pattern,
+            FABLE.RETRIEVAL_OPERATION_ID_RE.pattern,
         )
         for name in ("task", "current_plan", "critique", "history"):
             self.assertEqual(
                 tools[1]["inputSchema"]["properties"][name]["maxLength"],
                 FABLE.MAX_INPUT_CHARS,
             )
+            self.assertEqual(
+                tools[2]["inputSchema"]["properties"][name]["maxLength"],
+                FABLE.MAX_INPUT_CHARS,
+            )
+
+    def test_mcp_handler_rejects_missing_or_null_operation_ids_before_state(self) -> None:
+        revise_arguments = {
+            "task": "task",
+            "current_plan": "v1 plan",
+            "critique": "F-1",
+            "history": "history",
+            "operation_id": None,
+        }
+        retrieve_arguments = {
+            "task": "task",
+            "current_plan": "v1 plan",
+            "critique": "F-1",
+            "history": "history",
+        }
+        calls = (
+            ("revise_plan", revise_arguments),
+            ("get_plan_revision", retrieve_arguments),
+            ("get_plan_revision", {**retrieve_arguments, "operation_id": None}),
+        )
+        with mock.patch.object(FABLE, "load_fable_route") as load_route:
+            for index, (name, arguments) in enumerate(calls, start=1):
+                with self.subTest(name=name, arguments=arguments):
+                    response = FABLE.handle_request(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": index,
+                            "method": "tools/call",
+                            "params": {"name": name, "arguments": arguments},
+                        }
+                    )
+                    self.assertTrue(response["result"]["isError"])
+                    error = json.loads(response["result"]["content"][0]["text"])
+                    self.assertIn("operation_id", error["error"])
+        load_route.assert_not_called()
 
     def test_status_reports_planner_or_advisor_without_account_metadata(self) -> None:
         scenarios = (

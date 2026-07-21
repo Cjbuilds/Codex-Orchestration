@@ -49,8 +49,15 @@ PLAN_REVISION_SCHEMA = {
     "required": ["signal", "findings_ledger", "revised_plan"],
     "additionalProperties": False,
 }
-MAX_OPERATION_ID_CHARS = 128
-OPERATION_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+MAX_OPERATION_ID_CHARS = 71
+CALLER_OPERATION_ID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+)
+DERIVED_OPERATION_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+RETRIEVAL_OPERATION_ID_RE = re.compile(
+    rf"^(?:{CALLER_OPERATION_ID_RE.pattern[1:-1]}|"
+    rf"{DERIVED_OPERATION_ID_RE.pattern[1:-1]})$"
+)
 REVISION_CACHE_MAX_ENTRIES = 4
 _REVISION_CACHE: dict[str, dict[str, Any]] = {}
 SENSITIVE_ENV = {
@@ -267,10 +274,21 @@ def _revision_fingerprint(
 
 def _revision_operation_id(value: str | None, *, fingerprint: str) -> str:
     if value is None:
-        return f"sha256:{fingerprint}"
-    if not isinstance(value, str) or not OPERATION_ID_RE.fullmatch(value):
+        derived = f"sha256:{fingerprint}"
+        if not DERIVED_OPERATION_ID_RE.fullmatch(derived):
+            raise AdvisorError("Could not derive a valid plan revision operation ID.")
+        return derived
+    if not isinstance(value, str) or not CALLER_OPERATION_ID_RE.fullmatch(value):
         raise AdvisorError(
-            "`operation_id` must use 1-128 ASCII letters, digits, `.`, `_`, `:`, or `-`."
+            "`operation_id` must be a lowercase random UUID v4."
+        )
+    return value
+
+
+def _required_revision_operation_id(value: Any) -> str:
+    if not isinstance(value, str) or not RETRIEVAL_OPERATION_ID_RE.fullmatch(value):
+        raise AdvisorError(
+            "`operation_id` must be a caller UUID v4 or an ID returned by revise_plan."
         )
     return value
 
@@ -330,6 +348,11 @@ def _invoke_fable(
                 raise AdvisorError(
                     "The plan revision operation ID belongs to different inputs."
                 )
+            try:
+                _validate_revision_structure(cached["response"])
+            except AdvisorError:
+                _REVISION_CACHE.pop(revision_id, None)
+                raise
             return (
                 cached["signal"],
                 cached["response"],
@@ -442,6 +465,7 @@ def _invoke_fable(
             f"Claude Fable 5 {operation} omitted the required {expected} signal."
         )
     if revision_id is not None and revision_fingerprint is not None:
+        _validate_revision_structure(response)
         if (
             revision_id not in _REVISION_CACHE
             and len(_REVISION_CACHE) >= REVISION_CACHE_MAX_ENTRIES
@@ -513,6 +537,17 @@ def _validate_revision_structure(response: str) -> None:
         )
 
 
+def _revision_prompt(values: dict[str, str]) -> str:
+    return "\n\n".join(
+        (
+            "# ORIGINAL_TASK\n" + values["task"],
+            "# CANONICAL_CURRENT_PLAN_WITH_SOURCE_VERSION\n" + values["current_plan"],
+            "# LATEST_ADVISOR_CRITIQUE_WITH_STABLE_FINDING_IDS\n" + values["critique"],
+            "# COMPACT_CUMULATIVE_FINDINGS_HISTORY\n" + values["history"],
+        )
+    )
+
+
 def revise_plan(
     task: str,
     current_plan: str,
@@ -527,14 +562,7 @@ def revise_plan(
         critique=critique,
         history=history,
     )
-    prompt = "\n\n".join(
-        (
-            "# ORIGINAL_TASK\n" + values["task"],
-            "# CANONICAL_CURRENT_PLAN_WITH_SOURCE_VERSION\n" + values["current_plan"],
-            "# LATEST_ADVISOR_CRITIQUE_WITH_STABLE_FINDING_IDS\n" + values["critique"],
-            "# COMPACT_CUMULATIVE_FINDINGS_HISTORY\n" + values["history"],
-        )
-    )
+    prompt = _revision_prompt(values)
     signal, response, route, auth, used_models, revision_id, cache_hit = _invoke_fable(
         operation="plan revision",
         seat="planner",
@@ -553,17 +581,42 @@ def revise_plan(
     }
 
 
-def get_plan_revision(operation_id: str) -> dict[str, Any]:
-    selected = _revision_operation_id(operation_id, fingerprint="")
+def get_plan_revision(
+    operation_id: str,
+    task: str,
+    current_plan: str,
+    critique: str,
+    history: str,
+) -> dict[str, Any]:
+    selected = _required_revision_operation_id(operation_id)
+    values = _validate_inputs(
+        "plan revision retrieval",
+        task=task,
+        current_plan=current_plan,
+        critique=critique,
+        history=history,
+    )
     route = load_fable_route(seat="planner")
-    auth = check_claude_auth()
+    fingerprint = _revision_fingerprint(
+        prompt=_revision_prompt(values),
+        system_prompt=PLANNER_REVISE_SYSTEM_PROMPT,
+        route=route,
+    )
     cached = _REVISION_CACHE.get(selected)
-    if cached is None:
-        raise AdvisorError("No completed plan revision exists for that operation ID.")
-    if cached["route"] != route:
-        raise AdvisorError("The plan revision operation belongs to another Planner route.")
+    if (
+        cached is None
+        or cached["fingerprint"] != fingerprint
+        or cached["route"] != route
+    ):
+        raise AdvisorError("No completed plan revision matches those inputs.")
+    claude = resolve_claude()
+    auth = check_claude_auth(claude)
     response = cached["response"]
-    _validate_revision_structure(response)
+    try:
+        _validate_revision_structure(response)
+    except AdvisorError:
+        _REVISION_CACHE.pop(selected, None)
+        raise
     return {
         "signal": cached["signal"],
         "revision": response,
@@ -664,8 +717,8 @@ def tool_definitions() -> list[dict[str, Any]]:
                     "operation_id": {
                         "type": "string",
                         "maxLength": MAX_OPERATION_ID_CHARS,
-                        "pattern": OPERATION_ID_RE.pattern,
-                        "description": "Optional caller-known idempotency key for retry and retrieval.",
+                        "pattern": CALLER_OPERATION_ID_RE.pattern,
+                        "description": "Optional caller-generated random UUID v4 for retry and retrieval.",
                     },
                 },
                 "required": ["task", "current_plan", "critique", "history"],
@@ -676,18 +729,28 @@ def tool_definitions() -> list[dict[str, Any]]:
         {
             "name": "get_plan_revision",
             "title": "Retrieve a completed Claude Fable 5 plan revision",
-            "description": "Retrieve a completed idempotent revision from this loaded bridge without another model call.",
+            "description": "Retrieve an input-bound completed revision from this loaded bridge without another model call.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
+                    "task": {**string_property, "description": "Original task."},
+                    "current_plan": {**string_property, "description": "Canonical current plan with source version."},
+                    "critique": {**string_property, "description": "Latest Advisor critique with stable finding IDs."},
+                    "history": {**string_property, "description": "Compact cumulative findings history."},
                     "operation_id": {
                         "type": "string",
                         "maxLength": MAX_OPERATION_ID_CHARS,
-                        "pattern": OPERATION_ID_RE.pattern,
+                        "pattern": RETRIEVAL_OPERATION_ID_RE.pattern,
                         "description": "Operation ID supplied to or returned by revise_plan.",
                     }
                 },
-                "required": ["operation_id"],
+                "required": [
+                    "operation_id",
+                    "task",
+                    "current_plan",
+                    "critique",
+                    "history",
+                ],
                 "additionalProperties": False,
             },
             "annotations": annotations,
@@ -758,18 +821,38 @@ def handle_request(request: dict[str, Any]) -> dict[str, Any] | None:
                     arguments,
                     {"task", "current_plan", "critique", "history", "operation_id"},
                 )
+                operation_id = None
+                if "operation_id" in args:
+                    if not isinstance(args["operation_id"], str):
+                        raise AdvisorError(
+                            "`operation_id` must be a lowercase random UUID v4."
+                        )
+                    operation_id = _revision_operation_id(
+                        args["operation_id"], fingerprint=""
+                    )
                 result = _tool_result(
                     revise_plan(
                         args.get("task"),
                         args.get("current_plan"),
                         args.get("critique"),
                         args.get("history"),
-                        args.get("operation_id"),
+                        operation_id,
                     )
                 )
             elif name == "get_plan_revision":
-                args = _tool_arguments(arguments, {"operation_id"})
-                result = _tool_result(get_plan_revision(args.get("operation_id")))
+                args = _tool_arguments(
+                    arguments,
+                    {"operation_id", "task", "current_plan", "critique", "history"},
+                )
+                result = _tool_result(
+                    get_plan_revision(
+                        args.get("operation_id"),
+                        args.get("task"),
+                        args.get("current_plan"),
+                        args.get("critique"),
+                        args.get("history"),
+                    )
+                )
             elif name == "review_plan":
                 args = _tool_arguments(arguments, {"packet"})
                 result = _tool_result(review_plan(args.get("packet")))

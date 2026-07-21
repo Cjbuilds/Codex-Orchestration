@@ -536,7 +536,7 @@ def main() -> int:
                 "Explicit seat labels are authoritative",
                 "never reinterpret a supplied `planner:` model as an Advisor",
                 "Fable Planner uses `create_plan` and `revise_plan`",
-                "`get_plan_revision` can retrieve a completed result",
+                "`get_plan_revision` requires that ID plus the same revision inputs",
                 "Designer may edit only explicitly delegated design artifacts",
                 "is Kimi available to use as Designer?",
                 "Implicit invocation is discovery, not mutation authority",
