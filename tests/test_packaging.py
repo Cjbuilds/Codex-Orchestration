@@ -393,7 +393,7 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("PLAN_APPROVED", skill)
         self.assertIn("PLAN_REVISE", skill)
         self.assertIn("report only to the root", skill)
-        self.assertIn("Never exceed five total Advisor reviews", skill)
+        self.assertIn("Never exceed eight total Advisor reviews", skill)
         self.assertIn("compact cumulative findings ledger", skill)
         self.assertNotIn("at most one confirmation pass", skill)
         self.assertIn("it never counts as approval", skill)
