@@ -32,7 +32,7 @@ PLUGIN_ID = "codex-orchestration@codex-orchestration"
 MARKETPLACE_NAME = "codex-orchestration"
 OLD_RELEASE = "a1d9c546665c3253cdcaa8fe5c0c060199a6126c"
 OLD_VERSION = "0.5.0"
-NEW_VERSION = "0.7.2"
+NEW_VERSION = "0.8.0"
 COMMAND_TIMEOUT_SECONDS = 60
 
 

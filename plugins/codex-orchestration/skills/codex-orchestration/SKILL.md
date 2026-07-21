@@ -42,14 +42,19 @@ For a question such as `is Kimi available to use as Designer?`, enter this skill
 implicitly and run `external status` from the installed skill before answering.
 Never infer External Model availability from the currently exposed MCP or subagent
 tool list. A visible Fable tool is not an exhaustive provider or role inventory.
-Report the result in three separate terms:
+Report the result in four separate terms:
 
 - `supported`: the exact display name maps to a bundled audited manifest;
 - `configured`: the exact provider/model/effort and role exist without drift;
-- `callable now`: status is `READY` and read-only `resolve` succeeds for the exact
-  role and effort in the current workspace.
+- `locally ready`: status is `READY` and read-only `resolve` succeeds for the exact
+  role and effort in the current workspace;
+- `callable now`: a sealed `invoke` has successfully attested the active binary,
+  required CLI controls and feature catalog, unchanged registry, and accepted the
+  model call. Read-only discovery must report this as unconfirmed rather than make
+  a model call.
 
-Say Kimi K3 is available to use as Designer only when all three are true. Otherwise,
+Say Kimi K3 is available to use as Designer only when support, configuration, local
+readiness, and callability are all true. Otherwise,
 say it is supported but not yet callable, name the exact lifecycle state, and give
 the next action. Never answer that the plugin does not expose Kimi merely because a
 Kimi-specific tool is absent; the route is materialized through the External Model
@@ -109,8 +114,9 @@ Do not print omitted, `none`, or implicit-root seats. On a role-selection-only i
 activation lines are the entire successful response: do not add a heading,
 preamble, route internals, or delegation boilerplate.
 
-Use `Activated` only after that exact route is ready and callable in the current
-task. It means available for this task, not `used and confirmed` runtime identity.
+Use `Activated` only after that exact route is locally ready and its sealed invoke
+preflight succeeds for the active binary in the current task. It means available
+for this task, not `used and confirmed` runtime identity.
 If authentication, qualification, connection, restart, resolution, or another
 required boundary remains, report the exact lifecycle state and next action instead of `Activated`.
 Never mix a false activation line into a blocker response. For a
@@ -208,10 +214,13 @@ An external Designer is not a native direct-model Designer: never pass it to `--
 the root-provider model catalog, or the persistent routing schema; always inspect `external status` first and compare the requested role, provider,
 model, and effort with the strict registry result. Then follow exactly one state:
 
-- If the exact role is `READY`, run read-only `resolve` and delegate only to the
-  returned agent name.
+- If the exact role is `READY`, invoke it only with the configurator's sealed
+  `invoke` subcommand and an absolute active-host `--codex-bin`; pass the bounded
+  packet on stdin. Never execute an External Model role with `agents.spawn_agent`
+  (or any native spawn-agent namespace). `resolve` remains a read-only diagnostic.
 - If the exact role is `RESTART_REQUIRED`, tell the user to fully quit and reopen
-  Codex and start a new task. In that new task, preview and apply `ready`; run `ready` and then `resolve`, and delegate only after both succeed.
+  Codex and start a new task. In that new task, preview and apply `ready`; then use
+  sealed `invoke` only after readiness succeeds.
 - If the provider is exact, authenticated, and `CAPABILITY_VERIFIED` or `READY`, but
   role `designer` is absent, the explicit seat assignment authorizes clean role
   creation: preview and apply `connect` with the bounded purpose "Produce a design
@@ -275,9 +284,10 @@ or `latest` Kimi alias.
 
 `connect` creates one personal provider-pinned custom-agent variant for every
 manifest-validated effort. After a new task and exact integrity check, `resolve`
-maps the requested role and effort to one exact loaded agent name. Delegate only to
-that returned name. Report `route accepted` when the host accepts it. Report `used
-and confirmed` only from mechanical host/provider/rollout metadata; model self-identification is never evidence.
+maps the requested role and effort for diagnostics. Execute only with sealed
+`invoke`, never a native spawn-agent tool. Report `route accepted` when the direct
+CLI accepts it. Report `used and confirmed` only from mechanical
+host/provider/rollout metadata; model self-identification is never evidence.
 
 For an unavailable provider, effort, auth helper, role file, or readiness state,
 stop and report the exact blocker. `CLI_CHANGED`, `CONFIG_DRIFT`, `ROLE_COLLISION`,

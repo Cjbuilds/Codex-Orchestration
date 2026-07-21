@@ -82,7 +82,7 @@ Executor — GPT-5.6 Sol high: Activated
         self.assertIn("one plain line per explicitly supplied model-bearing seat", SKILL)
         self.assertIn("preserve the user's seat order", SKILL)
         self.assertIn("Do not print omitted, `none`, or implicit-root seats", SKILL)
-        self.assertIn("Use `Activated` only after that exact route is ready", SKILL)
+        self.assertIn("Use `Activated` only after that exact route is locally ready", SKILL)
         self.assertIn("lifecycle state and next action instead of `Activated`", SKILL)
         self.assertIn(
             "activation confirmation preserves the supplied `Fable 5` label", SKILL
@@ -110,7 +110,10 @@ Executor — GPT-5.6 Sol high: Activated
         self.assertIn("role `designer`", SKILL)
         self.assertIn("preview and apply `connect`", SKILL)
         self.assertIn("RESTART_REQUIRED", SKILL)
-        self.assertIn("run `ready` and then `resolve`", SKILL)
+        self.assertIn("then use\n  sealed `invoke`", SKILL)
+        self.assertIn("Never execute an External Model role with `agents.spawn_agent`", SKILL)
+        self.assertIn("`resolve` remains a read-only diagnostic", SKILL)
+        self.assertNotIn("delegate only to the returned agent name", SKILL)
         self.assertIn("do not report the requested external seat as unavailable", SKILL)
         self.assertIn("never authorizes Gate 0 billing", SKILL)
         self.assertIn("Never overwrite, repair, disconnect, or substitute", SKILL)
@@ -135,7 +138,10 @@ Executor — GPT-5.6 Sol high: Activated
         self.assertIn("`supported`", SKILL)
         self.assertIn("`configured`", SKILL)
         self.assertIn("`callable now`", SKILL)
+        self.assertIn("`locally ready`", SKILL)
         self.assertIn("read-only `resolve` succeeds", SKILL)
+        self.assertIn("a sealed `invoke` has successfully attested", SKILL)
+        self.assertIn("Read-only discovery must report this as unconfirmed", SKILL)
         self.assertIn("never authorizes configuration, credentials, or spend", README)
 
     def test_plugin_update_is_canonical_non_destructive_and_restart_bound(self) -> None:

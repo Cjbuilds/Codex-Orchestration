@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import signal
 import stat
 import subprocess
 import sys
@@ -40,6 +41,29 @@ GATE0_REQUIRED_FLAGS = (
     "--skip-git-repo-check",
     "--sandbox",
     "--output-last-message",
+)
+INVOKE_INPUT_MAX_BYTES = 1_048_576
+INVOKE_OUTPUT_MAX_BYTES = 2_097_152
+INVOKE_TIMEOUT_SECONDS = 180
+INVOKE_REQUIRED_FLAGS = GATE0_REQUIRED_FLAGS + ("--ignore-rules", "--disable")
+INVOKE_DISABLED_FEATURES = (
+    "multi_agent",
+    "multi_agent_v2",
+    "apps",
+    "browser_use",
+    "in_app_browser",
+    "computer_use",
+    "image_generation",
+    "shell_tool",
+    "unified_exec",
+    "skill_search",
+    "tool_suggest",
+)
+INVOKE_OPTIONAL_FEATURES = frozenset({"skill_search"})
+INVOKE_REQUIRED_FEATURES = tuple(
+    feature
+    for feature in INVOKE_DISABLED_FEATURES
+    if feature not in INVOKE_OPTIONAL_FEATURES
 )
 PURPOSE_MAX_CHARS = 2_000
 ROLE_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
@@ -576,6 +600,359 @@ def _read_gate0_last_message(path: Path) -> str:
         ) from exc
 
 
+def _read_invoke_last_message(path: Path) -> str:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        info = path.stat(follow_symlinks=False)
+        _require(
+            not path.is_symlink()
+            and stat.S_ISREG(info.st_mode)
+            and info.st_nlink == 1,
+            "external invocation result is unsafe; provider output withheld",
+        )
+        descriptor = os.open(path, flags)
+        try:
+            opened = os.fstat(descriptor)
+            _require(
+                (opened.st_dev, opened.st_ino) == (info.st_dev, info.st_ino),
+                "external invocation result changed before reading; output withheld",
+            )
+            _require(
+                opened.st_size <= INVOKE_OUTPUT_MAX_BYTES,
+                "external invocation result is oversized; provider output withheld",
+            )
+            chunks: list[bytes] = []
+            remaining = INVOKE_OUTPUT_MAX_BYTES + 1
+            while remaining:
+                chunk = os.read(descriptor, remaining)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            raw = b"".join(chunks)
+            after = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+    except OSError as exc:
+        raise ExternalConfigurationError(
+            "external invocation did not produce a safe result; provider output withheld"
+        ) from exc
+    _require(
+        (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_nlink)
+        == (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns, 1),
+        "external invocation result changed while reading; output withheld",
+    )
+    _require(
+        len(raw) <= INVOKE_OUTPUT_MAX_BYTES and len(raw) == after.st_size,
+        "external invocation result is oversized; provider output withheld",
+    )
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ExternalConfigurationError(
+            "external invocation result is unreadable; provider output withheld"
+        ) from exc
+
+
+def _verify_invoke_cli_contract(
+    codex_binary: Path, *, cwd: Path, environment: dict[str, str]
+) -> tuple[str, ...]:
+    try:
+        completed = subprocess.run(
+            [str(codex_binary), "exec", "--help"],
+            cwd=cwd,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=GATE0_HELP_TIMEOUT_SECONDS,
+            shell=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ExternalConfigurationError(
+            "external invocation CLI contract could not be verified; output withheld"
+        ) from exc
+    help_text = f"{completed.stdout}\n{completed.stderr}"
+    flags_present = all(
+        re.search(rf"(?m)^\s*(?:-[A-Za-z],\s*)?{re.escape(flag)}(?:\s|$)", help_text)
+        is not None
+        for flag in INVOKE_REQUIRED_FLAGS
+    )
+    read_only_present = re.search(
+        r"--sandbox\b[\s\S]{0,500}\bread-only\b", help_text
+    ) is not None
+    _require(
+        completed.returncode == 0 and flags_present and read_only_present,
+        "external invocation CLI contract is unsupported; no model call was started",
+    )
+    try:
+        catalog = subprocess.run(
+            [str(codex_binary), "features", "list"],
+            cwd=cwd,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=GATE0_HELP_TIMEOUT_SECONDS,
+            shell=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ExternalConfigurationError(
+            "external invocation feature catalog could not be verified; output withheld"
+        ) from exc
+    _require(
+        catalog.returncode == 0,
+        "external invocation feature catalog failed; no model call was started",
+    )
+    advertised: set[str] = set()
+    lines = [line for line in catalog.stdout.splitlines() if line.strip()]
+    _require(bool(lines), "external invocation feature catalog is invalid")
+    for line in lines:
+        match = re.fullmatch(
+            r"\s*([a-z][a-z0-9_]*)\s+.+?\s+(?:true|false)\s*", line
+        )
+        _require(match is not None, "external invocation feature catalog is invalid")
+        name = match.group(1)
+        _require(
+            name not in advertised,
+            "external invocation feature catalog is invalid",
+        )
+        advertised.add(name)
+    _require(
+        set(INVOKE_REQUIRED_FEATURES) <= advertised,
+        "external invocation required feature controls are unavailable; no model call was started",
+    )
+    return tuple(
+        feature for feature in INVOKE_DISABLED_FEATURES if feature in advertised
+    )
+
+
+def _terminate_invoke_process(process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, signal.SIGKILL)
+        else:
+            if hasattr(signal, "CTRL_BREAK_EVENT"):
+                process.send_signal(signal.CTRL_BREAK_EVENT)
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+            else:
+                process.kill()
+    except (OSError, ProcessLookupError):
+        process.kill()
+    try:
+        process.wait(timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def _run_invoke_process(
+    command: list[str], *, cwd: Path, environment: dict[str, str], prompt: bytes
+) -> int:
+    creationflags = 0
+    popen_kwargs: dict[str, Any] = {}
+    if os.name == "posix":
+        popen_kwargs["start_new_session"] = True
+    else:
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    process: subprocess.Popen[bytes] | None = None
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            env=environment,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            shell=False,
+            creationflags=creationflags,
+            **popen_kwargs,
+        )
+        process.communicate(input=prompt, timeout=INVOKE_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as exc:
+        raise ExternalConfigurationError(
+            "external invocation timed out; provider output withheld"
+        ) from exc
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except Exception as exc:
+        raise ExternalConfigurationError(
+            "external invocation could not complete; provider output withheld"
+        ) from exc
+    finally:
+        if process is not None and process.poll() is None:
+            _terminate_invoke_process(process)
+    return process.returncode
+
+
+def _read_exact_role_instruction(agent: dict[str, str]) -> str:
+    path = Path(agent["file"])
+    flags = os.O_RDONLY
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        path_info = path.stat(follow_symlinks=False)
+        _require(
+            not path.is_symlink()
+            and stat.S_ISREG(path_info.st_mode)
+            and path_info.st_nlink == 1,
+            "role agent is missing or unsafe",
+        )
+        descriptor = os.open(path, flags)
+        try:
+            before = os.fstat(descriptor)
+            _require(
+                (before.st_dev, before.st_ino) == (path_info.st_dev, path_info.st_ino),
+                "role agent changed before reading",
+            )
+            chunks: list[bytes] = []
+            while True:
+                chunk = os.read(descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            after = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+    except OSError as exc:
+        raise ExternalConfigurationError("role agent is missing or unreadable") from exc
+    _require(
+        stat.S_ISREG(before.st_mode) and before.st_nlink == 1,
+        "role agent is missing or unsafe",
+    )
+    _require(
+        (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_nlink)
+        == (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, 1),
+        "role agent changed while reading",
+    )
+    raw = b"".join(chunks)
+    _require(hashlib.sha256(raw).hexdigest() == agent["sha256"], "role agent drifted")
+    try:
+        parsed = tomllib.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise ExternalConfigurationError("role agent is unreadable") from exc
+    instruction = parsed.get("developer_instructions")
+    _require(
+        type(instruction) is str and bool(instruction.strip()),
+        "role instruction is invalid",
+    )
+    return instruction
+
+
+def _decode_invoke_packet(packet: bytes) -> str:
+    _require(0 < len(packet) <= INVOKE_INPUT_MAX_BYTES, "invoke packet size is invalid")
+    try:
+        return packet.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ExternalConfigurationError("invoke packet must be valid UTF-8") from exc
+
+
+def invoke_role(
+    home: Path,
+    role_id: str,
+    effort: str,
+    packet: bytes,
+    backend: ConfigBackend,
+    codex_binary: Path,
+    *,
+    workspace: Path | None = None,
+) -> dict[str, str]:
+    """Invoke one READY external role through a sealed, tool-free Codex exec."""
+
+    packet_text = _decode_invoke_packet(packet)
+
+    registry, registry_digest = load_registry(home)
+    _require(registry_digest is not None, "external registry is not configured")
+    route = resolve_role(
+        home,
+        role_id,
+        effort,
+        backend,
+        workspace,
+        registry_snapshot=(registry, registry_digest),
+    )
+    role = registry["roles"].get(role_id)
+    _require(
+        role is not None
+        and role["provider"] == route["provider"]
+        and role["model"] == route["model"]
+        and route["effort"] in role["effort_agents"],
+        "external route changed during invocation",
+    )
+    agent = role["effort_agents"][route["effort"]]
+    instruction = _read_exact_role_instruction(agent)
+
+    supplied_binary = codex_binary.expanduser()
+    _require(supplied_binary.is_absolute(), "invoke requires an absolute --codex-bin")
+    target, fingerprint = external_cli_trust.fingerprint(supplied_binary)
+    external_cli_trust.version(target)
+    provider = external_providers.load_provider(route["provider"])
+    record = registry["providers"][route["provider"]]
+    config = _expected_provider_config(home, provider, record, registry)
+    prompt = (
+        "<sealed_external_role_instruction>\n"
+        + instruction
+        + "\n</sealed_external_role_instruction>\n<bounded_task_packet>\n"
+        + packet_text
+        + "\n</bounded_task_packet>\n"
+    ).encode("utf-8")
+    with tempfile.TemporaryDirectory(prefix="codex-orchestration-invoke-") as raw:
+        isolated_home = Path(raw)
+        environment = _gate0_environment(isolated_home)
+        disabled_features = _verify_invoke_cli_contract(
+            target, cwd=isolated_home, environment=environment
+        )
+        config_path = isolated_home / "config.toml"
+        config_path.write_text(
+            _gate0_config(provider, config, route["model"], route["effort"]),
+            encoding="utf-8",
+        )
+        if os.name == "posix":
+            config_path.chmod(0o600)
+        output_path = isolated_home / "last-message.txt"
+        target_after, fingerprint_after = external_cli_trust.fingerprint(target)
+        _require(
+            target_after == target and fingerprint_after == fingerprint,
+            "CLI_CHANGED: executable changed before invocation",
+        )
+        _, current_registry_digest = load_registry(home)
+        _require(
+            current_registry_digest == registry_digest,
+            "external registry changed during invocation",
+        )
+        command = [
+            str(target), "exec", "--ephemeral", "--skip-git-repo-check",
+            "--sandbox", "read-only", "--ignore-rules", "--output-last-message",
+            os.fspath(output_path),
+        ]
+        for feature in disabled_features:
+            command.extend(("--disable", feature))
+        command.append("-")
+        returncode = _run_invoke_process(
+            command, cwd=isolated_home, environment=environment, prompt=prompt
+        )
+        _require(
+            returncode == 0,
+            f"external invocation failed with exit {returncode}; provider output withheld",
+        )
+        output = _read_invoke_last_message(output_path)
+    return {**route, "output": output}
+
+
 def run_gate0(
     home: Path,
     provider_id: str,
@@ -871,10 +1248,11 @@ def resolve_role(
     effort: str,
     backend: ConfigBackend,
     workspace: Path | None = None,
+    registry_snapshot: tuple[dict[str, Any], str | None] | None = None,
 ) -> dict[str, str]:
     """Resolve a role only after re-attesting every route-time trust boundary."""
 
-    registry, _ = load_registry(home)
+    registry, _ = registry_snapshot or load_registry(home)
     role = registry["roles"].get(role_id)
     _require(role is not None, f"role {role_id!r} is not configured")
     _require(
@@ -1188,8 +1566,16 @@ def inspect_status(home: Path, backend: ConfigBackend | None = None) -> dict[str
 
 
 class AppServerBackend:
-    def __init__(self, codex_binary: Path, home: Path, cwd: Path) -> None:
-        self._app = native_routing.AppServer(codex_binary, home)
+    def __init__(
+        self,
+        codex_binary: Path,
+        home: Path,
+        cwd: Path,
+        environment: dict[str, str] | None = None,
+    ) -> None:
+        self._app = native_routing.AppServer(
+            codex_binary, home, environment=environment
+        )
         self._cwd = cwd
 
     def close(self) -> None:
@@ -1269,6 +1655,9 @@ def main(argv: list[str] | None = None) -> int:
     resolve = subparsers.add_parser("resolve")
     resolve.add_argument("--role", required=True)
     resolve.add_argument("--effort", default="auto")
+    invoke = subparsers.add_parser("invoke")
+    invoke.add_argument("--role", required=True)
+    invoke.add_argument("--effort", default="auto")
     disconnect = subparsers.add_parser("disconnect")
     disconnect.add_argument("--role", required=True)
     disconnect.add_argument("--apply", action="store_true")
@@ -1284,6 +1673,13 @@ def main(argv: list[str] | None = None) -> int:
     recover.add_argument("--apply", action="store_true")
     args = parser.parse_args(argv)
     try:
+        invoke_packet = (
+            sys.stdin.buffer.read(INVOKE_INPUT_MAX_BYTES + 1)
+            if args.command == "invoke"
+            else None
+        )
+        if invoke_packet is not None:
+            _decode_invoke_packet(invoke_packet)
         home = _home(args.codex_home)
         if args.command == "prepare" and not args.apply:
             provider = external_providers.load_provider(args.provider)
@@ -1384,8 +1780,27 @@ def main(argv: list[str] | None = None) -> int:
                 "must pass again before role use."
             )
             return 0
-        codex_binary = native_routing.resolve_binary(args.codex_bin)
-        with AppServerBackend(codex_binary, home, Path.cwd().resolve()) as backend:
+        if args.command == "invoke":
+            codex_binary = Path(args.codex_bin).expanduser()
+            _require(
+                codex_binary.is_absolute(),
+                "invoke requires an absolute --codex-bin",
+            )
+            codex_binary, _ = external_cli_trust.fingerprint(codex_binary)
+            external_cli_trust.version(codex_binary)
+        else:
+            codex_binary = native_routing.resolve_binary(args.codex_bin)
+        app_environment = (
+            external_cli_trust.sanitized_environment()
+            if args.command == "invoke"
+            else None
+        )
+        with AppServerBackend(
+            codex_binary,
+            home,
+            Path.cwd().resolve(),
+            environment=app_environment,
+        ) as backend:
             if args.command == "prepare":
                 command = prepare_provider(
                     home,
@@ -1418,6 +1833,21 @@ def main(argv: list[str] | None = None) -> int:
                             args.effort,
                             backend,
                             Path.cwd().resolve(),
+                        ),
+                        sort_keys=True,
+                    )
+                )
+            elif args.command == "invoke":
+                print(
+                    json.dumps(
+                        invoke_role(
+                            home,
+                            args.role,
+                            args.effort,
+                            invoke_packet,
+                            backend,
+                            codex_binary,
+                            workspace=Path.cwd().resolve(),
                         ),
                         sort_keys=True,
                     )

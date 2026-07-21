@@ -1,6 +1,13 @@
 # Changelog
 
-## 0.7.2 — Unreleased
+## 0.8.0 — Unreleased
+
+- Replace READY External Model execution through Desktop native agents with a
+  sealed direct `codex exec` transport. Packets travel only on bounded stdin;
+  output is a bounded safe last-message artifact; model-facing tools, provider
+  streams, retries, fallback, and lifecycle writes are disabled.
+- Re-attest the explicit absolute active-host Codex executable before launch and
+  preserve exact schema-1 registries and managed role files without migration.
 
 - Enable implicit skill discovery for natural-language Kimi K3, External Model,
   and model-role availability questions. The previous metadata required an explicit

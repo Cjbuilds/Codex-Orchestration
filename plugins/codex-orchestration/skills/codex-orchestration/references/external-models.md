@@ -51,7 +51,7 @@ Root must inspect external status before acting. Dispatch by exact state:
 | Tuple unqualified | Request separate billing approval immediately before one Gate 0; never infer approval from the seat label. |
 | Qualified provider, role absent | Preview and apply `connect` for role `designer` with the bounded Designer purpose. |
 | `RESTART_REQUIRED` | Require a full Desktop restart and new task; do not delegate. |
-| Exact role `READY` | Run `resolve`, then delegate only to its returned loaded agent name. |
+| Exact role `READY` | Run sealed `invoke` with the bounded packet on stdin. Never use native `agents.spawn_agent` for an External Model. |
 | Role mismatch, drift, shadow, or ambiguity | Stop with the exact blocker; never overwrite, disconnect, repair, or substitute. |
 
 The explicit seat label authorizes clean preparation and clean role creation, just as
@@ -156,9 +156,9 @@ python3 <skill-dir>/scripts/external_configurator.py connect \
 
 The configurator creates one personal provider-pinned agent per manifest-validated
 effort. Start a new Codex task so Desktop loads those files, preview `ready`, then
-apply it. Read-only `resolve --role researcher --effort max` returns the exact
-loaded agent name root should delegate to. The agent file, not prompt text, binds
-provider, model, and effort.
+apply it. Read-only `resolve --role researcher --effort max` remains available for
+diagnostics. Execution uses the exact managed agent bytes as a sealed instruction;
+the agent file still binds provider, model, and effort.
 
 ## Calling a role
 
@@ -170,12 +170,36 @@ use reviewer@high for <bounded task>
 researcher: <bounded task> (effort max)
 ```
 
-Resolve the role and effort through `external_configurator.py resolve`. Reject an
-unknown role, unsupported effort, unready state, missing agent, digest drift, or
-provider drift. Delegate only to the exact returned agent. Report `route accepted`
-when the host accepts the spawn. Report `used and confirmed` only when mechanical
-host/provider metadata names the provider and model; never rely on the model saying
-its own name.
+Send the bounded UTF-8 packet only on stdin (maximum 1 MiB):
+
+```bash
+python3 <skill-dir>/scripts/external_configurator.py \
+  --codex-bin <absolute-active-host-codex-binary> \
+  invoke --role researcher --effort max < packet.txt
+```
+
+`invoke` repeats all `resolve` integrity, qualification, authentication, role-file,
+and workspace-shadow checks, then uses an isolated temporary `CODEX_HOME` and
+`codex exec` with a read-only sandbox, ignored repository rules, and all
+model-facing tools disabled. It first reads the exact binary's fail-closed feature
+catalog, requires every transport-critical control, and emits disable flags for
+every advertised targeted feature. The known cross-version optional `skill_search`
+feature is already absent when unadvertised and receives no incompatible flag.
+It accepts only a regular, single-link UTF-8 final
+message of at most 2 MiB and returns machine-readable JSON. It never truncates,
+retries, falls back, mutates lifecycle state, or exposes provider stdout/stderr.
+The active-host binary must be an explicit absolute regular executable (PATH lookup
+is forbidden), is fingerprinted and version-checked, and is re-fingerprinted before
+launch. A nonzero exit, timeout, changed binary, unsafe artifact, or drift returns a
+generic redacted failure. `READY` means only that the role, provider configuration,
+authentication helper, and managed agent satisfy local readiness checks. It does
+not attest the active binary, CLI flags, feature catalog, upstream uptime, or
+runtime model identity; those invocation controls are checked by sealed `invoke`.
+
+On POSIX, timeout cleanup kills the new process group. On Windows, invocation uses
+a new process group, requests a group break, then hard-kills the direct child if it
+does not exit. Because model tools are disabled, the design creates no model-facing
+long-lived descendants; Windows cannot promise Unix-style descendant enumeration.
 
 ## Status, disconnect, and removal
 
@@ -202,6 +226,9 @@ content.
 The bearer value crosses one unavoidable boundary: the OS credential helper prints
 it to the Codex provider process on stdout, as required by Codex command-backed
 authentication. Surrounding logs and errors withhold helper and provider output.
+The key is never copied into invocation argv, environment, temporary config, packet,
+registry, journal, output, or error text; the isolated config retains only the exact
+command-backed helper reference.
 
 ## Adding another provider
 

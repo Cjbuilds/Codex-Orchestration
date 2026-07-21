@@ -213,7 +213,9 @@ Create a Codex Goal normally, then tell Codex to use the saved workflow until th
 `Designer: Kimi K3` selects the audited task-local External Model role without
 adding Kimi to the Desktop picker or replacing any GPT route. Kimi K3 supports only
 `max` reasoning (`auto` maps to `max`). If the exact role is already ready, the
-plugin resolves and uses it. Otherwise it walks the secure status, preparation,
+plugin invokes it through a sealed, tool-free `codex exec` transport with the task
+packet only on stdin; it never executes an External Model through native
+`agents.spawn_agent`. Otherwise it walks the secure status, preparation,
 hidden authentication, separately authorized Gate 0, connection, restart, and
 readiness states and tells you the exact next action instead of calling the route
 unavailable. The seat label never authorizes credential entry or a paid probe.
@@ -273,7 +275,9 @@ codex plugin add codex-orchestration@codex-orchestration
 Version **0.6.0 or newer** is required for External Model roles; version **0.7.0
 or newer** adds `--update`, routing repair, and Designer; version **0.7.1 or newer**
 lets the natural `Designer: Kimi K3` label enter the External Model lifecycle;
-version **0.7.2 or newer** uses the concise per-role activation confirmation.
+version **0.7.2 or newer** uses the concise per-role activation confirmation;
+version **0.8.0 or newer** uses sealed direct CLI invocation for READY External
+Model roles.
 Confirm with
 `codex plugin list --json`, then restart Codex Desktop and start a new task.
 

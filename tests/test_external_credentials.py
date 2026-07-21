@@ -14,6 +14,7 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "plugins/codex-orchestration/skills/codex-orchestration/scripts"
+sys.path.insert(0, str(SCRIPTS))
 
 
 def load(name: str):
@@ -120,6 +121,28 @@ class ExternalCredentialTests(unittest.TestCase):
         self.assertEqual(
             run.call_args.args[0],
             [*expected_prefix, "status", "--provider", "openrouter"],
+        )
+        with mock.patch.dict(
+            os.environ, {"OPENROUTER_API_KEY": "sentinel-auth-readiness-secret"}
+        ), mock.patch.object(
+            CREDENTIALS.external_cli_trust,
+            "sanitized_environment",
+            return_value={"PATH": "/safe/bin"},
+        ), mock.patch.object(
+            CREDENTIALS.subprocess, "run", return_value=completed
+        ) as sanitized_run:
+            self.assertTrue(
+                CREDENTIALS.credential_ready(
+                    helper,
+                    "openrouter",
+                    platform="win32",
+                    python_executable=interpreter,
+                )
+            )
+        self.assertEqual(sanitized_run.call_args.kwargs["env"], {"PATH": "/safe/bin"})
+        self.assertNotIn(
+            "sentinel-auth-readiness-secret",
+            repr(sanitized_run.call_args.kwargs["env"]),
         )
 
     def test_stable_helper_verification_detects_byte_drift(self) -> None:

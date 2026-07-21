@@ -26,6 +26,14 @@ Audit date: 2026-07-12. Baseline: `a674a81` (`0.4.0`).
 
 ## Deliberate boundaries that remain
 
+- External Model READY roles use a sealed direct CLI transport, not Desktop's
+  native spawn-agent server-tool path. Inputs and outputs are hard bounded, provider
+  streams are withheld, command-backed auth remains secret-free, tools are disabled,
+  and binary/config/role/shadow integrity fail closed. Windows process-group cleanup
+  can signal the group and hard-kill the child but cannot provide Unix-style
+  descendant enumeration; disabling model tools removes the supported descendant
+  creation path.
+
 - Codex currently exposes no global engine field that hard-wires one executor model. The native path installs durable routing policy on the spawn tool; the root still decides whether to delegate and supplies the route.
 - Setup-time config parsing cannot prove a future signed-in task will accept a route or expose its effective child identity. A live release check is required.
 - Direct model overrides inherit the root provider. Cross-provider use requires a provider-pinned custom agent that the user configured and authenticated separately.
