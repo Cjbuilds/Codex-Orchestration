@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
 import importlib.util
 import io
 import json
 import os
 from pathlib import Path
+import stat
 import sys
 import tempfile
 import unittest
@@ -186,12 +188,169 @@ class ZaiGlmRoleTests(unittest.TestCase):
             stored = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(stored["schema"], 1)
             self.assertNotIn("channels", stored)
-            self.assertNotIn("channel", stored["roles"]["reviewer"])
+            self.assertNotIn(
+                "reviewer",
+                stored["roles"],
+                "retired Coding Plan roles require an explicit standard reconnect",
+            )
             self.assertEqual(len(stored["qualifications"]), 1)
             self.assertEqual(
                 stored["qualifications"][0]["source"],
                 "isolated-zai-general-api-route-acceptance",
             )
+
+    def test_schema1_builtin_name_collision_is_quarantined_until_disconnect(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            prepare(home)
+            qualify(home)
+            baseline, _ = ZAI.load_registry(home, ZAI.load_manifest())
+            assert baseline is not None
+            baseline["roles"]["designer"] = {
+                "purpose": "Caller-defined legacy designer role.",
+                "model": "glm-5.2",
+                "effort": "high",
+                "max_output_tokens": 2048,
+            }
+            path = ZAI.registry_path(home)
+            path.write_text(json.dumps(baseline), encoding="utf-8")
+            path.chmod(0o600)
+
+            loaded, digest = ZAI.load_registry(home, ZAI.load_manifest())
+            assert loaded is not None
+            assert digest is not None
+            self.assertNotIn("designer", loaded["roles"])
+            task = home / "task.txt"
+            task.write_text("bounded", encoding="utf-8")
+            with self.assertRaisesRegex(ZAI.ZaiRoleError, "not configured"):
+                ZAI.call_role(home, "designer", task)
+            with self.assertRaisesRegex(ZAI.ZaiRoleError, "explicit disconnect"):
+                ZAI.activate_seat(
+                    home, "designer", "glm-5.2", "high", 8192, apply=False
+                )
+
+            ZAI.disconnect(home, "designer", apply=False)
+            ZAI.disconnect(home, "designer", apply=True)
+            persisted, _ = ZAI.load_registry(home, ZAI.load_manifest())
+            assert persisted is not None
+            self.assertNotIn("designer", persisted["roles"])
+            with mock.patch.object(
+                ZAI,
+                "_credential_state",
+                return_value=ZAI.external_credentials.CredentialState.READY,
+            ):
+                activated = ZAI.activate_seat(
+                    home, "designer", "glm-5.2", "high", 8192, apply=False
+                )
+            self.assertEqual(activated["state"], "ROLE_ABSENT")
+
+    def test_schema1_disconnect_unrelated_role_preserves_legacy_collision_exactly(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            baseline = prepare(home)
+            designer = {
+                "purpose": "Caller-defined legacy designer role.",
+                "model": "glm-5.2",
+                "effort": "high",
+                "max_output_tokens": 2048,
+            }
+            researcher = {
+                "purpose": "Gather bounded evidence.",
+                "model": "glm-5.2",
+                "effort": "high",
+                "max_output_tokens": 4096,
+            }
+            baseline["roles"] = {
+                "designer": deepcopy(designer),
+                "researcher": deepcopy(researcher),
+            }
+            path = ZAI.registry_path(home)
+            path.write_text(json.dumps(baseline), encoding="utf-8")
+            path.chmod(0o600)
+
+            ZAI.disconnect(home, "researcher", apply=True)
+            after_researcher = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(after_researcher["schema"], ZAI.REGISTRY_SCHEMA)
+            self.assertEqual(after_researcher["roles"], {"designer": designer})
+            self.assertEqual(
+                {key: value for key, value in after_researcher.items() if key != "roles"},
+                {key: value for key, value in baseline.items() if key != "roles"},
+            )
+
+            ZAI.disconnect(home, "designer", apply=True)
+            after_designer = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(after_designer["roles"], {})
+            self.assertEqual(
+                {key: value for key, value in after_designer.items() if key != "roles"},
+                {key: value for key, value in baseline.items() if key != "roles"},
+            )
+
+    def test_schema1_disconnect_preserves_multiple_reserved_sibling_records(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            baseline = prepare(home)
+            legacy_roles = {
+                seat: {
+                    "purpose": f"Caller-defined legacy {seat} role.",
+                    "model": "glm-5.2",
+                    "effort": "high",
+                    "max_output_tokens": 2048 + index,
+                }
+                for index, seat in enumerate(("advisor", "designer", "planner"))
+            }
+            baseline["roles"] = deepcopy(legacy_roles)
+            path = ZAI.registry_path(home)
+            path.write_text(json.dumps(baseline), encoding="utf-8")
+            path.chmod(0o600)
+
+            remaining = deepcopy(legacy_roles)
+            for removed in ("designer", "advisor", "planner"):
+                del remaining[removed]
+                ZAI.disconnect(home, removed, apply=True)
+                persisted = json.loads(path.read_text(encoding="utf-8"))
+                self.assertEqual(persisted["schema"], ZAI.REGISTRY_SCHEMA)
+                self.assertEqual(persisted["roles"], remaining)
+
+    def test_schema3_builtin_proof_is_required_and_unavailable_recovery_is_explicit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            baseline = prepare(home)
+            baseline["schema"] = ZAI.CODEOWNED_REGISTRY_SCHEMA
+            baseline["quarantined_roles"] = []
+            baseline["roles"]["designer"] = {
+                "purpose": ZAI.BUILTIN_SEAT_PURPOSES["designer"],
+                "model": "glm-5.2",
+                "effort": "high",
+                "max_output_tokens": 2048,
+                ZAI.ACTIVATION_PROOF_FIELD: "0" * 64,
+            }
+            path = ZAI.registry_path(home)
+            path.write_text(json.dumps(baseline), encoding="utf-8")
+            path.chmod(0o600)
+            key = ZAI._load_or_create_proof_key(home)
+            self.assertEqual(len(key), ZAI.PROOF_KEY_BYTES)
+            with self.assertRaisesRegex(ZAI.ZaiRoleError, "does not match"):
+                ZAI.validate_registry(
+                    baseline,
+                    home=home,
+                    manifest=ZAI.load_manifest(),
+                )
+            ZAI._proof_key_path(home).unlink()
+            with mock.patch.object(
+                ZAI, "_bearer", side_effect=AssertionError("must not read credential")
+            ):
+                loaded, _ = ZAI.load_registry(home, ZAI.load_manifest())
+            assert loaded is not None
+            self.assertEqual(loaded["quarantined_roles"], ["designer"])
+            self.assertNotIn("designer", loaded["roles"])
+            with mock.patch.object(
+                ZAI, "_bearer", side_effect=AssertionError("must not read credential")
+            ):
+                ZAI.disconnect(home, "designer", apply=True)
+            recovered, _ = ZAI.load_registry(home, ZAI.load_manifest())
+            assert recovered is not None
+            self.assertEqual(recovered["quarantined_roles"], [])
+            self.assertNotIn("designer", recovered["roles"])
 
     def test_dual_channel_migration_rejects_standard_provenance_drift(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -203,6 +362,62 @@ class ZaiGlmRoleTests(unittest.TestCase):
             path.chmod(0o600)
             with self.assertRaisesRegex(ZAI.ZaiRoleError, "provenance"):
                 ZAI.load_registry(home, ZAI.load_manifest())
+
+    def test_schema2_reserved_names_migrate_to_sorted_quarantine_with_raw_cas(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            baseline = prepare(home)
+            dual = dual_channel_state(baseline)
+            standard_role = {
+                "channel": "standard",
+                "purpose": "Gather evidence from the bounded packet.",
+                "model": "glm-5.2",
+                "effort": "high",
+                "max_output_tokens": 2048,
+            }
+            dual["roles"] = {
+                "planner": {
+                    **standard_role,
+                    "purpose": ZAI.BUILTIN_SEAT_PURPOSES["planner"],
+                },
+                "advisor": {
+                    **standard_role,
+                    "channel": "coding_plan",
+                    "purpose": ZAI.BUILTIN_SEAT_PURPOSES["advisor"],
+                },
+                "researcher": standard_role,
+            }
+            path = ZAI.registry_path(home)
+            path.write_text(json.dumps(dual), encoding="utf-8")
+            path.chmod(0o600)
+            raw_digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            with mock.patch.object(ZAI, "write_registry", wraps=ZAI.write_registry) as write:
+                ZAI.prepare(home, apply=True)
+            self.assertEqual(write.call_args.kwargs["expected_sha256"], raw_digest)
+            migrated = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(migrated["schema"], ZAI.CODEOWNED_REGISTRY_SCHEMA)
+            self.assertEqual(migrated["quarantined_roles"], ["advisor", "planner"])
+            self.assertEqual(set(migrated["roles"]), {"researcher"})
+
+            ZAI.disconnect(home, "researcher", apply=True)
+            preserved, _ = ZAI.load_registry(home, ZAI.load_manifest())
+            assert preserved is not None
+            self.assertEqual(preserved["quarantined_roles"], ["advisor", "planner"])
+            with mock.patch.object(
+                ZAI,
+                "_credential_state",
+                return_value=ZAI.external_credentials.CredentialState.READY,
+            ), self.assertRaisesRegex(
+                ZAI.ZaiRoleError, "quarantined"
+            ):
+                ZAI.activate_seat(
+                    home, "planner", "glm-5.2", "high", 8192, apply=False
+                )
+            ZAI.disconnect(home, "planner", apply=True)
+            ZAI.disconnect(home, "advisor", apply=True)
+            ready, _ = ZAI.load_registry(home, ZAI.load_manifest())
+            assert ready is not None
+            self.assertEqual(ready["quarantined_roles"], [])
 
     def test_dual_channel_migration_rejects_invalid_or_disabled_standard(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -343,6 +558,275 @@ class ZaiGlmRoleTests(unittest.TestCase):
                     apply=True,
                 )
 
+    def test_generic_connect_rejects_reserved_builtin_role_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            prepare(home)
+            qualify(home)
+            for role_id in sorted(ZAI.BUILTIN_SEATS):
+                with self.subTest(role=role_id), self.assertRaisesRegex(
+                    ZAI.ZaiRoleError, "reserved built-in"
+                ):
+                    ZAI.connect(
+                        home,
+                        role_id,
+                        "caller-controlled purpose",
+                        "glm-5.2",
+                        "high",
+                        2048,
+                        apply=False,
+                    )
+
+    def test_persisted_builtins_are_code_owned_and_routes_are_independent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            baseline = prepare(home)
+            baseline["qualifications"].append(
+                {
+                    "model": "glm-5.2",
+                    "effort": "max",
+                    "checked_at": "2026-07-20T00:00:00+00:00",
+                    "source": "isolated-zai-general-api-route-acceptance",
+                }
+            )
+            endpoint = ZAI.registry_path(home)
+            exact = {
+                "purpose": ZAI.BUILTIN_SEAT_PURPOSES["planner"],
+                "model": "glm-5.2",
+                "effort": "high",
+                "max_output_tokens": 8192,
+            }
+            baseline["roles"] = {
+                "planner": exact,
+                "advisor": {
+                    **exact,
+                    "purpose": ZAI.BUILTIN_SEAT_PURPOSES["advisor"],
+                    "effort": "max",
+                },
+                "researcher": {
+                    "purpose": "Gather evidence from the bounded packet.",
+                    "model": "glm-5.2",
+                    "effort": "high",
+                    "max_output_tokens": 2048,
+                },
+            }
+            endpoint.write_text(json.dumps(baseline), encoding="utf-8")
+            endpoint.chmod(0o600)
+            recovered, _ = ZAI.load_registry(home, ZAI.load_manifest())
+            assert recovered is not None
+            self.assertEqual(recovered["schema"], ZAI.CODEOWNED_REGISTRY_SCHEMA)
+            self.assertEqual(
+                set(recovered["quarantined_roles"]), {"planner", "advisor"}
+            )
+            self.assertNotIn("planner", recovered["roles"])
+            self.assertNotIn("advisor", recovered["roles"])
+            legacy_task = home / "legacy-task.txt"
+            legacy_task.write_text("bounded", encoding="utf-8")
+            with self.assertRaisesRegex(ZAI.ZaiRoleError, "not configured"):
+                ZAI.call_role(home, "planner", legacy_task)
+            with self.assertRaisesRegex(ZAI.ZaiRoleError, "explicit disconnect"):
+                ZAI.activate_seat(
+                    home, "planner", "glm-5.2", "high", 8192, apply=False
+                )
+            ZAI.disconnect(home, "researcher", apply=True)
+            preserved, _ = ZAI.load_registry(home, ZAI.load_manifest())
+            assert preserved is not None
+            self.assertEqual(
+                set(preserved["quarantined_roles"]), {"planner", "advisor"}
+            )
+            self.assertNotIn("researcher", preserved["roles"])
+            ZAI.disconnect(home, "planner", apply=True)
+            intermediate, _ = ZAI.load_registry(home, ZAI.load_manifest())
+            assert intermediate is not None
+            self.assertEqual(intermediate["quarantined_roles"], ["advisor"])
+            ZAI.disconnect(home, "advisor", apply=True)
+            final, _ = ZAI.load_registry(home, ZAI.load_manifest())
+            assert final is not None
+            self.assertEqual(final["schema"], ZAI.REGISTRY_SCHEMA)
+            self.assertNotIn("quarantined_roles", final)
+
+            active = deepcopy(final)
+            active["schema"] = ZAI.CODEOWNED_REGISTRY_SCHEMA
+            active["quarantined_roles"] = []
+            active["roles"] = {
+                "planner": {
+                    **exact,
+                },
+                "advisor": {
+                    **exact,
+                    "purpose": ZAI.BUILTIN_SEAT_PURPOSES["advisor"],
+                },
+            }
+            proof_key = ZAI._load_or_create_proof_key(home)
+            with mock.patch.object(
+                ZAI, "_bearer", side_effect=AssertionError("must not read credential")
+            ):
+                for role_id, role in active["roles"].items():
+                    role[ZAI.ACTIVATION_PROOF_FIELD] = ZAI._activation_proof(
+                        home, role_id, role, key=proof_key
+                    )
+            endpoint.write_text(json.dumps(active), encoding="utf-8")
+            endpoint.chmod(0o600)
+            with mock.patch.object(
+                ZAI, "_bearer", side_effect=AssertionError("must not read credential")
+            ):
+                with self.assertRaisesRegex(
+                    ZAI.ZaiRoleError, "different provider/model"
+                ):
+                    ZAI.load_registry(home, ZAI.load_manifest())
+
+    def test_proof_key_is_created_only_by_apply_activation_and_is_private(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            prepare(home)
+            qualify(home)
+            key_path = home / ZAI.PROOF_KEY_RELATIVE_PATH
+            with mock.patch.object(
+                ZAI,
+                "_credential_state",
+                return_value=ZAI.external_credentials.CredentialState.READY,
+            ), mock.patch.object(
+                ZAI, "_bearer", side_effect=AssertionError("must not read credential")
+            ):
+                ZAI.status(home)
+                ZAI.activate_seat(
+                    home, "designer", "glm-5.2", "high", 8192, apply=False
+                )
+                self.assertFalse(key_path.exists())
+                ZAI.activate_seat(
+                    home, "designer", "glm-5.2", "high", 8192, apply=True
+                )
+            self.assertEqual(len(key_path.read_bytes()), ZAI.PROOF_KEY_BYTES)
+            self.assertNotIn(
+                key_path.read_bytes().hex(),
+                ZAI.registry_path(home).read_text(encoding="utf-8"),
+            )
+            if os.name == "posix":
+                self.assertEqual(stat.S_IMODE(key_path.stat().st_mode), 0o600)
+                self.assertEqual(stat.S_IMODE(key_path.parent.stat().st_mode), 0o700)
+
+    def test_proofs_survive_provider_credential_rotation_without_bearer_access(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            prepare(home)
+            qualify(home)
+            with mock.patch.object(
+                ZAI,
+                "_credential_state",
+                return_value=ZAI.external_credentials.CredentialState.READY,
+            ), mock.patch.object(
+                ZAI, "_bearer", side_effect=AssertionError("must not read credential")
+            ):
+                activated = ZAI.activate_seat(
+                    home, "executor", "glm-5.2", "high", 8192, apply=True
+                )
+                before = activated[ZAI.ACTIVATION_PROOF_FIELD]
+                for rotated_credential in ("provider-secret-a", "provider-secret-b"):
+                    with mock.patch.object(
+                        ZAI.external_credentials,
+                        "credential_state",
+                        side_effect=AssertionError(rotated_credential),
+                    ):
+                        loaded, _ = ZAI.load_registry(home, ZAI.load_manifest())
+                    assert loaded is not None
+                    self.assertEqual(
+                        loaded["roles"]["executor"][ZAI.ACTIVATION_PROOF_FIELD],
+                        before,
+                    )
+
+    def test_missing_proof_key_disconnect_removes_only_target_seat(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            prepare(home)
+            qualify(home)
+            with mock.patch.object(
+                ZAI,
+                "_credential_state",
+                return_value=ZAI.external_credentials.CredentialState.READY,
+            ), mock.patch.object(
+                ZAI, "_bearer", side_effect=AssertionError("must not read credential")
+            ):
+                for seat in ("designer", "executor"):
+                    ZAI.activate_seat(
+                        home, seat, "glm-5.2", "high", 8192, apply=True
+                    )
+            path = ZAI.registry_path(home)
+            before = json.loads(path.read_text(encoding="utf-8"))
+            sibling = deepcopy(before["roles"]["executor"])
+            ZAI._proof_key_path(home).unlink()
+
+            with mock.patch.object(
+                ZAI, "_bearer", side_effect=AssertionError("must not read credential")
+            ):
+                in_memory, _ = ZAI.load_registry(home, ZAI.load_manifest())
+                assert in_memory is not None
+                self.assertNotIn("executor", in_memory["roles"])
+                self.assertIn("executor", in_memory["quarantined_roles"])
+                ZAI.disconnect(home, "designer", apply=True)
+
+            persisted = json.loads(path.read_text(encoding="utf-8"))
+            self.assertNotIn("designer", persisted["roles"])
+            self.assertEqual(persisted["roles"]["executor"], sibling)
+            self.assertEqual(persisted["quarantined_roles"], [])
+            with mock.patch.object(
+                ZAI, "_bearer", side_effect=AssertionError("must not read credential")
+            ):
+                ZAI.disconnect(home, "executor", apply=True)
+            recovered = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(recovered["roles"], {})
+
+    def test_existing_unsafe_proof_key_is_never_replaced(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            prepare(home)
+            qualify(home)
+            key_path = home / ZAI.PROOF_KEY_RELATIVE_PATH
+            key_path.parent.mkdir(mode=0o700)
+            key_path.write_bytes(b"short")
+            if os.name == "posix":
+                key_path.chmod(0o600)
+            with mock.patch.object(
+                ZAI,
+                "_credential_state",
+                return_value=ZAI.external_credentials.CredentialState.READY,
+            ), mock.patch.object(
+                ZAI, "_bearer", side_effect=AssertionError("must not read credential")
+            ), self.assertRaisesRegex(ZAI.ZaiRoleError, "unsafe or corrupt"):
+                ZAI.activate_seat(
+                    home, "designer", "glm-5.2", "high", 8192, apply=True
+                )
+            self.assertEqual(key_path.read_bytes(), b"short")
+
+    @unittest.skipUnless(os.name == "posix", "POSIX link semantics regression")
+    def test_linked_proof_keys_fail_closed_without_credential_access(self) -> None:
+        for link_kind in ("symlink", "hardlink"):
+            with self.subTest(link_kind=link_kind), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory)
+                prepare(home)
+                qualify(home)
+                key_path = home / ZAI.PROOF_KEY_RELATIVE_PATH
+                key_path.parent.mkdir(mode=0o700)
+                target = home / "outside-key"
+                target.write_bytes(b"x" * ZAI.PROOF_KEY_BYTES)
+                target.chmod(0o600)
+                if link_kind == "symlink":
+                    key_path.symlink_to(target)
+                else:
+                    os.link(target, key_path)
+                with mock.patch.object(
+                    ZAI,
+                    "_credential_state",
+                    return_value=ZAI.external_credentials.CredentialState.READY,
+                ), mock.patch.object(
+                    ZAI,
+                    "_bearer",
+                    side_effect=AssertionError("must not read credential"),
+                ), self.assertRaisesRegex(ZAI.ZaiRoleError, "unsafe"):
+                    ZAI.activate_seat(
+                        home, "designer", "glm-5.2", "high", 8192, apply=True
+                    )
+                self.assertEqual(target.read_bytes(), b"x" * ZAI.PROOF_KEY_BYTES)
+
     def test_gate0_validates_typed_result_content_signal(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
@@ -379,7 +863,7 @@ class ZaiGlmRoleTests(unittest.TestCase):
             purposes = {
                 "researcher": "Gather evidence from the bounded packet.",
                 "reviewer": "Review the bounded packet for material defects.",
-                "designer": "Produce a bounded design handoff.",
+                "design_specialist": "Produce a bounded design handoff.",
             }
             for role_id, purpose in purposes.items():
                 ZAI.connect(
@@ -410,6 +894,14 @@ class ZaiGlmRoleTests(unittest.TestCase):
             ):
                 for seat in ("planner", "advisor", "designer", "executor"):
                     with self.subTest(seat=seat):
+                        if seat == "advisor":
+                            with self.assertRaisesRegex(
+                                ZAI.ZaiRoleError, "different provider/model"
+                            ):
+                                ZAI.activate_seat(
+                                    home, seat, "glm-5.2", "high", 8192, apply=False
+                                )
+                            continue
                         preview = ZAI.activate_seat(
                             home, seat, "glm-5.2", "high", 8192, apply=False
                         )
@@ -466,18 +958,24 @@ class ZaiGlmRoleTests(unittest.TestCase):
                     ZAI.activate_seat(
                         home, "planner", "glm-5.2", "max", 8192, apply=False
                     )
-                ZAI.connect(
-                    home,
-                    "planner",
-                    "Different role purpose.",
-                    "glm-5.2",
-                    "high",
-                    8192,
-                    apply=True,
+                with self.assertRaisesRegex(ZAI.ZaiRoleError, "reserved built-in"):
+                    ZAI.connect(
+                        home,
+                        "planner",
+                        "Different role purpose.",
+                        "glm-5.2",
+                        "high",
+                        8192,
+                        apply=True,
+                    )
+                ZAI.activate_seat(
+                    home, "planner", "glm-5.2", "high", 8192, apply=True
                 )
-                with self.assertRaisesRegex(ZAI.ZaiRoleError, "different exact"):
+                with self.assertRaisesRegex(
+                    ZAI.ZaiRoleError, "different provider/model"
+                ):
                     ZAI.activate_seat(
-                        home, "planner", "glm-5.2", "high", 8192, apply=False
+                        home, "advisor", "glm-5.2", "high", 8192, apply=False
                     )
 
     def test_status_reports_structured_authentication_state(self) -> None:
@@ -562,6 +1060,51 @@ class ZaiGlmRoleTests(unittest.TestCase):
                 detail = str(failure.exception)
                 self.assertNotIn("sensitive-test-bearer", detail)
                 self.assertNotIn("sensitive-provider-detail", detail)
+
+    def test_bearer_retrieval_pins_interpreter_under_hostile_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            prepare(home)
+            completed = mock.Mock(
+                returncode=0,
+                stdout="sensitive-test-bearer\n",
+                stderr="",
+            )
+            with mock.patch.dict(os.environ, {"PATH": "/tmp/hostile"}), mock.patch.object(
+                ZAI,
+                "_credential_state",
+                return_value=ZAI.external_credentials.CredentialState.READY,
+            ), mock.patch.object(
+                ZAI.subprocess, "run", return_value=completed
+            ) as run:
+                self.assertEqual(ZAI._bearer(home), "sensitive-test-bearer")
+            command = run.call_args.args[0]
+            self.assertEqual(command[0], str(Path(sys.executable).resolve()))
+            self.assertEqual(
+                command[1:3],
+                ["-I", str(home / "codex-orchestration/bin/external_auth_helper.py")],
+            )
+            self.assertNotIn("sensitive-test-bearer", repr(run.call_args.kwargs["env"]))
+
+    def test_windows_task_branch_is_fail_closed_and_does_not_fallback_to_open(self) -> None:
+        path = Path("/tmp/packet.txt")
+        with mock.patch.object(ZAI.os, "name", "nt"), mock.patch.object(
+            ZAI, "_windows_read_verified_task", return_value=b"bounded"
+        ) as verified:
+            self.assertEqual(ZAI._read_task(path), "bounded")
+        verified.assert_called_once_with(path)
+
+    def test_windows_task_parent_reparse_rejection_is_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "packet.txt"
+            path.write_text("bounded", encoding="utf-8")
+            with mock.patch.object(ZAI.os, "name", "nt"), mock.patch.object(
+                ZAI,
+                "_windows_assert_safe_task_parents",
+                side_effect=ZAI.ZaiRoleError("bounded task parent is unsafe"),
+            ):
+                with self.assertRaisesRegex(ZAI.ZaiRoleError, "parent is unsafe"):
+                    ZAI._windows_read_verified_task(path)
 
     def test_cli_uses_distinct_unreachable_exit_without_enrollment_advice(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -951,24 +1494,23 @@ class ZaiGlmRoleTests(unittest.TestCase):
             self.assertIsNone(absent["usage"])
 
     def test_planner_and_advisor_calls_require_role_protocol_signals(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            home = Path(directory)
-            prepare(home)
-            qualify(home)
-            with mock.patch.object(
-                ZAI,
-                "_credential_state",
-                return_value=ZAI.external_credentials.CredentialState.READY,
-            ):
-                for seat in ("planner", "advisor"):
+        accepted = {
+            "planner": "PLAN_DRAFT\nComplete plan.",
+            "advisor": "PLAN_APPROVED\nNo material gaps.",
+        }
+        for seat, response in accepted.items():
+            with tempfile.TemporaryDirectory() as directory:
+                home = Path(directory)
+                prepare(home)
+                qualify(home)
+                with mock.patch.object(
+                    ZAI,
+                    "_credential_state",
+                    return_value=ZAI.external_credentials.CredentialState.READY,
+                ):
                     ZAI.activate_seat(home, seat, "glm-5.2", "high", 8192, apply=True)
-            task = home / "packet.txt"
-            task.write_text("Inspect this bounded packet.", encoding="utf-8")
-            accepted = {
-                "planner": "PLAN_DRAFT\nComplete plan.",
-                "advisor": "PLAN_APPROVED\nNo material gaps.",
-            }
-            for seat, response in accepted.items():
+                task = home / "packet.txt"
+                task.write_text("Inspect this bounded packet.", encoding="utf-8")
                 with (
                     self.subTest(seat=seat),
                     mock.patch.object(
@@ -978,7 +1520,6 @@ class ZaiGlmRoleTests(unittest.TestCase):
                     self.assertEqual(
                         ZAI.call_role(home, seat, task)["content"], response
                     )
-            for seat in accepted:
                 with (
                     self.subTest(seat=f"malformed-{seat}"),
                     mock.patch.object(
@@ -989,25 +1530,27 @@ class ZaiGlmRoleTests(unittest.TestCase):
                 ):
                     with self.assertRaisesRegex(ZAI.ZaiRoleError, "required"):
                         ZAI.call_role(home, seat, task)
-            with mock.patch.object(
-                ZAI,
-                "_call_api",
-                return_value=ZAI.ApiCallResult(
-                    "PLAN_REVISION\n## REVISED_PLAN\nPlan only."
-                ),
-            ):
-                with self.assertRaisesRegex(ZAI.ZaiRoleError, "sections"):
-                    ZAI.call_role(home, "planner", task)
-            revision = (
-                "PLAN_REVISION\n## FINDINGS_LEDGER\nF-1 INCORPORATED\n"
-                "## REVISED_PLAN\nComplete revised plan."
-            )
-            with mock.patch.object(
-                ZAI, "_call_api", return_value=ZAI.ApiCallResult(revision)
-            ):
-                self.assertEqual(
-                    ZAI.call_role(home, "planner", task)["content"], revision
-                )
+
+                if seat == "planner":
+                    with mock.patch.object(
+                        ZAI,
+                        "_call_api",
+                        return_value=ZAI.ApiCallResult(
+                            "PLAN_REVISION\n## REVISED_PLAN\nPlan only."
+                        ),
+                    ):
+                        with self.assertRaisesRegex(ZAI.ZaiRoleError, "sections"):
+                            ZAI.call_role(home, "planner", task)
+                    revision = (
+                        "PLAN_REVISION\n## FINDINGS_LEDGER\nF-1 INCORPORATED\n"
+                        "## REVISED_PLAN\nComplete revised plan."
+                    )
+                    with mock.patch.object(
+                        ZAI, "_call_api", return_value=ZAI.ApiCallResult(revision)
+                    ):
+                        self.assertEqual(
+                            ZAI.call_role(home, "planner", task)["content"], revision
+                        )
 
     def test_task_file_symlink_and_role_replacement_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

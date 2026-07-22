@@ -4,6 +4,7 @@ import importlib.util
 import io
 import os
 from pathlib import Path
+import shutil
 import stat
 import sys
 import tempfile
@@ -64,7 +65,7 @@ class ExternalCredentialTests(unittest.TestCase):
                             continue
                         raise
                 else:
-                    target.hardlink_to(outside)
+                    os.link(outside, target)
                 with self.assertRaises(CREDENTIALS.CredentialSetupError):
                     CREDENTIALS.install_stable_helper(home)
 
@@ -74,76 +75,147 @@ class ExternalCredentialTests(unittest.TestCase):
             / "safe/codex/home/codex-orchestration/bin/external_auth_helper.py"
         )
         config = CREDENTIALS.auth_config(helper, "openrouter", platform="linux")
-        self.assertEqual(config["command"], str(helper))
-        self.assertEqual(config["args"], ["get", "--provider", "openrouter"])
+        interpreter = Path(sys.executable).resolve()
+        self.assertEqual(config["command"], str(interpreter))
+        self.assertEqual(
+            config["args"], ["-I", str(helper), "get", "--provider", "openrouter"]
+        )
         self.assertNotIn("env_key", config)
         self.assertNotIn("token", repr(config).lower())
 
     def test_windows_uses_pinned_python_for_all_managed_helper_commands(self) -> None:
-        fixture_root = Path(tempfile.gettempdir()).resolve() / "safe"
-        helper = (
-            fixture_root
-            / "codex/home/codex-orchestration/bin/external_auth_helper.py"
-        )
-        interpreter = (fixture_root / "python/python.exe").resolve()
-        config = CREDENTIALS.auth_config(
-            helper,
-            "openrouter",
-            platform="win32",
-            python_executable=interpreter,
-        )
-        expected_prefix = [str(interpreter), str(helper)]
-        self.assertEqual(config["command"], expected_prefix[0])
-        self.assertEqual(
-            config["args"], [expected_prefix[1], "get", "--provider", "openrouter"]
-        )
-        self.assertEqual(
-            CREDENTIALS.enrollment_command(
+        with tempfile.TemporaryDirectory() as directory:
+            fixture_root = Path(directory)
+            helper = (
+                fixture_root
+                / "codex/home/codex-orchestration/bin/external_auth_helper.py"
+            )
+            interpreter = (fixture_root / "python/python.exe").resolve()
+            interpreter.parent.mkdir(parents=True)
+            interpreter.write_bytes(b"native-python-fixture")
+            interpreter.chmod(0o700)
+            config = CREDENTIALS.auth_config(
                 helper,
                 "openrouter",
                 platform="win32",
                 python_executable=interpreter,
-            ),
-            [*expected_prefix, "enroll", "--provider", "openrouter"],
-        )
+            )
+            expected_prefix = [str(interpreter), "-I", str(helper)]
+            self.assertEqual(config["command"], expected_prefix[0])
+            self.assertEqual(
+                config["args"], [*expected_prefix[1:], "get", "--provider", "openrouter"]
+            )
+            self.assertEqual(
+                CREDENTIALS.enrollment_command(
+                    helper,
+                    "openrouter",
+                    platform="win32",
+                    python_executable=interpreter,
+                ),
+                [*expected_prefix, "enroll", "--provider", "openrouter"],
+            )
+            completed = mock.Mock(returncode=0, stdout="configured\n", stderr="")
+            with mock.patch.object(
+                CREDENTIALS.subprocess, "run", return_value=completed
+            ) as run:
+                self.assertTrue(
+                    CREDENTIALS.credential_ready(
+                        helper,
+                        "openrouter",
+                        platform="win32",
+                        python_executable=interpreter,
+                    )
+                )
+            self.assertEqual(
+                run.call_args.args[0],
+                [*expected_prefix, "status", "--provider", "openrouter"],
+            )
+            with mock.patch.dict(
+                os.environ, {"OPENROUTER_API_KEY": "sentinel-auth-readiness-secret"}
+            ), mock.patch.object(
+                CREDENTIALS.external_cli_trust,
+                "sanitized_environment",
+                return_value={"PATH": "/safe/bin"},
+            ), mock.patch.object(
+                CREDENTIALS.subprocess, "run", return_value=completed
+            ) as sanitized_run:
+                self.assertTrue(
+                    CREDENTIALS.credential_ready(
+                        helper,
+                        "openrouter",
+                        platform="win32",
+                        python_executable=interpreter,
+                    )
+                )
+            self.assertEqual(sanitized_run.call_args.kwargs["env"], {"PATH": "/safe/bin"})
+            self.assertNotIn(
+                "sentinel-auth-readiness-secret",
+                repr(sanitized_run.call_args.kwargs["env"]),
+            )
+
+    def test_posix_readiness_never_uses_path_python(self) -> None:
+        helper = Path("/safe/external_auth_helper.py")
+        interpreter = Path(sys.executable).resolve()
         completed = mock.Mock(returncode=0, stdout="configured\n", stderr="")
-        with mock.patch.object(
+        with mock.patch.dict(os.environ, {"PATH": "/tmp/hostile"}), mock.patch.object(
             CREDENTIALS.subprocess, "run", return_value=completed
         ) as run:
             self.assertTrue(
                 CREDENTIALS.credential_ready(
                     helper,
                     "openrouter",
-                    platform="win32",
+                    platform="linux",
                     python_executable=interpreter,
                 )
             )
         self.assertEqual(
-            run.call_args.args[0],
-            [*expected_prefix, "status", "--provider", "openrouter"],
+            run.call_args.args[0][:3], [str(interpreter), "-I", str(helper)]
         )
-        with mock.patch.dict(
-            os.environ, {"OPENROUTER_API_KEY": "sentinel-auth-readiness-secret"}
-        ), mock.patch.object(
-            CREDENTIALS.external_cli_trust,
-            "sanitized_environment",
-            return_value={"PATH": "/safe/bin"},
-        ), mock.patch.object(
-            CREDENTIALS.subprocess, "run", return_value=completed
-        ) as sanitized_run:
-            self.assertTrue(
-                CREDENTIALS.credential_ready(
+
+    def test_helper_isolated_mode_ignores_adjacent_sitecustomize_and_pythonpath(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "codex-home"
+            home.mkdir()
+            helper, _ = CREDENTIALS.install_stable_helper(home)
+            marker = root / "sitecustomize-ran"
+            (root / "sitecustomize.py").write_text(
+                f"from pathlib import Path; Path({str(marker)!r}).write_text('loaded')\n",
+                encoding="utf-8",
+            )
+            with mock.patch.dict(
+                os.environ,
+                {"PYTHONPATH": str(root), "PATH": "/tmp/hostile"},
+            ):
+                # The deliberately invalid provider fails before any OS-store
+                # lookup while still exercising the real isolated interpreter.
+                CREDENTIALS.credential_state(helper, "../invalid", platform="linux")
+            self.assertFalse(marker.exists())
+
+    def test_interpreter_attestation_rejects_relative_or_missing_path(self) -> None:
+        helper = Path("/safe/external_auth_helper.py")
+        relative_root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, relative_root)
+        relative_executable = relative_root / "relative-python"
+        relative_executable.write_bytes(b"python-fixture")
+        relative_executable.chmod(0o700)
+        original_cwd = Path.cwd()
+        os.chdir(relative_root)
+        self.addCleanup(lambda: os.chdir(original_cwd))
+        for interpreter in (
+            Path("relative-python"),
+            Path("python3"),
+            Path("/tmp/does-not-exist-python"),
+        ):
+            with self.subTest(interpreter=interpreter), self.assertRaises(
+                CREDENTIALS.CredentialSetupError
+            ):
+                CREDENTIALS.auth_config(
                     helper,
                     "openrouter",
-                    platform="win32",
+                    platform="linux",
                     python_executable=interpreter,
                 )
-            )
-        self.assertEqual(sanitized_run.call_args.kwargs["env"], {"PATH": "/safe/bin"})
-        self.assertNotIn(
-            "sentinel-auth-readiness-secret",
-            repr(sanitized_run.call_args.kwargs["env"]),
-        )
 
     def test_stable_helper_verification_detects_byte_drift(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -194,7 +266,9 @@ class ExternalCredentialTests(unittest.TestCase):
             stdout="",
             stderr="secret-tool: Could not connect: Operation not permitted\n",
         )
-        with mock.patch.object(HELPER.shutil, "which", return_value="/usr/bin/secret-tool"):
+        with mock.patch.object(
+            HELPER, "_attested_linux_secret_tool", return_value=Path("/usr/bin/secret-tool")
+        ):
             with mock.patch.object(HELPER.subprocess, "run", return_value=missing):
                 with self.assertRaises(HELPER.AuthRequired):
                     HELPER.dispatch("status", "zai", platform="linux")
@@ -202,6 +276,18 @@ class ExternalCredentialTests(unittest.TestCase):
                 with self.assertRaises(HELPER.CredentialStoreUnreachable) as failure:
                     HELPER.dispatch("status", "zai", platform="linux")
         self.assertNotIn("Operation not permitted", str(failure.exception))
+
+    def test_linux_secret_tool_path_is_pinned_under_hostile_path(self) -> None:
+        completed = mock.Mock(returncode=1, stdout="", stderr="")
+        trusted = Path("/trusted/secret-tool")
+        with mock.patch.object(
+            HELPER, "_attested_linux_secret_tool", return_value=trusted
+        ), mock.patch.dict(os.environ, {"PATH": "/tmp/hostile"}), mock.patch.object(
+            HELPER.subprocess, "run", return_value=completed
+        ) as run:
+            with self.assertRaises(HELPER.AuthRequired):
+                HELPER.dispatch("status", "zai", platform="linux")
+        self.assertEqual(run.call_args.args[0][0], str(trusted))
 
     def test_helper_status_exit_codes_are_stable_and_nonsecret(self) -> None:
         cases = (
@@ -257,7 +343,13 @@ class ExternalCredentialTests(unittest.TestCase):
     def test_invalid_provider_and_missing_linux_store_fail_closed(self) -> None:
         with self.assertRaises(HELPER.HelperError):
             HELPER.dispatch("get", "../escape", platform="darwin")
-        with mock.patch.object(HELPER.shutil, "which", return_value=None):
+        with mock.patch.object(
+            HELPER,
+            "_attested_linux_secret_tool",
+            side_effect=HELPER.CredentialStoreUnreachable(
+                "Secret Service is unavailable; configure a separately trusted user helper."
+            ),
+        ):
             with self.assertRaisesRegex(HELPER.HelperError, "trusted user helper"):
                 HELPER.dispatch("get", "openrouter", platform="linux")
 

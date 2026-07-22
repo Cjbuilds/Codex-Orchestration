@@ -12,6 +12,14 @@
 - Fail closed before credential lookup or network access when the exact request's
   conservative prompt-token upper bound plus configured output exceeds the bundled
   model context window. Inputs are never silently truncated or summarized.
+- Isolate credential-helper execution behind an attested absolute interpreter,
+  Python isolated mode, pinned system credential clients, and sanitized process
+  environments; unit and preflight tests never access the host provider secret.
+- Add credential-independent schema-3 activation proofs for persisted built-in GLM
+  seats, quarantine every legacy reserved-name role, and preserve exact raw state
+  during separately authorized disconnect recovery.
+- Reject Windows reparse points in every task-path component and strip repository-
+  routing `GIT_*` overrides before installing hooks into an explicit repository.
 
 ## 0.8.3 — 2026-07-21
 

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -11,10 +12,29 @@ import sys
 
 HOOKS_PATH = ".githooks"
 GIT_TIMEOUT_SECONDS = 10
+_ALLOWED_GIT_ENVIRONMENT = frozenset(
+    {
+        # These two variables support a deliberately isolated config fixture or
+        # host policy without selecting another repository, worktree, or index.
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_NOSYSTEM",
+    }
+)
 
 
 class HookInstallError(RuntimeError):
     """Raised when repository-local hooks cannot be configured safely."""
+
+
+def _git_environment() -> dict[str, str]:
+    """Preserve platform/config isolation while rejecting repository routing."""
+
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if not key.upper().startswith("GIT_")
+        or key.upper() in _ALLOWED_GIT_ENVIRONMENT
+    }
 
 
 def _git(arguments: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -27,6 +47,7 @@ def _git(arguments: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
             stderr=subprocess.PIPE,
             timeout=GIT_TIMEOUT_SECONDS,
             check=False,
+            env=_git_environment(),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise HookInstallError(f"could not run git: {exc}") from exc

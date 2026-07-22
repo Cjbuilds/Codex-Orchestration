@@ -14,9 +14,10 @@ import argparse
 import ctypes
 from ctypes import wintypes
 import getpass
+import os
 from pathlib import Path
 import re
-import shutil
+import stat
 import subprocess
 import sys
 
@@ -25,6 +26,7 @@ MANAGED_HELPER_MARKER = "codex-orchestration-managed-external-auth-helper-v1"
 PROVIDER_RE = re.compile(r"^[a-z][a-z0-9_-]{0,62}$")
 SERVICE_PREFIX = "com.cjbuilds.codex-orchestration.external"
 TIMEOUT_SECONDS = 20
+LINUX_SECRET_TOOL_CANDIDATES = (Path("/usr/bin/secret-tool"), Path("/bin/secret-tool"))
 CRED_TYPE_GENERIC = 1
 CRED_PERSIST_LOCAL_MACHINE = 2
 ERROR_NOT_FOUND = 1168
@@ -113,6 +115,42 @@ def _run_interactive(command: list[str]) -> None:
         raise HelperError("The credential-store operation did not complete.")
 
 
+def _attested_linux_secret_tool() -> Path:
+    """Return the pinned system Secret Service client, never a PATH lookup."""
+
+    for candidate in LINUX_SECRET_TOOL_CANDIDATES:
+        try:
+            candidate_info = candidate.lstat()
+            if candidate.is_symlink() or not stat.S_ISREG(candidate_info.st_mode):
+                continue
+            target = candidate.expanduser().resolve(strict=True)
+            info = target.lstat()
+        except (OSError, RuntimeError):
+            continue
+        if not target.is_absolute() or target.is_symlink():
+            continue
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            continue
+        if not os.access(target, os.X_OK):
+            continue
+        # Re-check the identity after the metadata read.  A path that changed
+        # while it was being attested is not safe to execute.
+        try:
+            after = target.lstat()
+        except OSError:
+            continue
+        if (
+            (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+            != (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+            or after.st_nlink != 1
+        ):
+            continue
+        return target
+    raise CredentialStoreUnreachable(
+        "Secret Service is unavailable; configure a separately trusted user helper."
+    )
+
+
 def _darwin(action: str, provider: str) -> str | None:
     security = Path("/usr/bin/security")
     if not security.is_file():
@@ -136,22 +174,18 @@ def _darwin(action: str, provider: str) -> str | None:
 
 
 def _linux(action: str, provider: str) -> str | None:
-    executable = shutil.which("secret-tool")
-    if executable is None:
-        raise CredentialStoreUnreachable(
-            "Secret Service is unavailable; configure a separately trusted user helper."
-        )
+    executable = _attested_linux_secret_tool()
     attributes = ["service", _service(provider), "account", provider]
     if action in {"get", "status"}:
         return _run_capture(
-            [executable, "lookup", *attributes],
+            [str(executable), "lookup", *attributes],
             missing_returncodes=frozenset({1}),
             missing_requires_empty_stderr=True,
         )
     if action == "enroll":
         _run_interactive(
             [
-                executable,
+                str(executable),
                 "store",
                 f"--label=Codex Orchestration: {provider}",
                 *attributes,
@@ -159,7 +193,7 @@ def _linux(action: str, provider: str) -> str | None:
         )
         return None
     if action == "delete":
-        _run_interactive([executable, "clear", *attributes])
+        _run_interactive([str(executable), "clear", *attributes])
         return None
     raise HelperError("Credential action is unsupported.")
 

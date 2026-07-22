@@ -32,6 +32,7 @@ EXTERNAL_PORTABILITY_MODULES = (
     "tests.test_external_readiness",
     "tests.test_external_registry",
     "tests.test_external_subscription",
+    "tests.test_zai_glm_roles",
 )
 
 

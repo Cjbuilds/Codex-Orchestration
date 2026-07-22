@@ -18,6 +18,53 @@ SPEC.loader.exec_module(INSTALL_HOOKS)
 
 
 class InstallHooksTests(unittest.TestCase):
+    @staticmethod
+    def _isolated_environment(root: Path) -> dict[str, str]:
+        environment = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.upper().startswith("GIT_")
+        }
+        environment.update(
+            {
+                "HOME": str(root),
+                "GIT_CONFIG_GLOBAL": str(root / "global.gitconfig"),
+                "GIT_CONFIG_NOSYSTEM": "1",
+            }
+        )
+        return environment
+
+    def setUp(self) -> None:
+        self._git_home = tempfile.TemporaryDirectory()
+        self.addCleanup(self._git_home.cleanup)
+        root = Path(self._git_home.name)
+        self._environment = mock.patch.dict(
+            os.environ,
+            self._isolated_environment(root),
+            clear=True,
+        )
+        self._environment.start()
+        self.addCleanup(self._environment.stop)
+
+    def test_isolated_environment_strips_repository_git_sentinels(self) -> None:
+        root = Path(self._git_home.name)
+        with mock.patch.dict(
+            os.environ,
+            {
+                "GIT_DIR": "sentinel-repository",
+                "GIT_WORK_TREE": "sentinel-worktree",
+                "GIT_INDEX_FILE": "sentinel-index",
+                "PATH": os.environ["PATH"],
+            },
+            clear=False,
+        ):
+            isolated = self._isolated_environment(root)
+        self.assertNotIn("GIT_DIR", isolated)
+        self.assertNotIn("GIT_WORK_TREE", isolated)
+        self.assertNotIn("GIT_INDEX_FILE", isolated)
+        self.assertEqual(isolated["PATH"], os.environ["PATH"])
+        self.assertEqual(isolated["GIT_CONFIG_GLOBAL"], str(root / "global.gitconfig"))
+
     def make_repository(self, directory: Path) -> None:
         result = subprocess.run(
             ["git", "init", "--quiet", str(directory)],
@@ -61,6 +108,48 @@ class InstallHooksTests(unittest.TestCase):
 
             self.assertIn("Set repository-local", message)
             self.assertEqual(self.local_hooks_path(repository), ".githooks")
+
+    def test_hostile_git_routing_cannot_redirect_the_target_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            intended = root / "intended"
+            decoy = root / "decoy"
+            intended.mkdir()
+            decoy.mkdir()
+            self.make_repository(intended)
+            self.make_repository(decoy)
+            subprocess.run(
+                ["git", "config", "--local", "sentinel.unchanged", "yes"],
+                cwd=decoy,
+                timeout=10,
+                check=True,
+            )
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "GIT_DIR": str(decoy / ".git"),
+                    "GIT_WORK_TREE": str(decoy),
+                    "GIT_INDEX_FILE": str(decoy / ".git" / "hostile-index"),
+                    "GIT_CONFIG_COUNT": "1",
+                    "GIT_CONFIG_KEY_0": "core.hooksPath",
+                    "GIT_CONFIG_VALUE_0": "hostile-hooks",
+                },
+                clear=False,
+            ):
+                INSTALL_HOOKS.configure_hooks(intended, apply=True)
+
+            self.assertEqual(self.local_hooks_path(intended), ".githooks")
+            self.assertIsNone(self.local_hooks_path(decoy))
+            sentinel = subprocess.run(
+                ["git", "config", "--local", "--get", "sentinel.unchanged"],
+                cwd=decoy,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual(sentinel.stdout.strip(), "yes")
 
     def test_already_configured_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -217,6 +306,8 @@ class InstallHooksTests(unittest.TestCase):
         self.assertEqual(arguments[0], ["git", "rev-parse", "--show-toplevel"])
         self.assertEqual(keywords["timeout"], 10)
         self.assertNotIn("shell", keywords)
+        self.assertIn("PATH", keywords["env"])
+        self.assertNotIn("GIT_DIR", keywords["env"])
 
 
 if __name__ == "__main__":

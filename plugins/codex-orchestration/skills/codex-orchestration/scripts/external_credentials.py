@@ -52,7 +52,7 @@ def _fsync_directory(path: Path) -> None:
 
 def _safe_regular(path: Path, *, managed: bool) -> bytes | None:
     try:
-        info = path.stat(follow_symlinks=False)
+        info = path.lstat()
     except FileNotFoundError:
         return None
     _require(not path.is_symlink() and stat.S_ISREG(info.st_mode), f"unsafe helper path: {path}")
@@ -68,7 +68,7 @@ def _safe_regular(path: Path, *, managed: bool) -> bytes | None:
 
 def _prepare_directory(path: Path) -> None:
     if path.exists() or path.is_symlink():
-        info = path.stat(follow_symlinks=False)
+        info = path.lstat()
         _require(not path.is_symlink() and stat.S_ISDIR(info.st_mode), f"unsafe directory: {path}")
         return
     path.mkdir(mode=0o700)
@@ -136,9 +136,69 @@ def verify_stable_helper(codex_home: Path) -> tuple[Path, str]:
     _require(actual is not None, "managed auth helper is missing")
     _require(actual == expected, "managed auth helper drifted")
     if os.name == "posix":
-        info = target.stat(follow_symlinks=False)
+        info = target.lstat()
         _require(bool(info.st_mode & stat.S_IXUSR), "managed auth helper is not executable")
     return target, hashlib.sha256(actual).hexdigest()
+
+
+def _attested_interpreter(
+    python_executable: Path | None, *, platform: str | None
+) -> Path:
+    """Resolve and attest the interpreter used for every helper invocation.
+
+    The packaged helper has an ``env``-based shebang for convenience when it is
+    run manually, but managed provider commands must never rely on that shebang
+    or on ``PATH``.  Resolve the interpreter once to a canonical absolute path
+    and reject anything other than a single-link executable regular file.
+    """
+
+    selected = Path(
+        sys.executable if python_executable is None else python_executable
+    ).expanduser()
+    _require(selected.is_absolute(), "Python interpreter path must be absolute")
+    try:
+        target = selected.resolve(strict=True)
+        info = target.lstat()
+    except (OSError, RuntimeError) as exc:
+        raise CredentialSetupError(
+            "The managed Python interpreter could not be attested"
+        ) from exc
+    _require(
+        not target.is_symlink() and stat.S_ISREG(info.st_mode),
+        "Python interpreter path is unsafe",
+    )
+    _require(info.st_nlink == 1, "Python interpreter must not be hard linked")
+    _require(os.access(target, os.X_OK), "Python interpreter is not executable")
+    try:
+        after = target.lstat()
+    except OSError as exc:
+        raise CredentialSetupError(
+            "The managed Python interpreter could not be attested"
+        ) from exc
+    _require(
+        (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_nlink,
+        )
+        == (
+            info.st_dev,
+            info.st_ino,
+            info.st_size,
+            info.st_mtime_ns,
+            info.st_nlink,
+        ),
+        "Python interpreter changed during attestation",
+    )
+    selected_platform = sys.platform if platform is None else platform
+    if selected_platform == "win32":
+        _require(
+            target.suffix.lower() in {".exe", ".com"},
+            "Windows Python interpreter must be a native executable",
+        )
+    return target
 
 
 def _helper_command(
@@ -150,13 +210,16 @@ def _helper_command(
     python_executable: Path | None = None,
 ) -> list[str]:
     _require(helper.is_absolute(), "auth helper path must be absolute")
-    selected_platform = sys.platform if platform is None else platform
+    # Always invoke the copied helper through an attested absolute interpreter.
+    # This intentionally applies to POSIX too: the helper's ``/usr/bin/env
+    # python3`` shebang must not be able to select an attacker-controlled PATH
+    # entry.
+    interpreter = _attested_interpreter(
+        python_executable,
+        platform=platform,
+    )
     arguments = [str(helper), action, "--provider", provider_id]
-    if selected_platform == "win32":
-        interpreter = Path(python_executable or sys.executable).expanduser().resolve()
-        _require(interpreter.is_absolute(), "Python interpreter path must be absolute")
-        return [str(interpreter), *arguments]
-    return arguments
+    return [str(interpreter), "-I", *arguments]
 
 
 def auth_config(
@@ -228,7 +291,7 @@ def credential_state(
             shell=False,
             env=external_cli_trust.sanitized_environment(),
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (CredentialSetupError, OSError, subprocess.TimeoutExpired):
         return CredentialState.CREDENTIAL_STORE_UNREACHABLE
     if (
         completed.returncode == 0

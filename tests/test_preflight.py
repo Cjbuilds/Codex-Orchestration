@@ -299,10 +299,7 @@ class PreflightTests(unittest.TestCase):
                 "portability", REPO_ROOT, base_sha=None, head_sha=None
             )
 
-        expected = {
-            f"tests.{path.stem}"
-            for path in (REPO_ROOT / "tests").glob("test_external_*.py")
-        }
+        expected = set(PREFLIGHT.EXTERNAL_PORTABILITY_MODULES)
         self.assertTrue(expected)
         observed = {module for batch in captured for module in batch}
         self.assertTrue(expected.issubset(observed))

@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
 import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
@@ -26,6 +27,7 @@ import external_credentials
 
 REGISTRY_SCHEMA = 1
 DUAL_CHANNEL_REGISTRY_SCHEMA = 2
+CODEOWNED_REGISTRY_SCHEMA = 3
 MANIFEST_SCHEMA = 1
 MANAGED_BY = "codex-orchestration-zai-roles"
 REGISTRY_FILENAME = ".codex-orchestration-zai-roles.json"
@@ -113,6 +115,10 @@ BUILTIN_SEAT_PURPOSES = {
     ),
 }
 BUILTIN_SEATS = frozenset(BUILTIN_SEAT_PURPOSES)
+ACTIVATION_PROOF_FIELD = "activation_proof"
+ACTIVATION_PROOF_SCHEMA = "codex-orchestration.builtin-seat-proof/v1"
+PROOF_KEY_BYTES = 32
+PROOF_KEY_RELATIVE_PATH = Path("codex-orchestration/keys/zai-seat-proof.key")
 MANIFEST_PATH = Path(__file__).resolve().parent.parent / "providers" / "zai.json"
 _MANIFEST_KEYS = frozenset(
     {
@@ -139,9 +145,11 @@ _MODEL_KEYS = frozenset(
 _REGISTRY_KEYS = frozenset(
     {"schema", "managed_by", "codex_home", "provider", "qualifications", "roles"}
 )
+_CODEOWNED_REGISTRY_KEYS = frozenset({*_REGISTRY_KEYS, "quarantined_roles"})
 _PROVIDER_KEYS = frozenset({"id", "manifest_version", "endpoint_sha256"})
 _QUALIFICATION_KEYS = frozenset({"model", "effort", "checked_at", "source"})
 _ROLE_KEYS = frozenset({"purpose", "model", "effort", "max_output_tokens"})
+_CODEOWNED_ROLE_KEYS = frozenset({*_ROLE_KEYS, ACTIVATION_PROOF_FIELD})
 _DUAL_REGISTRY_KEYS = frozenset(
     {
         "schema",
@@ -639,21 +647,417 @@ def _empty_registry(home: Path, manifest: dict[str, Any]) -> dict[str, Any]:
         "roles": {},
     }
 
-def validate_registry(
-    value: Any, *, home: Path, manifest: dict[str, Any]
-) -> dict[str, Any]:
+
+def _legacy_builtin_collisions(value: Any) -> frozenset[str]:
+    """Find every schema-1 role whose name became a reserved built-in seat.
+
+    Schema 1 allowed arbitrary custom role IDs, including names now owned by
+    the code-level seat activation path.  Such records are quarantined during
+    load so they can never be called or treated as built-in seats.  The raw
+    record remains on disk until an explicit disconnect removes the collision.
+    """
+
+    if type(value) is not dict or value.get("schema") != REGISTRY_SCHEMA:
+        return frozenset()
+    roles = value.get("roles")
+    if type(roles) is not dict:
+        return frozenset()
+    collisions: set[str] = set()
+    # Schema 1 has no provenance field.  Even a byte-for-byte matching purpose
+    # may have been caller-authored, so it cannot be accepted as code-owned.
+    for role_id in BUILTIN_SEATS:
+        if role_id in roles:
+            collisions.add(role_id)
+    return frozenset(collisions)
+
+
+def _quarantine_schema1_builtin_collisions(value: Any) -> dict[str, Any]:
+    """Migrate schema-1 reserved names into explicit schema-3 quarantine."""
+
+    collisions = _legacy_builtin_collisions(value)
+    if not collisions:
+        return value
+    upgraded = deepcopy(value)
+    upgraded["schema"] = CODEOWNED_REGISTRY_SCHEMA
+    upgraded["quarantined_roles"] = sorted(collisions)
+    for role_id in collisions:
+        del upgraded["roles"][role_id]
+    return upgraded
+
+
+def _builtin_record_payload(role_id: str, role: dict[str, Any]) -> bytes:
+    payload = {
+        "schema": ACTIVATION_PROOF_SCHEMA,
+        "provider": PROVIDER_ID,
+        "role": role_id,
+        "purpose": role["purpose"],
+        "model": role["model"],
+        "effort": role["effort"],
+        "max_output_tokens": role["max_output_tokens"],
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _proof_key_path(home: Path) -> Path:
+    """Return the canonical managed proof-key path without creating it."""
+
+    _require(home.is_absolute(), "Codex home must be an absolute path")
+    try:
+        canonical_home = home.resolve(strict=True)
+    except OSError as exc:
+        raise ZaiRoleError("Codex home is unavailable") from exc
     _require(
-        type(value) is dict and set(value) == _REGISTRY_KEYS,
-        "Z.AI role registry shape is unsupported",
+        canonical_home == home and home.is_dir() and not home.is_symlink(),
+        "Codex home must be a canonical, non-symlink directory",
+    )
+    return home / PROOF_KEY_RELATIVE_PATH
+
+
+def _proof_owner(info: os.stat_result) -> int | None:
+    owner = getattr(info, "st_uid", None)
+    return owner if isinstance(owner, int) else None
+
+
+def _same_file_identity(left: os.stat_result, right: os.stat_result) -> bool:
+    return (
+        left.st_dev,
+        left.st_ino,
+        stat.S_IFMT(left.st_mode),
+        left.st_nlink,
+        _proof_owner(left),
+    ) == (
+        right.st_dev,
+        right.st_ino,
+        stat.S_IFMT(right.st_mode),
+        right.st_nlink,
+        _proof_owner(right),
+    )
+
+
+def _same_proof_key_state(left: os.stat_result, right: os.stat_result) -> bool:
+    """Compare identity plus mutation-sensitive metadata for a proof key."""
+
+    return _same_file_identity(left, right) and (
+        left.st_size,
+        left.st_mtime_ns,
+        getattr(left, "st_ctime_ns", None),
+        stat.S_IMODE(left.st_mode),
+    ) == (
+        right.st_size,
+        right.st_mtime_ns,
+        getattr(right, "st_ctime_ns", None),
+        stat.S_IMODE(right.st_mode),
+    )
+
+
+def _validate_proof_directory(
+    directory: Path, *, expected_owner: int | None
+) -> os.stat_result:
+    try:
+        info = directory.lstat()
+    except OSError as exc:
+        raise ZaiRoleError("Z.AI activation proof directory is unavailable") from exc
+    _require(
+        not directory.is_symlink() and stat.S_ISDIR(info.st_mode),
+        "Z.AI activation proof directory is unsafe",
+    )
+    if expected_owner is not None:
+        _require(
+            _proof_owner(info) == expected_owner,
+            "Z.AI activation proof directory owner is unsafe",
+        )
+    if os.name == "posix":
+        _require(
+            stat.S_IMODE(info.st_mode) == 0o700,
+            "Z.AI activation proof directory mode must be 0700",
+        )
+    return info
+
+
+def _ensure_proof_directories(home: Path) -> tuple[Path, int | None]:
+    """Create only the dedicated managed directories during apply activation."""
+
+    key_path = _proof_key_path(home)
+    home_info = home.lstat()
+    expected_owner = _proof_owner(home_info)
+    if os.name == "posix" and hasattr(os, "geteuid"):
+        _require(
+            expected_owner == os.geteuid(),
+            "Codex home must be owned by the current user",
+        )
+    for directory in (key_path.parent.parent, key_path.parent):
+        try:
+            directory.mkdir(mode=0o700)
+            if os.name == "posix":
+                directory.chmod(0o700)
+            _fsync_directory(directory.parent)
+        except FileExistsError:
+            # An existing managed directory is accepted only after the same
+            # owner/type/mode checks used by the read path.
+            pass
+        except OSError as exc:
+            raise ZaiRoleError(
+                "Z.AI activation proof directory cannot be created"
+            ) from exc
+        _validate_proof_directory(directory, expected_owner=expected_owner)
+    _require(
+        _same_file_identity(home_info, home.lstat()),
+        "Codex home changed during activation proof setup",
+    )
+    return key_path, expected_owner
+
+
+def _read_proof_key(home: Path) -> bytes:
+    """Read the fixed-size installation key through an attested descriptor."""
+
+    key_path = _proof_key_path(home)
+    home_info = home.lstat()
+    expected_owner = _proof_owner(home_info)
+    if os.name == "posix" and hasattr(os, "geteuid"):
+        _require(
+            expected_owner == os.geteuid(),
+            "Codex home must be owned by the current user",
+        )
+    _validate_proof_directory(key_path.parent.parent, expected_owner=expected_owner)
+    _validate_proof_directory(key_path.parent, expected_owner=expected_owner)
+    try:
+        before = key_path.lstat()
+    except OSError as exc:
+        raise ZaiRoleError("Z.AI activation proof key is unavailable") from exc
+    _require(
+        not key_path.is_symlink()
+        and stat.S_ISREG(before.st_mode)
+        and before.st_nlink == 1
+        and before.st_size == PROOF_KEY_BYTES,
+        "Z.AI activation proof key is unsafe or corrupt",
+    )
+    if expected_owner is not None:
+        _require(
+            _proof_owner(before) == expected_owner,
+            "Z.AI activation proof key owner is unsafe",
+        )
+    if os.name == "posix":
+        _require(
+            stat.S_IMODE(before.st_mode) == 0o600,
+            "Z.AI activation proof key mode must be 0600",
+        )
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+    try:
+        descriptor = os.open(key_path, flags)
+    except OSError as exc:
+        raise ZaiRoleError("Z.AI activation proof key is unavailable") from exc
+    try:
+        opened = os.fstat(descriptor)
+        _require(
+            _same_proof_key_state(before, opened)
+            and stat.S_ISREG(opened.st_mode)
+            and opened.st_nlink == 1
+            and opened.st_size == PROOF_KEY_BYTES,
+            "Z.AI activation proof key changed before read",
+        )
+        key = os.read(descriptor, PROOF_KEY_BYTES + 1)
+        after_open = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    try:
+        after_path = key_path.lstat()
+        after_home = home.lstat()
+    except OSError as exc:
+        raise ZaiRoleError("Z.AI activation proof key changed during read") from exc
+    _require(
+        len(key) == PROOF_KEY_BYTES
+        and _same_proof_key_state(opened, after_open)
+        and _same_proof_key_state(opened, after_path)
+        and after_path.st_size == PROOF_KEY_BYTES
+        and _same_file_identity(home_info, after_home),
+        "Z.AI activation proof key changed during read",
+    )
+    return key
+
+
+def _load_or_create_proof_key(home: Path) -> bytes:
+    """Load or atomically create the proof key for an apply activation only."""
+
+    try:
+        return _read_proof_key(home)
+    except ZaiRoleError:
+        key_path, expected_owner = _ensure_proof_directories(home)
+        if key_path.exists() or key_path.is_symlink():
+            # Existing malformed state is never replaced or repaired implicitly.
+            return _read_proof_key(home)
+    key = secrets.token_bytes(PROOF_KEY_BYTES)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+    try:
+        descriptor = os.open(key_path, flags, 0o600)
+    except FileExistsError:
+        return _read_proof_key(home)
+    except OSError as exc:
+        raise ZaiRoleError("Z.AI activation proof key cannot be created") from exc
+    try:
+        written = 0
+        while written < len(key):
+            count = os.write(descriptor, key[written:])
+            _require(count > 0, "Z.AI activation proof key write failed")
+            written += count
+        if os.name == "posix":
+            os.fchmod(descriptor, 0o600)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    _fsync_directory(key_path.parent)
+    created = _read_proof_key(home)
+    _require(
+        expected_owner is None or _proof_owner(key_path.lstat()) == expected_owner,
+        "Z.AI activation proof key owner is unsafe",
     )
     _require(
-        value["schema"] == REGISTRY_SCHEMA, "Z.AI role registry schema is unsupported"
+        hmac.compare_digest(created, key),
+        "Z.AI activation proof key changed during creation",
+    )
+    return created
+
+
+def _activation_proof(
+    home: Path,
+    role_id: str,
+    role: dict[str, Any],
+    *,
+    key: bytes | None = None,
+) -> str:
+    """Create an installation-bound proof independent of provider credentials."""
+
+    proof_key = _read_proof_key(home) if key is None else key
+    _require(
+        type(proof_key) is bytes and len(proof_key) == PROOF_KEY_BYTES,
+        "Z.AI activation proof key is invalid",
+    )
+    return hmac.new(
+        proof_key,
+        _builtin_record_payload(role_id, role),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _verify_builtin_proof(home: Path, role_id: str, role: dict[str, Any]) -> None:
+    proof = role.get(ACTIVATION_PROOF_FIELD)
+    _require(
+        type(proof) is str and re.fullmatch(r"[0-9a-f]{64}", proof) is not None,
+        f"Z.AI built-in role {role_id!r} activation proof is invalid",
+    )
+    expected = _activation_proof(home, role_id, role)
+    _require(
+        hmac.compare_digest(proof, expected),
+        f"Z.AI built-in role {role_id!r} activation proof does not match",
+    )
+
+
+def _require_no_quarantined_roles(registry: dict[str, Any]) -> None:
+    quarantined = registry.get("quarantined_roles", [])
+    _require(
+        not quarantined,
+        "quarantined Z.AI roles require explicit disconnect before another registry change",
+    )
+
+
+def _builtin_role_structure_is_valid(
+    role_id: str, role: Any, manifest: dict[str, Any]
+) -> bool:
+    try:
+        _require(type(role) is dict and set(role) == _CODEOWNED_ROLE_KEYS, "invalid")
+        _require(role["purpose"] == BUILTIN_SEAT_PURPOSES[role_id], "invalid")
+        model, selected = resolve_model(manifest, role["model"], role["effort"])
+        _require(selected == role["effort"], "invalid")
+        _require(
+            type(role["max_output_tokens"]) is int
+            and 0 < role["max_output_tokens"] <= model["max_output_tokens"],
+            "invalid",
+        )
+    except Exception:
+        return False
+    return True
+
+
+def _quarantine_untrusted_schema3_builtins(
+    value: Any, *, home: Path, manifest: dict[str, Any]
+) -> dict[str, Any]:
+    """Move schema-3 built-ins without a valid credential proof to quarantine."""
+
+    if type(value) is not dict or value.get("schema") != CODEOWNED_REGISTRY_SCHEMA:
+        return value
+    roles = value.get("roles")
+    quarantined = value.get("quarantined_roles")
+    if type(roles) is not dict or type(quarantined) is not list:
+        return value
+    if not all(type(role_id) is str for role_id in quarantined):
+        return value
+    invalid: set[str] = set()
+    for role_id in BUILTIN_SEATS:
+        role = roles.get(role_id)
+        if role is None or role_id in quarantined:
+            continue
+        if not _builtin_role_structure_is_valid(role_id, role, manifest):
+            invalid.add(role_id)
+            continue
+        try:
+            _verify_builtin_proof(home, role_id, role)
+        except Exception:
+            invalid.add(role_id)
+    if not invalid:
+        return value
+    upgraded = deepcopy(value)
+    upgraded["quarantined_roles"] = sorted(set(quarantined).union(invalid))
+    for role_id in invalid:
+        upgraded["roles"].pop(role_id, None)
+    return upgraded
+
+
+def validate_registry(
+    value: Any,
+    *,
+    home: Path,
+    manifest: dict[str, Any],
+    verify_activation_proofs: bool = True,
+    allow_legacy_builtin_collisions: bool = False,
+) -> dict[str, Any]:
+    schema = value.get("schema") if type(value) is dict else None
+    registry_keys = (
+        _CODEOWNED_REGISTRY_KEYS
+        if schema == CODEOWNED_REGISTRY_SCHEMA
+        else _REGISTRY_KEYS
+    )
+    _require(
+        type(value) is dict and set(value) == registry_keys,
+        "Z.AI role registry shape is unsupported",
+    )
+    schema = value["schema"]
+    _require(
+        type(schema) is int
+        and schema in (REGISTRY_SCHEMA, CODEOWNED_REGISTRY_SCHEMA),
+        "Z.AI role registry schema is unsupported",
     )
     _require(value["managed_by"] == MANAGED_BY, "Z.AI role registry owner is invalid")
     _require(
         value["codex_home"] == str(home.resolve()),
         "Z.AI role registry belongs to another Codex home",
     )
+    if schema == CODEOWNED_REGISTRY_SCHEMA:
+        quarantined = value["quarantined_roles"]
+        _require(
+            type(quarantined) is list
+            and all(type(role_id) is str for role_id in quarantined)
+            and len(quarantined) == len(set(quarantined))
+            and quarantined == sorted(quarantined)
+            and all(role_id in BUILTIN_SEATS for role_id in quarantined),
+            "Z.AI quarantined role list is invalid",
+        )
     provider = value["provider"]
     _require(
         type(provider) is dict and set(provider) == _PROVIDER_KEYS,
@@ -694,10 +1098,27 @@ def validate_registry(
         tuples.add(pair)
     roles = value["roles"]
     _require(type(roles) is dict, "Z.AI roles must be an object")
+    if schema == CODEOWNED_REGISTRY_SCHEMA:
+        _require(
+            not set(roles).intersection(value["quarantined_roles"]),
+            "Z.AI quarantined roles must be disjoint from active roles",
+        )
     for role_id, role in roles.items():
         _require(ROLE_RE.fullmatch(role_id) is not None, "Z.AI role ID is invalid")
+        legacy_builtin_collision = (
+            allow_legacy_builtin_collisions
+            and schema == REGISTRY_SCHEMA
+            and role_id in BUILTIN_SEATS
+        )
+        role_keys = (
+            _CODEOWNED_ROLE_KEYS
+            if schema == CODEOWNED_REGISTRY_SCHEMA
+            and role_id in BUILTIN_SEATS
+            and not legacy_builtin_collision
+            else _ROLE_KEYS
+        )
         _require(
-            type(role) is dict and set(role) == _ROLE_KEYS,
+            type(role) is dict and set(role) == role_keys,
             "Z.AI role shape is unsupported",
         )
         _require(
@@ -705,12 +1126,40 @@ def validate_registry(
             and 0 < len(role["purpose"].strip()) <= MAX_ROLE_PURPOSE_CHARS,
             "Z.AI role purpose is invalid",
         )
+        if role_id in BUILTIN_SEATS and not legacy_builtin_collision:
+            _require(
+                schema == CODEOWNED_REGISTRY_SCHEMA
+                and type(role[ACTIVATION_PROOF_FIELD]) is str,
+                f"Z.AI built-in role {role_id!r} activation proof is not code-owned",
+            )
+            _require(
+                re.fullmatch(r"[0-9a-f]{64}", role[ACTIVATION_PROOF_FIELD])
+                is not None,
+                f"Z.AI built-in role {role_id!r} activation proof is invalid",
+            )
+            _require(
+                role["purpose"] == BUILTIN_SEAT_PURPOSES[role_id],
+                f"Z.AI built-in role {role_id!r} purpose is not code-owned",
+            )
+            if verify_activation_proofs:
+                _verify_builtin_proof(home, role_id, role)
         model, selected = resolve_model(manifest, role["model"], role["effort"])
         _require(selected == role["effort"], "Z.AI role effort is not concrete")
         _require(
             type(role["max_output_tokens"]) is int
             and 0 < role["max_output_tokens"] <= model["max_output_tokens"],
             "Z.AI role output token limit is invalid",
+        )
+    planner = roles.get("planner")
+    advisor = roles.get("advisor")
+    if (
+        schema == CODEOWNED_REGISTRY_SCHEMA
+        and planner is not None
+        and advisor is not None
+    ):
+        _require(
+            planner["model"] != advisor["model"],
+            "Planner and Advisor routes must use different provider/model routes",
         )
     return value
 
@@ -827,6 +1276,7 @@ def _convert_dual_channel_registry(
             )
 
     roles = {}
+    quarantined: set[str] = set()
     _require(type(value["roles"]) is dict, "Z.AI roles must be an object")
     for role_id, role in value["roles"].items():
         _require(
@@ -837,6 +1287,36 @@ def _convert_dual_channel_registry(
             role["channel"] in {"standard", "coding_plan"},
             "Z.AI dual-channel role channel is unsupported",
         )
+        _require(
+            ROLE_RE.fullmatch(role_id) is not None,
+            "Z.AI dual-channel role ID is invalid",
+        )
+        if role_id in BUILTIN_SEATS:
+            quarantined.add(role_id)
+            continue
+        _require(
+            type(role["purpose"]) is str
+            and 0 < len(role["purpose"].strip()) <= MAX_ROLE_PURPOSE_CHARS,
+            "Z.AI dual-channel role purpose is invalid",
+        )
+        model, selected = resolve_model(manifest, role["model"], role["effort"])
+        _require(
+            selected == role["effort"],
+            "Z.AI dual-channel role effort is not concrete",
+        )
+        _require(
+            type(role["max_output_tokens"]) is int
+            and not isinstance(role["max_output_tokens"], bool)
+            and 0 < role["max_output_tokens"] <= model["max_output_tokens"],
+            "Z.AI dual-channel role output token limit is invalid",
+        )
+        # Coding Plan and any future non-standard channel are retired.  Do not
+        # reinterpret their persisted roles as General API roles: dropping them
+        # forces an explicit reconnect through the current standard route.
+        # Dual-channel state predates provenance for built-in seats too, so all
+        # reserved names are quarantined rather than trusted during conversion.
+        if role["channel"] != "standard":
+            continue
         roles[role_id] = {
             "purpose": role["purpose"],
             "model": role["model"],
@@ -845,14 +1325,21 @@ def _convert_dual_channel_registry(
         }
 
     converted = {
-        "schema": REGISTRY_SCHEMA,
+        "schema": CODEOWNED_REGISTRY_SCHEMA if quarantined else REGISTRY_SCHEMA,
         "managed_by": value["managed_by"],
         "codex_home": value["codex_home"],
         "provider": deepcopy(provider),
         "qualifications": qualifications,
         "roles": roles,
     }
-    return validate_registry(converted, home=home, manifest=manifest)
+    if quarantined:
+        converted["quarantined_roles"] = sorted(quarantined)
+    return validate_registry(
+        converted,
+        home=home,
+        manifest=manifest,
+        verify_activation_proofs=False,
+    )
 
 
 def _safe_registry(path: Path) -> os.stat_result | None:
@@ -992,9 +1479,53 @@ def load_registry(
         raise ZaiRoleError("Z.AI role registry is corrupt") from exc
     if type(value) is dict and value.get("schema") == DUAL_CHANNEL_REGISTRY_SCHEMA:
         value = _convert_dual_channel_registry(value, home=home, manifest=manifest)
-    return validate_registry(value, home=home, manifest=manifest), hashlib.sha256(
-        raw
-    ).hexdigest()
+    value = _quarantine_schema1_builtin_collisions(value)
+    value = _quarantine_untrusted_schema3_builtins(
+        value,
+        home=home,
+        manifest=manifest,
+    )
+    return validate_registry(
+        value,
+        home=home,
+        manifest=manifest,
+        verify_activation_proofs=False,
+    ), hashlib.sha256(raw).hexdigest()
+
+
+def _load_registry_for_disconnect(
+    home: Path, manifest: dict[str, Any]
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Load validated raw state without proof-dependent quarantine conversion.
+
+    Disconnect is the recovery path for missing or corrupt proof keys.  It must
+    remove only the requested record and must not persist an in-memory
+    quarantine of otherwise unchanged sibling seats.
+    """
+
+    path = registry_path(home)
+    if _safe_registry(path) is None:
+        return None, None
+    try:
+        raw = path.read_bytes()
+        value = json.loads(raw)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ZaiRoleError("Z.AI role registry is corrupt") from exc
+    if type(value) is dict and value.get("schema") == DUAL_CHANNEL_REGISTRY_SCHEMA:
+        value = _convert_dual_channel_registry(value, home=home, manifest=manifest)
+    # Unlike normal loading, exact disconnect deliberately retains raw schema-1
+    # reserved-name collisions.  Migrating them here would delete sibling raw
+    # records when the caller requested removal of only one unrelated role.
+    allow_legacy_builtin_collisions = (
+        type(value) is dict and value.get("schema") == REGISTRY_SCHEMA
+    )
+    return validate_registry(
+        value,
+        home=home,
+        manifest=manifest,
+        verify_activation_proofs=False,
+        allow_legacy_builtin_collisions=allow_legacy_builtin_collisions,
+    ), hashlib.sha256(raw).hexdigest()
 
 
 def write_registry(
@@ -1003,8 +1534,16 @@ def write_registry(
     value: dict[str, Any],
     *,
     expected_sha256: str | None,
+    verify_activation_proofs: bool = True,
+    allow_legacy_builtin_collisions: bool = False,
 ) -> str:
-    validate_registry(value, home=home, manifest=manifest)
+    validate_registry(
+        value,
+        home=home,
+        manifest=manifest,
+        verify_activation_proofs=verify_activation_proofs,
+        allow_legacy_builtin_collisions=allow_legacy_builtin_collisions,
+    )
     path = registry_path(home)
     raw = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode(
         "utf-8"
@@ -1103,6 +1642,7 @@ def _bearer(home: Path) -> str:
             check=False,
             timeout=20,
             shell=False,
+            env=external_credentials.external_cli_trust.sanitized_environment(),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ZaiRoleError(
@@ -1258,7 +1798,12 @@ def _call_api(
         request_error = (
             f"Z.AI request failed with HTTP {exc.code}; provider output withheld"
         )
-        exc.close()
+        try:
+            exc.close()
+        except Exception:
+            # A malformed transport error must not mask the redacted request
+            # failure or expose provider details through its cleanup path.
+            pass
     except (urllib.error.URLError, TimeoutError, OSError):
         request_error = "Z.AI request could not complete; provider output withheld"
     if request_error is not None:
@@ -1317,6 +1862,7 @@ def gate0(
     _require(
         registry is not None and digest is not None, "Z.AI provider is not prepared"
     )
+    _require_no_quarantined_roles(registry)
     _require(
         not _qualified(registry, model_id, selected),
         "exact Z.AI tuple is already qualified",
@@ -1357,6 +1903,10 @@ def connect(
     apply: bool,
 ) -> dict[str, Any]:
     _require(ROLE_RE.fullmatch(role_id) is not None, "Z.AI role ID is invalid")
+    _require(
+        role_id not in BUILTIN_SEATS,
+        "reserved built-in role IDs require the exact seat activation path",
+    )
     checked_purpose = purpose.strip()
     _require(
         0 < len(checked_purpose) <= MAX_ROLE_PURPOSE_CHARS,
@@ -1380,6 +1930,7 @@ def connect(
     _require(
         registry is not None and digest is not None, "Z.AI provider is not prepared"
     )
+    _require_no_quarantined_roles(registry)
     _require(
         _qualified(registry, model_id, selected),
         "exact Z.AI model/effort tuple is not qualified; complete Gate 0",
@@ -1417,8 +1968,12 @@ def activate_seat(
         0 < max_output_tokens <= model["max_output_tokens"],
         "Z.AI seat output token limit is unsupported",
     )
-    registry, _ = load_registry(home, manifest)
-    _require(registry is not None, "Z.AI provider is not prepared")
+    registry, digest = load_registry(home, manifest)
+    _require(
+        registry is not None and digest is not None,
+        "Z.AI provider is not prepared",
+    )
+    _require_no_quarantined_roles(registry)
     _require_credential_ready(home)
     _require(
         _qualified(registry, model_id, selected),
@@ -1433,16 +1988,25 @@ def activate_seat(
     existing = registry["roles"].get(seat)
     if existing is not None:
         _require(
-            existing == expected,
+            all(existing.get(key) == value for key, value in expected.items())
+            and ACTIVATION_PROOF_FIELD in existing,
             f"Z.AI role {seat!r} already exists with a different exact seat route",
         )
         return {
             "state": "READY",
             "provider": PROVIDER_ID,
             "role": seat,
-            **expected,
+            **existing,
             "created": False,
         }
+    other_seat = "advisor" if seat == "planner" else "planner" if seat == "advisor" else None
+    if other_seat is not None:
+        other = registry["roles"].get(other_seat)
+        if other is not None:
+            _require(
+                other["model"] != model_id,
+                "Planner and Advisor routes must use different provider/model routes",
+            )
     if not apply:
         return {
             "state": "ROLE_ABSENT",
@@ -1451,15 +2015,21 @@ def activate_seat(
             **expected,
             "created": False,
         }
-    role = connect(
-        home,
-        seat,
-        expected["purpose"],
-        model_id,
-        selected,
-        max_output_tokens,
-        apply=True,
-    )
+    proof_key = _load_or_create_proof_key(home)
+    role = {
+        **expected,
+        ACTIVATION_PROOF_FIELD: _activation_proof(
+            home,
+            seat,
+            expected,
+            key=proof_key,
+        ),
+    }
+    after = deepcopy(registry)
+    after["schema"] = CODEOWNED_REGISTRY_SCHEMA
+    after.setdefault("quarantined_roles", [])
+    after["roles"][seat] = role
+    write_registry(home, manifest, after, expected_sha256=digest)
     return {
         "state": "READY",
         "provider": PROVIDER_ID,
@@ -1471,19 +2041,300 @@ def activate_seat(
 
 def disconnect(home: Path, role_id: str, *, apply: bool) -> None:
     manifest = load_manifest()
-    registry, digest = load_registry(home, manifest)
+    registry, digest = _load_registry_for_disconnect(home, manifest)
     _require(
         registry is not None and digest is not None, "Z.AI provider is not prepared"
     )
-    _require(role_id in registry["roles"], f"Z.AI role {role_id!r} is not configured")
+    _require(
+        role_id in registry["roles"]
+        or role_id in registry.get("quarantined_roles", []),
+        f"Z.AI role {role_id!r} is not configured",
+    )
     if not apply:
         return
     after = deepcopy(registry)
-    del after["roles"][role_id]
-    write_registry(home, manifest, after, expected_sha256=digest)
+    if role_id in after["roles"]:
+        del after["roles"][role_id]
+    quarantined = after.get("quarantined_roles")
+    if type(quarantined) is list and role_id in quarantined:
+        after["quarantined_roles"] = [
+            quarantined_role
+            for quarantined_role in quarantined
+            if quarantined_role != role_id
+        ]
+    write_registry(
+        home,
+        manifest,
+        after,
+        expected_sha256=digest,
+        verify_activation_proofs=False,
+        allow_legacy_builtin_collisions=(
+            after["schema"] == REGISTRY_SCHEMA
+        ),
+    )
+
+
+def _windows_assert_safe_task_parents(path: Path) -> None:
+    """Reject reparse points in every existing parent component of ``path``."""
+
+    _require(os.name == "nt", "Windows task-parent verification requested off Windows")
+    import ctypes
+    from ctypes import wintypes
+
+    class _ByHandleFileInformation(ctypes.Structure):
+        _fields_ = (
+            ("file_attributes", wintypes.DWORD),
+            ("creation_time", wintypes.FILETIME),
+            ("last_access_time", wintypes.FILETIME),
+            ("last_write_time", wintypes.FILETIME),
+            ("volume_serial_number", wintypes.DWORD),
+            ("file_size_high", wintypes.DWORD),
+            ("file_size_low", wintypes.DWORD),
+            ("number_of_links", wintypes.DWORD),
+            ("file_index_high", wintypes.DWORD),
+            ("file_index_low", wintypes.DWORD),
+        )
+
+    try:
+        kernel32 = ctypes.WinDLL("Kernel32.dll", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = (
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        )
+        create_file.restype = wintypes.HANDLE
+        get_information = kernel32.GetFileInformationByHandle
+        get_information.argtypes = (
+            wintypes.HANDLE,
+            ctypes.POINTER(_ByHandleFileInformation),
+        )
+        get_information.restype = wintypes.BOOL
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = (wintypes.HANDLE,)
+        close_handle.restype = wintypes.BOOL
+    except (AttributeError, OSError) as exc:
+        raise ZaiRoleError("bounded task parent identity could not be verified") from exc
+
+    parents: list[Path] = []
+    current = path.parent
+    while True:
+        parents.append(current)
+        if current == current.parent:
+            break
+        current = current.parent
+
+    generic_read = 0x80000000
+    file_share_read = 0x00000001
+    file_share_write = 0x00000002
+    file_share_delete = 0x00000004
+    open_existing = 3
+    file_flag_open_reparse_point = 0x00200000
+    file_flag_backup_semantics = 0x02000000
+    file_attribute_directory = 0x00000010
+    file_attribute_reparse_point = 0x00000400
+    invalid_handle = ctypes.c_void_p(-1).value
+    for parent in reversed(parents):
+        try:
+            expected_info = parent.lstat()
+        except OSError as exc:
+            raise ZaiRoleError("bounded task parent is unavailable or unsafe") from exc
+        _require(
+            stat.S_ISDIR(expected_info.st_mode) and expected_info.st_nlink == 1,
+            "bounded task parent is unsafe",
+        )
+        handle = create_file(
+            str(parent),
+            generic_read,
+            file_share_read | file_share_write | file_share_delete,
+            None,
+            open_existing,
+            file_flag_open_reparse_point | file_flag_backup_semantics,
+            None,
+        )
+        if handle == invalid_handle:
+            raise ZaiRoleError("bounded task parent is unavailable or unsafe")
+        try:
+            information = _ByHandleFileInformation()
+            if not get_information(handle, ctypes.byref(information)):
+                raise ZaiRoleError("bounded task parent identity could not be verified")
+            _require(
+                information.file_attributes & file_attribute_directory
+                and not information.file_attributes & file_attribute_reparse_point
+                and information.number_of_links == 1,
+                "bounded task parent is unsafe",
+            )
+            file_index = (information.file_index_high << 32) | information.file_index_low
+            _require(
+                file_index == expected_info.st_ino
+                and _task_identity(parent) == (expected_info.st_dev, expected_info.st_ino),
+                "bounded task parent identity changed",
+            )
+        finally:
+            close_handle(handle)
+
+
+def _windows_read_verified_task(path: Path) -> bytes:
+    """Read a task through a handle that is proven non-reparse and stable."""
+
+    _require(os.name == "nt", "Windows task-file verification requested off Windows")
+    try:
+        expected_info = path.lstat()
+    except OSError as exc:
+        raise ZaiRoleError("bounded task file is unavailable or unsafe") from exc
+    expected_identity = (expected_info.st_dev, expected_info.st_ino)
+    _require(
+        not path.is_symlink()
+        and stat.S_ISREG(expected_info.st_mode)
+        and expected_info.st_nlink == 1,
+        "bounded task file is unsafe",
+    )
+    _windows_assert_safe_task_parents(path)
+
+    import ctypes
+    from ctypes import wintypes
+
+    class _ByHandleFileInformation(ctypes.Structure):
+        _fields_ = (
+            ("file_attributes", wintypes.DWORD),
+            ("creation_time", wintypes.FILETIME),
+            ("last_access_time", wintypes.FILETIME),
+            ("last_write_time", wintypes.FILETIME),
+            ("volume_serial_number", wintypes.DWORD),
+            ("file_size_high", wintypes.DWORD),
+            ("file_size_low", wintypes.DWORD),
+            ("number_of_links", wintypes.DWORD),
+            ("file_index_high", wintypes.DWORD),
+            ("file_index_low", wintypes.DWORD),
+        )
+
+    try:
+        kernel32 = ctypes.WinDLL("Kernel32.dll", use_last_error=True)
+    except (AttributeError, OSError) as exc:
+        raise ZaiRoleError("bounded task file identity could not be verified") from exc
+    try:
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = (
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        )
+        create_file.restype = wintypes.HANDLE
+        get_information = kernel32.GetFileInformationByHandle
+        get_information.argtypes = (
+            wintypes.HANDLE,
+            ctypes.POINTER(_ByHandleFileInformation),
+        )
+        get_information.restype = wintypes.BOOL
+        read_file = kernel32.ReadFile
+        read_file.argtypes = (
+            wintypes.HANDLE,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD),
+            ctypes.c_void_p,
+        )
+        read_file.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel32.CloseHandle.restype = wintypes.BOOL
+    except AttributeError as exc:
+        raise ZaiRoleError("bounded task file identity could not be verified") from exc
+
+    generic_read = 0x80000000
+    file_share_read = 0x00000001
+    file_share_write = 0x00000002
+    file_share_delete = 0x00000004
+    open_existing = 3
+    file_flag_open_reparse_point = 0x00200000
+    file_attribute_directory = 0x00000010
+    file_attribute_reparse_point = 0x00000400
+    ctypes.set_last_error(0)
+    handle = create_file(
+        str(path),
+        generic_read,
+        file_share_read | file_share_write | file_share_delete,
+        None,
+        open_existing,
+        file_flag_open_reparse_point,
+        None,
+    )
+    invalid_handle = ctypes.c_void_p(-1).value
+    if handle == invalid_handle:
+        raise ZaiRoleError("bounded task file is unavailable or unsafe")
+    try:
+        information = _ByHandleFileInformation()
+        ctypes.set_last_error(0)
+        if not get_information(handle, ctypes.byref(information)):
+            raise ZaiRoleError("bounded task file identity could not be verified")
+        _require(
+            not information.file_attributes & file_attribute_reparse_point
+            and not information.file_attributes & file_attribute_directory
+            and information.number_of_links == 1,
+            "bounded task file is unsafe",
+        )
+        file_index = (information.file_index_high << 32) | information.file_index_low
+        _require(
+            file_index == expected_identity[1]
+            and _task_identity(path) == expected_identity,
+            "bounded task file identity changed before read",
+        )
+        buffer = (ctypes.c_ubyte * (MAX_TASK_BYTES + 1))()
+        read_count = wintypes.DWORD()
+        if not read_file(
+            handle,
+            ctypes.byref(buffer),
+            MAX_TASK_BYTES + 1,
+            ctypes.byref(read_count),
+            None,
+        ):
+            raise ZaiRoleError("bounded task file could not be read safely")
+        _require(
+            read_count.value <= MAX_TASK_BYTES,
+            "bounded task file is oversized",
+        )
+        after = _ByHandleFileInformation()
+        if not get_information(handle, ctypes.byref(after)):
+            raise ZaiRoleError("bounded task file identity could not be verified")
+        after_index = (after.file_index_high << 32) | after.file_index_low
+        _require(
+            after_index == file_index
+            and after.number_of_links == 1
+            and not after.file_attributes & file_attribute_directory
+            and not after.file_attributes & file_attribute_reparse_point
+            and _task_identity(path) == expected_identity,
+            "bounded task file identity changed while reading",
+        )
+        _windows_assert_safe_task_parents(path)
+        return bytes(buffer[: read_count.value])
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _task_identity(path: Path) -> tuple[int, int]:
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise ZaiRoleError("bounded task file identity could not be verified") from exc
+    return info.st_dev, info.st_ino
 
 
 def _read_task(path: Path) -> str:
+    if os.name == "nt":
+        raw = _windows_read_verified_task(path)
+        try:
+            value = raw.decode("utf-8")
+        except UnicodeError:
+            raise ZaiRoleError("bounded task file is unreadable") from None
+        _require(bool(value.strip()), "bounded task is empty")
+        return value
     flags = os.O_RDONLY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
@@ -1594,13 +2445,25 @@ def _validate_structured_role_output(
     )
 
 
-def _load_call_role(registry: dict[str, Any], role_id: str) -> dict[str, Any]:
+def _load_call_role(
+    registry: dict[str, Any], role_id: str, *, home: Path
+) -> dict[str, Any]:
+    _require(
+        role_id not in registry.get("quarantined_roles", []),
+        f"Z.AI role {role_id!r} is quarantined and not configured; explicit disconnect is required",
+    )
     role = registry["roles"].get(role_id)
     _require(role is not None, f"Z.AI role {role_id!r} is not configured")
     _require(
         _qualified(registry, role["model"], role["effort"]),
         "exact Z.AI role tuple is no longer qualified",
     )
+    if role_id in BUILTIN_SEATS:
+        _require(
+            role["purpose"] == BUILTIN_SEAT_PURPOSES[role_id],
+            f"Z.AI built-in role {role_id!r} purpose is not code-owned",
+        )
+        _verify_builtin_proof(home, role_id, role)
     return role
 
 
@@ -1619,7 +2482,7 @@ def call_role(home: Path, role_id: str, task_file: Path) -> dict[str, Any]:
     manifest = load_manifest()
     registry, _ = load_registry(home, manifest)
     _require(registry is not None, "Z.AI provider is not prepared")
-    role = _load_call_role(registry, role_id)
+    role = _load_call_role(registry, role_id, home=home)
     task = _read_task(task_file)
     system_prompt = _role_system_prompt(role_id, role)
     result = _call_api(
@@ -1678,7 +2541,7 @@ def call_context_role(
     manifest = load_manifest()
     registry, _ = load_registry(home, manifest)
     _require(registry is not None, "Z.AI provider is not prepared")
-    role = _load_call_role(registry, role_id)
+    role = _load_call_role(registry, role_id, home=home)
     ack = f"CONTEXT_ACK sha256:{digest} source:{envelope['source_version']}"
     system_prompt = (
         f"{_role_system_prompt(role_id, role)}\n\n"
