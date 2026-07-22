@@ -6,7 +6,9 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -29,10 +31,16 @@ SPEC.loader.exec_module(inspect_models)
 
 
 class InspectModelsTests(unittest.TestCase):
-    def fake_binary(self) -> tempfile.NamedTemporaryFile:
-        binary = tempfile.NamedTemporaryFile()
-        os.chmod(binary.name, 0o700)
-        return binary
+    @contextlib.contextmanager
+    def fake_binary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / ("codex.exe" if os.name == "nt" else "codex")
+            if os.name == "nt":
+                shutil.copy2(Path(sys.executable).resolve(), binary)
+            else:
+                binary.write_text("#!/bin/sh\n", encoding="utf-8")
+                binary.chmod(0o700)
+            yield binary
 
     def test_catalog_reports_exact_binary_version_and_source(self) -> None:
         payload = {
@@ -53,11 +61,11 @@ class InspectModelsTests(unittest.TestCase):
             ],
         ) as run:
             result, executable, version = inspect_models.load_catalog(
-                binary.name, None, False
+                str(binary), None, False
             )
 
         self.assertEqual(result, payload)
-        self.assertEqual(executable, str(Path(binary.name).resolve()))
+        self.assertEqual(executable, str(binary.resolve()))
         self.assertEqual(version, "codex-cli 9.9.9")
         self.assertEqual(run.call_args_list[0].args[0][1:], ["debug", "models"])
         self.assertEqual(run.call_args_list[0].kwargs["timeout"], 30)
@@ -67,7 +75,7 @@ class InspectModelsTests(unittest.TestCase):
             inspect_models.subprocess, "run"
         ) as run:
             with self.assertRaisesRegex(RuntimeError, "Invalid provider ID"):
-                inspect_models.load_catalog(binary.name, 'bad"provider', False)
+                inspect_models.load_catalog(str(binary), 'bad"provider', False)
         run.assert_not_called()
 
     def test_timeout_is_reported_without_hanging(self) -> None:
@@ -77,7 +85,7 @@ class InspectModelsTests(unittest.TestCase):
             side_effect=subprocess.TimeoutExpired("codex", 30),
         ):
             with self.assertRaisesRegex(RuntimeError, "timed out"):
-                inspect_models.load_catalog(binary.name, None, False)
+                inspect_models.load_catalog(str(binary), None, False)
 
     def test_malformed_catalog_shapes_fail_cleanly(self) -> None:
         for payload, expected in (
@@ -95,7 +103,7 @@ class InspectModelsTests(unittest.TestCase):
                     ),
                 ):
                     with self.assertRaisesRegex(RuntimeError, expected):
-                        inspect_models.load_catalog(binary.name, None, False)
+                        inspect_models.load_catalog(str(binary), None, False)
 
     def test_malformed_reasoning_effort_fails_cleanly(self) -> None:
         payload = {
@@ -112,7 +120,7 @@ class InspectModelsTests(unittest.TestCase):
             return_value=subprocess.CompletedProcess([], 0, json.dumps(payload), ""),
         ):
             with self.assertRaisesRegex(RuntimeError, "invalid reasoning level"):
-                inspect_models.load_catalog(binary.name, None, False)
+                inspect_models.load_catalog(str(binary), None, False)
 
     def test_invalid_utf8_subprocess_output_fails_cleanly(self) -> None:
         invalid_utf8 = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid")
@@ -122,7 +130,7 @@ class InspectModelsTests(unittest.TestCase):
             side_effect=invalid_utf8,
         ):
             with self.assertRaisesRegex(RuntimeError, "invalid UTF-8"):
-                inspect_models.load_catalog(binary.name, None, False)
+                inspect_models.load_catalog(str(binary), None, False)
 
     def test_json_output_includes_catalog_provenance(self) -> None:
         for bundled, expected_source in (

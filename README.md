@@ -121,9 +121,14 @@ effort label.
 - Omit `advisor` when you do not want plan review.
 - Omit `designer` when you do not need a separate design handoff.
 - `executor` is required.
-- Planner and Advisor must use different configured model routes so the review is independent.
+- Two configured Planner and Advisor routes must differ so the review is independent. If Planner is omitted, the root owns planning and is not a configured Planner route; a fresh direct Advisor may use the same model as the root.
 
 Role labels are literal. A model after `planner:` plans; a model after `advisor:` reviews; a model after `designer:` designs; a model after `executor:` implements. Codex must never move a model to a different role because that model was used differently in an older plugin version. If you omit Designer, the workflow has no Designer. If you specify Planner and Executor but omit Advisor, the workflow has no Advisor.
+
+Explicit current-task model, effort, and agent choices override saved Advisor and
+Executor defaults. The plugin follows the exact route and never substitutes GPT-5.5,
+Terra, Qwen, Fable, or another model merely to create provider or model diversity;
+an unavailable exact route is reported as unavailable.
 
 When every requested route is ready in the current task, the plugin confirms only
 the roles you supplied, in your order:
@@ -153,6 +158,8 @@ authorizes configuration, credentials, or spend.
 Examples:
 
 ```text
+/codex-orchestration setup advisor: GPT-5.6 Sol Max, executor: GPT-5.6 Sol Medium
+
 /codex-orchestration setup planner: Claude Fable 5 High, advisor: GPT-5.6 Sol High, executor: GPT-5.6 Luna Extra High
 
 /codex-orchestration setup planner: GPT-5.6 Sol Extra High, advisor: Claude Fable 5 High, executor: GPT-5.6 Luna Extra High
@@ -302,7 +309,10 @@ Version **0.6.0 or newer** is required for External Model roles; version **0.7.0
 or newer** adds `--update`, routing repair, and Designer; version **0.7.2 or newer**
 uses concise per-role activation confirmation; version **0.8.0 or newer** routes
 `Designer: Kimi K3` through the existing Kimi Code OAuth subscription via ACP;
-version **0.9.0 or newer** adds the sealed Qwen 3.8 Max Preview Advisor.
+version **0.9.0 or newer** adds the sealed Qwen 3.8 Max Preview Advisor. Version
+**0.9.1 or newer** clarifies that root-owned planning may use a direct Advisor
+matching the root model, while two configured Planner/Advisor routes must still
+remain distinct.
 Confirm with
 `codex plugin list --json`, then restart Codex Desktop and start a new task.
 

@@ -467,7 +467,7 @@ class AppServer:
                     "clientInfo": {
                         "name": "codex_orchestration_installer",
                         "title": "Codex Orchestration Installer",
-                        "version": "0.9.0",
+                        "version": "0.9.1",
                     },
                     "capabilities": {"experimentalApi": True},
                 },
@@ -1221,7 +1221,7 @@ On PLAN_REVISE, record the latest finding IDs before revision. After the Planner
 
 When executor delegation materially improves speed, cost, quality, or context isolation, use only the configured executor route. Give each executor one bounded, self-contained packet with objective, relevant facts, constraints, owned files or read-only scope, dependencies, acceptance criteria, verification, and handoff format. Inspect every handoff, integrate it, and run final checks yourself.
 
-Explicit user instructions win, including no-subagents and task-local seat overrides. Persistent and task-local Planner and Advisor routes must remain distinct: reject the same direct model ID, the same custom-agent name, Fable in both seats, or a direct Qwen Planner paired with the sealed Qwen Advisor. This policy does not create or change a Goal, weaken approvals, alter permissions, or force a worker count.
+Explicit user instructions win, including no-subagents and task-local seat overrides. An explicit current-task choice may override a saved Advisor or Executor model, effort, or agent route. When no Planner route is configured, the root owns planning; a fresh direct Advisor using the same model ID as the root is not a duplicate configured Planner route. Persistent and task-local Planner and Advisor routes that are both configured must still remain distinct: reject two configured direct routes with the same model ID, the same custom-agent name, Fable in both seats, or a direct Qwen Planner paired with the sealed Qwen Advisor. This policy does not create or change a Goal, weaken approvals, alter permissions, or force a worker count.
 
 Planner and Advisor are policy-isolated, root-directed seats: they cannot contact each other, Designer, or Executors, spawn descendants, edit files, execute work, or release Executor. They return only to the root. Designer is also root-directed: it cannot contact Planner, Advisor, or Executor, spawn descendants, redesign the root plan, change implementation code, or release Executor. Designer may edit only explicitly delegated design artifacts. Bundled MCP requests do not carry caller identity, so caller isolation is instruction-enforced even when a bridge disables tools and persistence. If you are a spawned child, stay inside the supplied packet, report only to the root, never call planning tools, and never spawn descendants. An Executor never redesigns the root plan or contacts Planner, Advisor, or Designer.
 """
@@ -1299,7 +1299,7 @@ For delegated executor work, call this tool with {_spawn_route(executor)}, fork_
 
 {provider_guard}
 
-Never use fork_turns = "all" with model, reasoning_effort, or agent_type: a full-history fork inherits the root route and rejects those overrides. Never silently substitute the root model when an exact child route is unavailable. Report the unavailable route to the root. A user's explicit current-task model, effort, agent, or no-subagents instruction overrides this saved default, but a task-local Planner and Advisor must still be distinct: reject the same direct model ID, the same custom-agent name, Fable in both seats, or a direct Qwen Planner paired with the sealed Qwen Advisor.
+Never use fork_turns = "all" with model, reasoning_effort, or agent_type: a full-history fork inherits the root route and rejects those overrides. Never invent or substitute GPT-5.5, Terra, Qwen, Fable, or any other model solely to create provider or model diversity. If the exact explicit route is unavailable, report it unavailable. A user's explicit current-task model, effort, agent, or no-subagents instruction overrides this saved default. When no Planner route is configured, root-owned planning is not a configured Planner route, even if the root and a fresh direct Advisor use the same model ID. A task-local Planner and Advisor must still be distinct when both are configured; persistent configured Planner/Advisor routes remain distinct too: reject the same direct model ID, the same custom-agent name, Fable in both seats, or a direct Qwen Planner paired with the sealed Qwen Advisor.
 
 If you are a spawned child, do not call this tool or create descendants. Finish only your assigned packet and return to the root.
 """

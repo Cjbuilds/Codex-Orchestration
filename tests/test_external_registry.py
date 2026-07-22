@@ -171,7 +171,12 @@ class ExternalRegistryTests(unittest.TestCase):
             target.write_text("{}", encoding="utf-8")
             target.chmod(0o600)
             symlink = root / "registry"
-            symlink.symlink_to(target)
+            try:
+                symlink.symlink_to(target)
+            except OSError as error:
+                if getattr(error, "winerror", None) == 1314:
+                    self.skipTest("Windows symlink privilege is unavailable")
+                raise
             with self.assertRaisesRegex(REGISTRY.RegistryError, "unsafe"):
                 REGISTRY.read_registry(symlink)
 

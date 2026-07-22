@@ -499,6 +499,26 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertIn("review_plan", fable_advisor_usage)
         self.assertIn('fork_turns = "none"', fable_advisor_usage)
 
+    def test_root_planning_allows_sol_advisor_and_sol_executor_override(self) -> None:
+        executor = {"kind": "model", "model": "gpt-5.6-sol", "effort": "medium"}
+        advisor = {"kind": "model", "model": "gpt-5.6-sol", "effort": "max"}
+
+        mode, usage = NATIVE.build_policy(executor, None, advisor)
+
+        self.assertIn("No Planner is configured", mode)
+        self.assertIn("root owns planning", mode)
+        self.assertIn(
+            "same model ID as the root is not a duplicate configured Planner route",
+            mode,
+        )
+        self.assertIn('model = "gpt-5.6-sol", reasoning_effort = "max"', usage)
+        self.assertIn('model = "gpt-5.6-sol", reasoning_effort = "medium"', usage)
+        self.assertGreaterEqual(usage.count('fork_turns = "none"'), 2)
+        self.assertIn("explicit current-task model, effort, agent", usage)
+        self.assertIn("Never invent or substitute GPT-5.5, Terra, Qwen, Fable", usage)
+        self.assertIn("If the exact explicit route is unavailable", usage)
+        self.assertIn("when both are configured", usage)
+
     def test_planner_argument_validation(self) -> None:
         exclusive = self.run_script(
             "--executor-model",

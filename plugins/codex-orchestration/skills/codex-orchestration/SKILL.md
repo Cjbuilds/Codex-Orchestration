@@ -15,6 +15,7 @@ Support these simple forms:
 
 ```text
 /codex-orchestration setup executor: GPT-5.6 Luna Extra High
+/codex-orchestration setup advisor: GPT-5.6 Sol Max, executor: GPT-5.6 Sol Medium
 /codex-orchestration setup executor: GPT-5.6 Luna Extra High, advisor: Claude Fable 5 High
 /codex-orchestration setup planner: Claude Fable 5 High, advisor: GPT-5.6 Sol High, executor: GPT-5.6 Luna Extra High
 /codex-orchestration setup advisor: Qwen 3.8 Max Preview, designer: Kimi K3, executor: GPT-5.6 Luna Extra High
@@ -60,7 +61,7 @@ Explicit seat labels are authoritative. `planner:` configures only Planner, `adv
 
 The executor is required for setup or a task-local override. It is not required for a custom-role creation request. Planner, advisor, and designer are optional: omitted planner means the current root model plans, omitted advisor means `advisor: none`, and omitted designer means `designer: none`. Do not ask separate planner or advisor questions, or a separate designer question, unless the user asks for help choosing them.
 
-For both persistent setup and task-local overrides, reject an identical Planner and Advisor route: the same direct model ID, the same custom-agent name, Claude Fable 5 in both seats, or a direct `qwen3.8-max-preview` Planner paired with the sealed Qwen Advisor. Independent critique is required.
+For both persistent setup and task-local overrides, reject two configured Planner and Advisor routes that collide: the same direct model ID, the same custom-agent name, Claude Fable 5 in both seats, or a direct `qwen3.8-max-preview` Planner paired with the sealed Qwen Advisor. When Planner is omitted, the root owns planning and is not a configured Planner route; a fresh direct Advisor may therefore use the same model ID as the root. Independent critique is still required between two configured planning seats.
 
 If the executor is missing, ask only:
 
@@ -609,7 +610,7 @@ This skill and its saved policy must never:
 - parallelize overlapping writes;
 - silently substitute the root model for an unavailable child route.
 
-An explicit `no subagents` instruction always wins. A current-task seat override wins over the saved default for that task only.
+An explicit `no subagents` instruction always wins. A current-task model, effort, or agent choice for Advisor or Executor wins over the saved default for that task only. Follow the exact explicit route: never invent or substitute GPT-5.5, Terra, Qwen, Fable, or another model merely to manufacture provider or model diversity. If that exact route is unavailable, report it unavailable.
 
 ## Spawn routed children correctly
 
@@ -642,7 +643,7 @@ Tool acceptance proves the requested route was valid and accepted, not necessari
 
 ## Planner and Advisor workflow
 
-Planner is optional. When no Planner route is configured, the root creates and revises the plan. When configured, send the Planner one self-contained packet containing user intent, acceptance criteria, repository facts, constraints, proposed executor slices, risks, and verification. Require `PLAN_DRAFT`. Planner and Advisor report only to the root. They never edit, execute, spawn, contact one another, contact Executors, or release Executor work.
+Planner is optional. When no Planner route is configured, the root creates and revises the plan. The root substrate is not a configured Planner route, so a fresh direct Advisor may use the same model ID as the root; use `fork_turns = "none"`, send a self-contained review packet, and keep the roles isolated. When Planner is configured, send it one self-contained packet containing user intent, acceptance criteria, repository facts, constraints, proposed executor slices, risks, and verification. Require `PLAN_DRAFT`. Planner and Advisor report only to the root. They never edit, execute, spawn, contact one another, contact Executors, or release Executor work.
 
 Advisor is optional. If none is configured, the root validates the Planner's draft and may continue. For a non-trivial plan with an Advisor, use this bounded approval loop:
 
@@ -666,7 +667,7 @@ A configured Planner or Advisor is required by default. Route failure, malformed
 
 Do not persist a best-effort flag. An explicit task override applies only to that task.
 
-Reject persistent setup or task-local activation when configured Planner and Advisor routes are identical: the same direct model ID, same custom-agent name, or Fable in both seats. Independent critique is the reason for the Advisor role.
+Reject persistent setup or task-local activation when two configured Planner and Advisor routes are identical: the same direct model ID, same custom-agent name, Fable in both seats, or a direct Qwen Planner paired with the sealed Qwen Advisor. This does not reject root-owned planning plus a direct Advisor that matches the root model. Independent critique is the reason for the Advisor role.
 
 Fable Planner uses `create_plan` and `revise_plan`; Fable Advisor uses `review_plan`. These operations are seat-bound: never send a supplied Fable Planner to `review_plan`, and never use an Advisor route to create or revise the plan. The policy authorizes only the root to make these read-only calls; Executors must never use or direct them.
 

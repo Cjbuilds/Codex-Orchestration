@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.9.1 — Unreleased
+
+- Clarify that omitted Planner means root-owned planning, so a fresh direct Sol
+  Advisor may match a Sol root without becoming a duplicate configured Planner
+  route. Preserve fail-closed separation for two configured Planner/Advisor routes.
+- Make explicit current-task Advisor and Executor routing authoritative, and forbid
+  inventing or substituting models solely to manufacture provider or model diversity.
+- Treat explicit Windows executable paths as paths rather than command names, and
+  keep lifecycle/negative-path fixtures portable without weakening production checks.
+
 ## 0.9.0 — Unreleased
 
 - Add Qwen 3.8 Max Preview as a sealed, independent Advisor through the official

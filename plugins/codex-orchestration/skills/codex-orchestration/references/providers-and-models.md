@@ -67,13 +67,23 @@ The control surface and the route are separate:
 - user overrides and `no subagents` win;
 - Goal, permissions, approvals, and worker counts are not changed.
 
+An omitted Planner leaves planning with the root; the root substrate is not a
+configured Planner route. A fresh direct Advisor may therefore use the same model ID
+as the root, with `fork_turns="none"` and a self-contained isolated review packet.
+The separation rule still rejects two configured Planner/Advisor routes with the
+same direct model ID, the same custom-agent name, Fable in both seats, or a direct
+Qwen Planner paired with the sealed Qwen Advisor.
+
 `usage_hint_text` attaches the route to the spawn tool itself:
 
 ```text
-planner  -> model="gpt-5.6-sol", reasoning_effort="high", fork_turns="none"
-advisor  -> model="gpt-5.6-terra", reasoning_effort="high", fork_turns="none"
-executor -> model="gpt-5.6-luna", reasoning_effort="xhigh", fork_turns="none"
+planner  -> root (no configured Planner route)
+advisor  -> model="gpt-5.6-sol", reasoning_effort="max", fork_turns="none"
+executor -> model="gpt-5.6-sol", reasoning_effort="medium", fork_turns="none"
 ```
+
+Those ordinary values are illustrative; the plugin remains generic, generated
+policy always follows the configured route, and an explicit current-task route wins.
 
 For a durable custom-agent route it uses:
 
@@ -115,6 +125,11 @@ fork_turns = "none"
 and send a self-contained task packet. A small positive turn count also permits overrides, but `none` is the Codex-Orchestration default because it minimizes duplicate context and makes the handoff deliberate.
 
 Correctness wins over context savings. If a bounded packet cannot carry the necessary context safely, keep the work with the root instead of forcing a cheaper child.
+
+An explicit current-task model, effort, or agent choice overrides a saved Advisor or
+Executor default. Follow it exactly. Never invent or substitute GPT-5.5, Terra,
+Qwen, Fable, or another route solely for provider or model diversity; report the
+exact route unavailable when it cannot run.
 
 ## Start with the executing host
 

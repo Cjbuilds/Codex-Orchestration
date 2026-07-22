@@ -134,7 +134,12 @@ class ExternalCliTrustTests(unittest.TestCase):
             root = Path(directory)
             path = self.executable(root)
             alias = root / "official"
-            alias.symlink_to(path)
+            try:
+                alias.symlink_to(path)
+            except OSError as error:
+                if getattr(error, "winerror", None) == 1314:
+                    self.skipTest("Windows symlink privilege is unavailable")
+                raise
             record = TRUST.attest(alias, publisher="Example, Inc.")
             self.assertEqual(record["path"], str(path.resolve()))
 

@@ -335,6 +335,15 @@ Executor — GPT-5.6 Sol high: Activated
         self.assertIn("An unavailable Executor may leave work with the root", SKILL)
         self.assertIn("Planner and Advisor never contact one another directly", SKILL)
 
+    def test_root_planning_is_not_a_duplicate_configured_sol_route(self) -> None:
+        self.assertIn("root substrate is not a configured Planner route", SKILL)
+        self.assertIn("fresh direct Advisor may use the same model ID as the root", SKILL)
+        self.assertIn('use `fork_turns = "none"`', SKILL)
+        self.assertIn("current-task model, effort, or agent choice", SKILL)
+        self.assertIn("never invent or substitute GPT-5.5", SKILL)
+        self.assertIn("If that exact route is unavailable, report it unavailable", SKILL)
+        self.assertIn("two configured Planner and Advisor routes", SKILL)
+
     def test_route_reporting_is_truthful(self) -> None:
         self.assertIn("native policy installed", SKILL)
         self.assertIn("route accepted", SKILL)

@@ -740,6 +740,10 @@ multi_agent = true
             self.assertIn("Catalog source unavailable", stderr.getvalue())
 
     def test_direct_codex_bin_must_be_regular_and_executable(self) -> None:
+        self.assertEqual(
+            CONFIGURE.resolve_codex_executable(sys.executable),
+            str(Path(sys.executable).resolve()),
+        )
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             with self.assertRaises(CONFIGURE.ConfigurationError):

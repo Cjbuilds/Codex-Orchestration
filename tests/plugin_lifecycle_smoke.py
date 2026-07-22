@@ -32,7 +32,7 @@ PLUGIN_ID = "codex-orchestration@codex-orchestration"
 MARKETPLACE_NAME = "codex-orchestration"
 OLD_RELEASE = "a1d9c546665c3253cdcaa8fe5c0c060199a6126c"
 OLD_VERSION = "0.5.0"
-NEW_VERSION = "0.9.0"
+NEW_VERSION = "0.9.1"
 COMMAND_TIMEOUT_SECONDS = 60
 
 
@@ -218,16 +218,25 @@ def serve_git(root: Path) -> Iterator[str]:
             raise SmokeFailure("Loopback Git server did not stop cleanly")
 
 
-def write_fake_codex(path: Path) -> None:
-    path.write_text(
-        """#!/usr/bin/env python3
-import json
+def write_fake_codex(path: Path, cwd: Path) -> Path:
+    body = """import json
 import sys
 
-if sys.argv[1:] == ["--version"]:
-    print("codex-cli lifecycle-smoke")
+if sys.argv[1:] in (["--version"], ["models"]):
+    if sys.argv[1:] == ["--version"]:
+        print("codex-cli lifecycle-smoke")
+        raise SystemExit(0)
+    print(json.dumps({"models": [{
+        "slug": "gpt-5.6-luna",
+        "display_name": "GPT-5.6 Luna",
+        "default_reasoning_level": "high",
+        "supported_reasoning_levels": [
+            {"effort": "high"},
+            {"effort": "xhigh"}
+        ]
+    }]}))
     raise SystemExit(0)
-if sys.argv[1:3] == ["debug", "models"]:
+if sys.argv[1:] == ["debug", "models"]:
     print(json.dumps({"models": [{
         "slug": "gpt-5.6-luna",
         "display_name": "GPT-5.6 Luna",
@@ -240,10 +249,17 @@ if sys.argv[1:3] == ["debug", "models"]:
     raise SystemExit(0)
 print("unsupported smoke command", file=sys.stderr)
 raise SystemExit(2)
-""",
+"""
+    if os.name == "nt":
+        (cwd / "debug").write_text(body, encoding="utf-8")
+        return Path(sys.executable).resolve()
+    path.write_text(
+        """#!/usr/bin/env python3
+""" + body,
         encoding="utf-8",
     )
     path.chmod(0o755)
+    return path
 
 
 def installed_entry(payload: dict[str, Any]) -> dict[str, Any]:
@@ -742,8 +758,7 @@ def main() -> int:
                 env=env,
             )
 
-            fake_codex = temp / "fake-codex"
-            write_fake_codex(fake_codex)
+            fake_codex = write_fake_codex(temp / "fake-codex", project)
             configurator = (
                 installed_root
                 / "skills"
