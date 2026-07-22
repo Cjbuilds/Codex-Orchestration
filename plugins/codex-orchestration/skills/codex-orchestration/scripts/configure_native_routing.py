@@ -405,7 +405,7 @@ class AppServer:
                     "clientInfo": {
                         "name": "codex_orchestration_installer",
                         "title": "Codex Orchestration Installer",
-                        "version": "0.7.2",
+                        "version": "0.8.4",
                     },
                     "capabilities": {"experimentalApi": True},
                 },
@@ -978,12 +978,29 @@ def build_policy(
         designer is not None and designer["kind"] == "model"
     )
     provider_guard = (
-        "Direct model overrides retain the root provider. Before using a direct "
-        "model route, verify that the target model is on the same provider as the "
-        "root. If providers differ or cannot be established, report the route "
-        "unavailable and require a custom agent that pins model_provider."
+        "Use an exact direct model route only when the active spawn surface exposes "
+        "and accepts that model ID. A provider-qualified direct route such as "
+        "zai/glm-5.2 is selectable even when its provider differs from the root. "
+        "If the host does not expose or accept the exact route, require a loaded "
+        "custom agent that pins model_provider; never infer provider identity from "
+        "model prose."
         if has_direct_route
-        else "Configured custom agents and MCP seats own their provider routes."
+        else (
+            "Configured custom agents and MCP seats own their provider routes. An "
+            "exact provider-qualified direct model such as zai/glm-5.2 remains "
+            "selectable whenever the active spawn surface exposes and accepts it."
+        )
+    )
+    context_packet_contract = (
+        "Every fork_turns=none routed call receives exactly one deterministic "
+        "CONTEXT_PACKET_V1 packet containing objective, source_version, the complete "
+        "current artifact/plan, cumulative findings ledger, open finding IDs, "
+        "constraints, evidence/dependencies, acceptance, verification, and output "
+        "protocol. A retry must resend that same complete authoritative context "
+        "(not a shortened delta). The root validates source_version/current "
+        "artifact/ledger before accepting any handoff. Direct spawned agents "
+        "are policy-enforced because the host tool has no plugin runtime packet gate; "
+        "the sealed adapter is mechanically enforced in envelope mode."
     )
     planner_mode = (
         "When a plan is needed, the configured Planner drafts it and handles any "
@@ -997,7 +1014,7 @@ def build_policy(
         "For a non-trivial plan, the root sends a fresh self-contained review call "
         "to the configured Advisor before Executor work. PLAN_APPROVED ends review "
         "early. PLAN_REVISE returns the canonical current plan and version, the "
-        "latest critique, and the cumulative findings ledger to the same configured "
+        "latest critique, and the complete cumulative findings ledger to the same configured "
         "Planner route, or to the root when Planner is omitted, then reviews the "
         "revised plan again. There may be at most five total Advisor reviews."
         if advisor is not None
@@ -1034,7 +1051,9 @@ If you are the root task model, you are the orchestrator. Own intent, planning, 
 
 {designer_mode}
 
-The root owns the plan version, cumulative findings ledger, review count, validation, adjudication, and release to Executor. There is no Finalizer seat. For Advisor rounds two through five, send only the current plan and version plus a compact cumulative ledger, not prior transcripts. Ask the Advisor to confirm or contest dispositions without blindly repeating accepted findings. Reject a stale plan version or an invalid or incomplete ledger and halt before Executor.
+The root owns the plan version, cumulative findings ledger, review count, validation, adjudication, and release to Executor. There is no Finalizer seat. For every fork_turns=none call, send the complete deterministic CONTEXT_PACKET_V1 packet, including the current artifact/plan and complete cumulative ledger; omitting prior transcripts is fine, but never shorten the authoritative context into a delta. Ask the Advisor to confirm or contest dispositions without blindly repeating accepted findings. Reject a stale plan version or an invalid or incomplete ledger and halt before Executor.
+
+{context_packet_contract}
 
 On PLAN_REVISE, record the latest finding IDs before revision. After the Planner returns, validate and merge each INCORPORATED or reasoned REJECTED disposition into the cumulative ledger before another Advisor call. A round-five PLAN_REVISE halts before Executor and produces a non-approval artifact containing the latest plan and version, full ledger, latest findings, and choices available to the user. It must not claim approval. Any required Planner or Advisor route failure also halts before Executor. Only an explicit current-task best-effort instruction changes failure handling: Planner failure permits the root to take over planning for the remaining rounds; Advisor failure may proceed only with the result labeled NOT_ADVISOR_APPROVED. No best-effort setting is persisted.
 
@@ -1056,7 +1075,7 @@ Planner and Advisor are policy-isolated, root-directed seats: they cannot contac
         planner_hint = (
             "For each Planner draft or revision, call this tool with "
             f"{_spawn_route(planner)}, fork_turns = \"none\". Send the complete "
-            "self-contained packet for that round. Require PLAN_DRAFT initially; "
+            "self-contained deterministic CONTEXT_PACKET_V1 packet for that round. Require PLAN_DRAFT initially; "
             "require PLAN_REVISION, the source version, complete findings ledger, "
             "and full revised plan after PLAN_REVISE."
         )
@@ -1074,7 +1093,7 @@ Planner and Advisor are policy-isolated, root-directed seats: they cannot contac
         advisor_hint = (
             "For an advisor review, call this tool with "
             f"{_spawn_route(advisor)}, fork_turns = \"none\". Send the complete "
-            "review packet and require PLAN_APPROVED or PLAN_REVISE."
+            "deterministic CONTEXT_PACKET_V1 review packet and require PLAN_APPROVED or PLAN_REVISE."
         )
     else:
         advisor_hint = "No advisor route is configured."
@@ -1083,14 +1102,17 @@ Planner and Advisor are policy-isolated, root-directed seats: they cannot contac
             "For delegated design work, call this tool with "
             f"{_spawn_route(designer)}, fork_turns = \"none\". Send approved "
             "requirements, bounded deliverables, explicit design-artifact ownership, "
-            "constraints, and the required handoff format."
+            "constraints, and the required handoff format inside the complete "
+            "deterministic CONTEXT_PACKET_V1 packet."
         )
     else:
         designer_hint = "No Designer route is configured."
     usage = f"""{MANAGED_MARKER}
 If you are the root task model, you are the orchestrator. Apply these routes only to children you decide to create.
 
-For delegated executor work, call this tool with {_spawn_route(executor)}, fork_turns = "none". Send a self-contained task packet.
+For delegated executor work, call this tool with {_spawn_route(executor)}, fork_turns = "none". Send a complete deterministic CONTEXT_PACKET_V1 task packet.
+
+{context_packet_contract}
 
 {planner_hint}
 

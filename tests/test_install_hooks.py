@@ -95,6 +95,9 @@ class InstallHooksTests(unittest.TestCase):
             repository.mkdir()
             self.make_repository(repository)
             environment = {
+                # Git before 2.32 ignores GIT_CONFIG_GLOBAL. HOME keeps this
+                # destructive-looking global-config probe inside the fixture.
+                "HOME": str(root),
                 "GIT_CONFIG_GLOBAL": str(root / "global.gitconfig"),
                 "GIT_CONFIG_NOSYSTEM": "1",
             }

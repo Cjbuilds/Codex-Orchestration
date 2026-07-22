@@ -51,6 +51,13 @@ The model selected for the Codex task remains in charge. It passes work between 
 
 Planner and Advisor can work through several revisions. Codex stops as soon as the Advisor returns `PLAN_APPROVED`, with a safety limit of five reviews. If approval is not reached, execution stops and Codex shows you the latest plan and unresolved issues.
 
+Routed children and official GLM role calls are intentionally stateless. Each call
+uses a versioned `CONTEXT_PACKET_V1` containing the complete current artifact,
+constraints, evidence, and findings ledger; retries resend the full packet instead
+of relying on hidden conversation history. The sealed GLM adapter validates the
+packet and response digest mechanically, while direct sub-agent packets are enforced
+by the root routing policy.
+
 ## Why use it?
 
 - Bring Fable 5 or another compatible model into Codex.
@@ -143,6 +150,8 @@ Examples:
 
 /codex-orchestration setup designer: GPT-5.6 Terra High, executor: GPT-5.6 Luna Extra High
 
+/codex-orchestration planner: GLM-5.2 High, advisor: GPT-5.6 Sol High, designer: GPT-5.6 Terra High, executor: GPT-5.6 Luna High
+
 /codex-orchestration setup executor: GPT-5.6 Luna Extra High
 ```
 
@@ -162,6 +171,10 @@ Ask for a role in plain language:
 /codex-orchestration configure external role designer with OpenRouter model moonshotai/kimi-k3 at max; job: produce a bounded UX specification
 
 /codex-orchestration call researcher at max — review this bounded research packet
+
+/codex-orchestration configure official GLM role researcher with model glm-5.2 at high; job: gather evidence from a bounded packet
+
+/codex-orchestration call official GLM role researcher — review this bounded research packet
 ```
 
 Setup is deliberately staged: preview and prepare the audited provider adapter,
@@ -185,6 +198,49 @@ Planner or Advisor through first-party Claude login. See the
 [External Models reference](plugins/codex-orchestration/skills/codex-orchestration/references/external-models.md)
 for commands, lifecycle states, extension rules, and threat boundaries.
 
+Official GLM roles use Z.AI/BigModel directly and never traverse OpenRouter. They
+call only `https://open.bigmodel.cn/api/paas/v4/chat/completions`; Coding Plan is
+not configured or used. GLM-5.2 is pinned by one audited manifest with `high` or
+`max` effort; omitted effort and `auto` default to `high`.
+Because current Codex releases accept only the Responses wire protocol, this route
+is a sealed no-tools role adapter, not a native Codex custom agent and not a Desktop
+picker entry. It stores the Z.AI key only through the operating-system credential
+store, requires a separately approved billable Gate 0 for each exact model/effort
+tuple, and verifies response model metadata on every call. The only credential
+identity is `zai`; there is no channel selection or automatic endpoint fallback.
+
+Official GLM status distinguishes `READY`, `AUTH_REQUIRED`, and
+`CREDENTIAL_STORE_UNREACHABLE`. A sandbox that cannot reach Linux Secret Service no
+longer looks like a missing key and must not trigger repeated enrollment. Codex may
+request normal permission to retry the complete GLM status/call command in the host
+context; the key remains inside the OS store and the sealed adapter process.
+
+Successful official GLM role calls report token accounting separately from route
+identity. `route_state: USED_CONFIRMED` means the official response named the exact
+requested model. `usage_state: REPORTED` adds only the provider's validated
+`prompt_tokens`, `completion_tokens`, `total_tokens`, and optional cached prompt
+tokens; `usage_state: NOT_REPORTED` returns `usage: null` when the provider omits the
+top-level object. Malformed present usage fails closed before model content is
+released, and arbitrary response metadata is never forwarded.
+
+GLM can also be assigned directly to any built-in task-local role with the same
+role-label syntax used for GPT and Fable:
+
+```text
+/codex-orchestration planner: GLM-5.2 High, advisor: GPT-5.6 Sol High, designer: GPT-5.6 Terra High, executor: GPT-5.6 Luna High
+/codex-orchestration planner: GPT-5.6 Sol High, advisor: GLM-5.2 High, executor: GPT-5.6 Luna High
+/codex-orchestration designer: GLM-5.2 High, executor: GPT-5.6 Luna High — produce and implement this bounded UI handoff
+```
+
+The label is authoritative: GLM after `planner:` is the Planner, after `advisor:`
+is the Advisor, and likewise for Designer or Executor. The plugin never silently
+relabels it as a researcher or routes it through OpenRouter. `high` and `max` are
+the only supported efforts; every exact tuple must already be qualified. The root
+GPT model still adjudicates handoffs, performs final verification, and answers the
+user. Because Codex does not natively accept the provider's Chat Completions wire
+format, this syntax uses the sealed no-tools official GLM role adapter rather than
+pretending GLM is a native `spawn_agent` model.
+
 Models already available through Codex can still become ordinary user-owned roles:
 
 ```text
@@ -207,6 +263,7 @@ Create a Codex Goal normally, then tell Codex to use the saved workflow until th
 /codex-orchestration --update
 /codex-orchestration setup planner: Claude Fable 5 High, advisor: GPT-5.6 Sol High, designer: GPT-5.6 Terra High, executor: GPT-5.6 Luna Extra High
 /codex-orchestration Planner: Claude Fable 5 High, Designer: Kimi K3
+/codex-orchestration Planner: GLM-5.2 High, Advisor: GPT-5.6 Sol High, Designer: GPT-5.6 Terra High, Executor: GPT-5.6 Luna High
 /codex-orchestration disable
 ```
 
@@ -234,8 +291,9 @@ credentials, chats, or sessions.
 - Designer may edit only design artifacts explicitly delegated by Codex; it does not change implementation code or release Executor.
 - The workflow reserves Fable planning tools for the root Codex model by policy. Current MCP calls do not identify their caller, so this caller boundary is instruction-enforced; the bridge itself still disables tools, edits, and session persistence.
 - Advisor approval is a planning gate, not a guarantee that implementation will succeed.
-- Direct model routes inherit the root provider. Audited external adapters use
-  provider-pinned personal role agents and never enter the model picker.
+- Exact direct model routes exposed and accepted by the active spawn surface are
+  selectable, including provider-qualified IDs such as `zai/glm-5.2`. Other audited
+  external adapters use provider-pinned personal roles and never enter the picker.
 - Other unbundled providers must already be configured and authenticated.
 - The plugin never creates credentials or bypasses permissions and approvals. It can prepare a non-secret provider table and retrieve a user-enrolled key from the OS credential store at request time.
 - Codex decides when delegation or parallel work is useful.

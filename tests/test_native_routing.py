@@ -404,6 +404,36 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertNotIn("tool_namespace", mode + usage)
         self.assertNotIn("enabled = true", mode + usage)
 
+    def test_policy_requires_deterministic_context_packets_and_retry_resend(self) -> None:
+        executor = {"kind": "model", "model": "zai/glm-5.2", "effort": "high"}
+        planner = {"kind": "model", "model": "gpt-5.6-sol", "effort": "xhigh"}
+        advisor = {"kind": "model", "model": "gpt-5.6-terra", "effort": "high"}
+        designer = {"kind": "model", "model": "gpt-5.6-luna", "effort": "high"}
+        mode, usage = NATIVE.build_policy(executor, planner, advisor, designer)
+        policy = mode + usage
+        for required in (
+            "CONTEXT_PACKET_V1",
+            "objective",
+            "source_version",
+            "complete current artifact/plan",
+            "cumulative findings ledger",
+            "open finding IDs",
+            "constraints",
+            "evidence/dependencies",
+            "acceptance",
+            "verification",
+            "output protocol",
+            "same complete authoritative context",
+            "(not a shortened delta)",
+            "root validates source_version/current artifact/ledger",
+            "host tool has no plugin runtime packet gate",
+            "sealed adapter is mechanically enforced in envelope mode",
+            "zai/glm-5.2",
+            "even when its provider differs from the root",
+        ):
+            self.assertIn(required, policy)
+        self.assertGreaterEqual(usage.count('fork_turns = "none"'), 4)
+
     def test_policy_root_fallback_planner_without_advisor_and_fable_hints(self) -> None:
         executor = {"kind": "model", "model": "gpt-5.6-luna", "effort": "high"}
         advisor = {"kind": "model", "model": "gpt-5.6-terra", "effort": "high"}

@@ -1,7 +1,7 @@
 {
   "name": "codex-orchestration",
-  "version": "0.7.2",
-  "description": "Give Codex and audited external models safe, provider-pinned roles.",
+  "version": "0.8.4",
+  "description": "Give Codex and audited external models safe, bounded roles.",
   "author": {
     "name": "CJ Zafir",
     "url": "https://github.com/Cjbuilds"
@@ -21,7 +21,7 @@
   "interface": {
     "displayName": "Codex Orchestration",
     "shortDescription": "Plan, review, design, and build with multiple models",
-    "longDescription": "Bring Fable 5 and audited API models into Codex as bounded Planner, Advisor, Designer, Executor, or custom roles without changing the root model or Desktop model picker.",
+    "longDescription": "Bring Fable 5, Kimi K3, and official Z.AI GLM into Codex as bounded Planner, Advisor, Designer, Executor, or custom roles without changing the root model or Desktop model picker.",
     "developerName": "CJ Zafir",
     "category": "Productivity",
     "websiteURL": "https://github.com/Cjbuilds/Codex-Orchestration",
@@ -37,8 +37,8 @@
     ],
     "defaultPrompt": [
       "/codex-orchestration setup designer: GPT-5.6 Sol High, executor: GPT-5.6 Luna Extra High",
-      "/codex-orchestration --update",
-      "/codex-orchestration Planner: Claude Fable 5 High, Designer: Kimi K3"
+      "/codex-orchestration Planner: Claude Fable 5 High, Designer: Kimi K3",
+      "/codex-orchestration Planner: GLM-5.2 High, Advisor: GPT-5.6 Sol High, Designer: GPT-5.6 Terra High, Executor: GPT-5.6 Luna High"
     ]
   }
 }

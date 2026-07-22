@@ -20,6 +20,7 @@ REFERENCE = (SKILL_ROOT / "references" / "providers-and-models.md").read_text(
 EXTERNAL_REFERENCE = (SKILL_ROOT / "references" / "external-models.md").read_text(
     encoding="utf-8"
 )
+SECURITY = (REPO_ROOT / "SECURITY.md").read_text(encoding="utf-8")
 NATIVE_SCRIPT = (
     SKILL_ROOT / "scripts" / "configure_native_routing.py"
 ).read_text(encoding="utf-8")
@@ -261,6 +262,75 @@ Executor — GPT-5.6 Sol high: Activated
         self.assertIn("rejects `xhigh`, `high`, `medium`, `low`", EXTERNAL_REFERENCE)
         self.assertIn("Every installation starts unqualified", EXTERNAL_REFERENCE)
 
+    def test_official_glm_roles_are_direct_bounded_and_not_native_agents(self) -> None:
+        self.assertIn("### Official Z.AI GLM roles", SKILL)
+        self.assertIn("glm-5.2", SKILL)
+        self.assertIn("open.bigmodel.cn/api/paas/v4/chat/completions", SKILL)
+        self.assertIn('rejects `wire_api = "chat"`', SKILL)
+        self.assertIn("sealed no-tools call", SKILL)
+        self.assertIn("not OpenRouter", SKILL)
+        self.assertIn("--model glm-5.2 --effort high", SKILL)
+        self.assertIn("response model-identity mismatch", SKILL)
+        self.assertIn("Official GLM-5.2 custom roles", EXTERNAL_REFERENCE)
+        self.assertIn("1M context and 128K maximum output", EXTERNAL_REFERENCE)
+        self.assertIn("`CREDENTIAL_STORE_UNREACHABLE`", SKILL)
+        self.assertIn("dedicated exit code\n3", SKILL)
+        self.assertIn("complete `zai_glm_roles.py call", SKILL)
+        self.assertIn("Never invoke the helper's `get`", SKILL)
+        self.assertIn("complete official GLM `status` command host-side", EXTERNAL_REFERENCE)
+        self.assertIn("never becomes enrollment advice", EXTERNAL_REFERENCE)
+        self.assertIn("`usage_state` is `REPORTED`", SKILL)
+        self.assertIn("`NOT_REPORTED` with `usage: null`", SKILL)
+        self.assertIn("Never return the raw usage object", SKILL)
+        self.assertIn("usage_state=REPORTED", EXTERNAL_REFERENCE)
+        self.assertIn("usage_state=NOT_REPORTED", EXTERNAL_REFERENCE)
+        self.assertIn("Present malformed usage fails closed", EXTERNAL_REFERENCE)
+
+    def test_official_glm_is_api_only_and_has_no_channel_fallback(self) -> None:
+        endpoint = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+        self.assertIn(endpoint, SKILL)
+        self.assertIn("Coding Plan is not configured or used", SKILL)
+        self.assertIn("The only credential identity is `zai`", SKILL)
+        self.assertIn("omitted effort and `auto` resolve to `high`", SKILL)
+        self.assertIn("Deep thinking stays enabled for every", SKILL)
+        self.assertNotIn("coding/paas/v4/chat/completions", SKILL)
+        self.assertNotIn("switch-channel", SKILL)
+        self.assertIn("There is no channel-control or", EXTERNAL_REFERENCE)
+        self.assertIn("automatic endpoint-fallback surface", EXTERNAL_REFERENCE)
+
+    def test_official_glm_can_be_assigned_to_every_builtin_seat_label(self) -> None:
+        example = (
+            "/codex-orchestration Planner: GLM-5.2 High, Advisor: GPT-5.6 Sol "
+            "High, Designer: GPT-5.6 Terra High, Executor: GPT-5.6 Luna High"
+        )
+        self.assertIn(example, SKILL)
+        self.assertIn("belongs only to that named role", SKILL)
+        self.assertIn("Never convert GLM into an Advisor or researcher", SKILL)
+        self.assertIn("all four built-in roles", SKILL)
+        self.assertIn("--seat <role>", SKILL)
+        self.assertIn("Do not create all\nfour roles proactively", SKILL)
+        self.assertIn("GLM Planner must return", SKILL)
+        self.assertIn("GLM Advisor must return", SKILL)
+        self.assertIn("never\nOpenRouter", SKILL)
+        self.assertIn("task-local orchestration state", SKILL)
+        self.assertIn("same lower-case role ID", EXTERNAL_REFERENCE)
+        self.assertIn("preview `seat --seat <role>`", EXTERNAL_REFERENCE)
+
+    def test_glm_stateless_context_is_complete_bound_and_backward_compatible(self) -> None:
+        self.assertIn("codex-orchestration.context/v1", SKILL)
+        self.assertIn("CONTEXT_PACKET_V1", SKILL)
+        self.assertIn("--context-envelope-file", SKILL)
+        self.assertIn("--expected-source-version", SKILL)
+        self.assertIn("--expected-context-sha256", SKILL)
+        self.assertIn("`ACK_CONFIRMED`", SKILL)
+        self.assertIn("never a shortened delta", SKILL)
+        self.assertIn("Legacy `--task-file` remains backward-compatible", SKILL)
+        self.assertIn("selectable direct model `zai/glm-5.2`", SKILL)
+        self.assertIn("no plugin runtime packet-validation hook", SKILL)
+        self.assertIn("byte identity,\nnot semantic completeness", SECURITY)
+        self.assertIn("complete serialized\nrequest body's UTF-8 bytes", SECURITY)
+        self.assertIn("Stateless context integrity", EXTERNAL_REFERENCE)
+
     def test_arbitrary_roles_are_native_bounded_and_user_owned(self) -> None:
         self.assertIn("## Create arbitrary custom roles", SKILL)
         self.assertIn("<trusted-project>/.codex/agents/<role-name>.toml", SKILL)
@@ -300,10 +370,12 @@ Executor — GPT-5.6 Sol high: Activated
         self.assertIn("MCP requests do not carry caller identity", SKILL)
         self.assertIn("Never describe the caller boundary as engine-enforced", SKILL)
 
-    def test_direct_routes_are_guarded_to_the_root_provider(self) -> None:
-        self.assertIn("Direct model overrides keep the root's provider", SKILL)
-        self.assertIn("target model is on the same provider", NATIVE_SCRIPT)
-        self.assertIn("require a custom agent that pins model_provider", NATIVE_SCRIPT)
+    def test_direct_routes_use_exact_host_accepted_provider_qualified_models(self) -> None:
+        self.assertIn("active spawn surface exposes and", SKILL)
+        self.assertIn("`zai/glm-5.2` is selectable", SKILL)
+        self.assertIn("provider-qualified direct route such as", NATIVE_SCRIPT)
+        self.assertIn("even when its provider differs from the root", NATIVE_SCRIPT)
+        self.assertIn("custom agent that pins model_provider", NATIVE_SCRIPT)
 
     def test_advisor_is_bounded_root_only_and_failure_is_not_approval(self) -> None:
         self.assertIn("PLAN_APPROVED", SKILL)
@@ -324,7 +396,10 @@ Executor — GPT-5.6 Sol high: Activated
         self.assertIn("For both persistent setup and task-local overrides", SKILL)
         self.assertIn("explicitly made that seat best-effort", SKILL)
         self.assertIn("An unavailable Executor may leave work with the root", SKILL)
-        self.assertIn("Planner and Advisor never contact one another directly", SKILL)
+        self.assertIn(
+            "Planner and Advisor never contact one another directly",
+            " ".join(SKILL.split()),
+        )
 
     def test_route_reporting_is_truthful(self) -> None:
         self.assertIn("native policy installed", SKILL)

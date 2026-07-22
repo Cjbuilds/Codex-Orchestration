@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "id": "zai",
+  "version": 1,
+  "name": "Z.AI / BigModel Official API",
+  "endpoint": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+  "auth": "secure_store",
+  "models": {
+    "glm-5.2": {
+      "default_effort": "high",
+      "supported_efforts": [
+        "high",
+        "max"
+      ],
+      "context_window": 1000000,
+      "max_output_tokens": 131072,
+      "capability_source": "https://docs.bigmodel.cn/cn/guide/models/text/glm-5.2 and https://z.ai/blog/glm-5.2 reviewed 2026-07-20"
+    }
+  },
+  "runtime_identity": "response_metadata",
+  "codex_native_provider": false
+}

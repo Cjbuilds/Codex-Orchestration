@@ -164,6 +164,73 @@ class ExternalCredentialTests(unittest.TestCase):
                 HELPER._run_capture(["credential-store"])
         self.assertNotIn(secret, str(failure.exception))
 
+    def test_linux_lookup_distinguishes_missing_from_unreachable_without_echo(self) -> None:
+        missing = mock.Mock(returncode=1, stdout="", stderr="")
+        denied = mock.Mock(
+            returncode=1,
+            stdout="",
+            stderr="secret-tool: Could not connect: Operation not permitted\n",
+        )
+        with mock.patch.object(HELPER.shutil, "which", return_value="/usr/bin/secret-tool"):
+            with mock.patch.object(HELPER.subprocess, "run", return_value=missing):
+                with self.assertRaises(HELPER.AuthRequired):
+                    HELPER.dispatch("status", "zai", platform="linux")
+            with mock.patch.object(HELPER.subprocess, "run", return_value=denied):
+                with self.assertRaises(HELPER.CredentialStoreUnreachable) as failure:
+                    HELPER.dispatch("status", "zai", platform="linux")
+        self.assertNotIn("Operation not permitted", str(failure.exception))
+
+    def test_helper_status_exit_codes_are_stable_and_nonsecret(self) -> None:
+        cases = (
+            (HELPER.AuthRequired("missing"), HELPER.EXIT_AUTH_REQUIRED),
+            (
+                HELPER.CredentialStoreUnreachable("unreachable"),
+                HELPER.EXIT_CREDENTIAL_STORE_UNREACHABLE,
+            ),
+        )
+        for error, expected in cases:
+            with self.subTest(expected=expected), mock.patch.object(
+                HELPER, "dispatch", side_effect=error
+            ), mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                self.assertEqual(
+                    HELPER.main(["status", "--provider", "zai"]), expected
+                )
+                self.assertNotIn("sensitive-test-value", stderr.getvalue())
+
+    def test_credential_state_preserves_boolean_compatibility(self) -> None:
+        helper = Path("/safe/external_auth_helper.py")
+        cases = (
+            (mock.Mock(returncode=0, stdout="configured\n", stderr=""), "READY", True),
+            (mock.Mock(returncode=2, stdout="", stderr="missing"), "AUTH_REQUIRED", False),
+            (
+                mock.Mock(returncode=3, stdout="", stderr="unreachable"),
+                "CREDENTIAL_STORE_UNREACHABLE",
+                False,
+            ),
+            (
+                mock.Mock(returncode=1, stdout="", stderr="indeterminate"),
+                "CREDENTIAL_STORE_UNREACHABLE",
+                False,
+            ),
+        )
+        for completed, state, ready in cases:
+            with self.subTest(state=state), mock.patch.object(
+                CREDENTIALS.subprocess, "run", return_value=completed
+            ):
+                self.assertEqual(
+                    CREDENTIALS.credential_state(helper, "zai").value, state
+                )
+                self.assertEqual(CREDENTIALS.credential_ready(helper, "zai"), ready)
+
+        for failure in (OSError("blocked"), CREDENTIALS.subprocess.TimeoutExpired([], 20)):
+            with self.subTest(failure=type(failure).__name__), mock.patch.object(
+                CREDENTIALS.subprocess, "run", side_effect=failure
+            ):
+                self.assertEqual(
+                    CREDENTIALS.credential_state(helper, "zai"),
+                    CREDENTIALS.CredentialState.CREDENTIAL_STORE_UNREACHABLE,
+                )
+
     def test_invalid_provider_and_missing_linux_store_fail_closed(self) -> None:
         with self.assertRaises(HELPER.HelperError):
             HELPER.dispatch("get", "../escape", platform="darwin")

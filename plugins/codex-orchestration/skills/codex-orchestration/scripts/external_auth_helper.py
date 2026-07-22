@@ -27,10 +27,21 @@ SERVICE_PREFIX = "com.cjbuilds.codex-orchestration.external"
 TIMEOUT_SECONDS = 20
 CRED_TYPE_GENERIC = 1
 CRED_PERSIST_LOCAL_MACHINE = 2
+ERROR_NOT_FOUND = 1168
+EXIT_AUTH_REQUIRED = 2
+EXIT_CREDENTIAL_STORE_UNREACHABLE = 3
 
 
 class HelperError(RuntimeError):
     """A credential operation failed without disclosing provider output."""
+
+
+class AuthRequired(HelperError):
+    """The credential store was reached but no usable value exists."""
+
+
+class CredentialStoreUnreachable(HelperError):
+    """The credential store could not be reached or queried reliably."""
 
 
 def _provider(value: str) -> str:
@@ -43,7 +54,12 @@ def _service(provider: str) -> str:
     return f"{SERVICE_PREFIX}.{provider}"
 
 
-def _run_capture(command: list[str]) -> str:
+def _run_capture(
+    command: list[str],
+    *,
+    missing_returncodes: frozenset[int] = frozenset(),
+    missing_requires_empty_stderr: bool = False,
+) -> str:
     try:
         completed = subprocess.run(
             command,
@@ -56,12 +72,26 @@ def _run_capture(command: list[str]) -> str:
             shell=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise HelperError("The OS credential store could not be queried.") from exc
+        raise CredentialStoreUnreachable(
+            "The OS credential store could not be queried."
+        ) from exc
     if completed.returncode != 0:
-        raise HelperError("No usable credential is configured for this provider.")
+        missing = (
+            completed.returncode in missing_returncodes
+            and not completed.stdout
+            and (
+                not missing_requires_empty_stderr
+                or not completed.stderr
+            )
+        )
+        if missing:
+            raise AuthRequired("No usable credential is configured for this provider.")
+        raise CredentialStoreUnreachable(
+            "The OS credential store could not be queried."
+        )
     value = completed.stdout.strip()
     if not value:
-        raise HelperError("The OS credential store returned an empty credential.")
+        raise AuthRequired("No usable credential is configured for this provider.")
     return value
 
 
@@ -89,7 +119,10 @@ def _darwin(action: str, provider: str) -> str | None:
         raise HelperError("macOS Keychain command is unavailable.")
     common = ["-a", provider, "-s", _service(provider)]
     if action in {"get", "status"}:
-        return _run_capture([str(security), "find-generic-password", *common, "-w"])
+        return _run_capture(
+            [str(security), "find-generic-password", *common, "-w"],
+            missing_returncodes=frozenset({44}),
+        )
     if action == "enroll":
         # Apple documents that a final -w with no argument prompts securely.
         _run_interactive(
@@ -105,12 +138,16 @@ def _darwin(action: str, provider: str) -> str | None:
 def _linux(action: str, provider: str) -> str | None:
     executable = shutil.which("secret-tool")
     if executable is None:
-        raise HelperError(
+        raise CredentialStoreUnreachable(
             "Secret Service is unavailable; configure a separately trusted user helper."
         )
     attributes = ["service", _service(provider), "account", provider]
     if action in {"get", "status"}:
-        return _run_capture([executable, "lookup", *attributes])
+        return _run_capture(
+            [executable, "lookup", *attributes],
+            missing_returncodes=frozenset({1}),
+            missing_requires_empty_stderr=True,
+        )
     if action == "enroll":
         _run_interactive(
             [
@@ -157,16 +194,20 @@ def _windows_get(provider: str) -> str:
     advapi.CredFree.argtypes = [ctypes.c_void_p]
     advapi.CredFree.restype = None
     if not advapi.CredReadW(_service(provider), CRED_TYPE_GENERIC, 0, pointer):
-        raise HelperError("No usable credential is configured for this provider.")
+        if ctypes.get_last_error() == ERROR_NOT_FOUND:
+            raise AuthRequired("No usable credential is configured for this provider.")
+        raise CredentialStoreUnreachable(
+            "The OS credential store could not be queried."
+        )
     try:
         credential = pointer.contents
         size = int(credential.CredentialBlobSize)
         if size <= 0 or not credential.CredentialBlob:
-            raise HelperError("The OS credential store returned an empty credential.")
+            raise AuthRequired("No usable credential is configured for this provider.")
         raw = ctypes.string_at(credential.CredentialBlob, size)
         value = raw.decode("utf-16-le").rstrip("\x00")
         if not value:
-            raise HelperError("The OS credential store returned an empty credential.")
+            raise AuthRequired("No usable credential is configured for this provider.")
         return value
     finally:
         advapi.CredFree(pointer)
@@ -241,9 +282,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         value = dispatch(args.action, args.provider)
+    except AuthRequired as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_AUTH_REQUIRED
+    except CredentialStoreUnreachable as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_CREDENTIAL_STORE_UNREACHABLE
     except HelperError as exc:
         print(f"error: {exc}", file=sys.stderr)
-        return 2
+        return 1
     if args.action == "get":
         assert value is not None
         print(value)

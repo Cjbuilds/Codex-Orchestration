@@ -32,7 +32,7 @@ PLUGIN_ID = "codex-orchestration@codex-orchestration"
 MARKETPLACE_NAME = "codex-orchestration"
 OLD_RELEASE = "a1d9c546665c3253cdcaa8fe5c0c060199a6126c"
 OLD_VERSION = "0.5.0"
-NEW_VERSION = "0.7.2"
+NEW_VERSION = "0.8.4"
 COMMAND_TIMEOUT_SECONDS = 60
 
 
@@ -533,6 +533,10 @@ def main() -> int:
                 "Designer may edit only explicitly delegated design artifacts",
                 "is Kimi available to use as Designer?",
                 "Implicit invocation is discovery, not mutation authority",
+                "/codex-orchestration Planner: GLM-5.2 High",
+                "Never convert GLM into an Advisor or researcher",
+                "Coding Plan is not configured or used",
+                "The only credential identity is `zai`",
                 "/codex-orchestration repair",
                 "/codex-orchestration --update",
             ):
@@ -540,6 +544,15 @@ def main() -> int:
                     raise SmokeFailure(
                         f"Upgraded installed skill is missing Planner contract {expected!r}"
                     )
+
+            if (
+                installed_root
+                / "skills"
+                / "codex-orchestration"
+                / "providers"
+                / "zai-coding-plan.json"
+            ).exists():
+                raise SmokeFailure("API-only install unexpectedly contains Coding Plan")
 
             installed_metadata = (
                 installed_root

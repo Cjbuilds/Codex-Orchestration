@@ -7,17 +7,113 @@ Desktop picker, and never reads or deletes chats, sessions, or OpenAI auth.
 
 ## Trust lanes
 
-Only two lanes are accepted:
+Only three lanes are accepted:
 
 1. A bundled, reviewed native provider manifest using HTTPS and the Responses API,
    plus command-backed authentication and provider-pinned personal custom agents.
 2. A bundled, reviewed first-party subscription CLI adapter. Claude Fable 5 is the
    only adapter in this lane and retains its no-tools, no-session-persistence,
    first-party-login, runtime-metadata bridge.
+3. A bundled, reviewed sealed HTTP role adapter for an official provider whose wire
+   protocol Codex cannot load natively. Z.AI/BigModel GLM-5.2 is the only adapter in
+   this lane. It uses OS-store authentication, exact-tuple Gate 0, no model tools,
+   and response-model metadata validation.
 
 An arbitrary URL, model ID, effort, shell command, project-local helper, or generic
 subscription CLI is not a provider. Additions require code review, exact schemas,
 negative tests, and a new plugin release.
+
+## Official GLM-5.2 custom roles
+
+Z.AI/BigModel exposes GLM-5.2 through one audited Chat Completions endpoint:
+`https://open.bigmodel.cn/api/paas/v4/chat/completions`. The credential identity is
+`zai`. Coding Plan is not configured or used.
+
+Codex currently accepts only the Responses wire protocol and rejects
+`wire_api = "chat"`; therefore GLM is not installed as a Codex model provider or
+personal agent. `zai_glm_roles.py` is a separate sealed, no-tools role-call boundary
+that leaves the root model and picker unchanged and never uses OpenRouter.
+
+The exact supported tuples are `glm-5.2` / effort `high|max`; omitted or `auto`
+resolves to `high`. Deep thinking is enabled, matching GLM-5.2's official effort
+control. The manifests record the official 1M context and 128K maximum output,
+while each role sets a smaller bounded output limit. There is no channel-control or
+automatic endpoint-fallback surface.
+
+The lifecycle is:
+
+```text
+UNCONFIGURED -> AUTH_REQUIRED -> TUPLE_QUALIFIED -> ROLE_READY -> USED_CONFIRMED
+```
+
+Preparation is preview-first, installs the audited stable credential helper, and
+stores no secret. The user enrolls the key outside chat through the OS credential
+store. Gate 0 is one separately authorized potentially billable fixed request and
+qualifies only the exact model/effort/endpoint tuple. Role creation is
+clean-add only. The exact-signal probe keeps Thinking enabled at the exact
+qualified effort and retains strict equality. Calls
+read one bounded regular task file or a strict versioned context envelope, send no tools, and accept output only when the
+official response metadata names exact model `glm-5.2`.
+
+The sealed adapter is distinct from a direct selectable `zai/glm-5.2` child when the
+active host exposes that route. Direct selection uses the host's sub-agent transport;
+it does not inherit the sealed registry, credential helper, qualification, or
+runtime-evidence contract.
+
+Completed role calls expose usage as evidence distinct from model identity. The
+sealed adapter copies only validated non-negative integer `prompt_tokens`,
+`completion_tokens`, `total_tokens`, and optional
+`prompt_tokens_details.cached_tokens` into a new summary. `usage_state=REPORTED`
+means those counters were supplied and validated; an absent top-level usage object
+produces `usage_state=NOT_REPORTED` with `usage=null` while `USED_CONFIRMED` remains
+based on exact response-model metadata. Present malformed usage fails closed before
+content release. Raw provider objects, request IDs, and unknown metadata are never
+forwarded.
+
+Credential readiness is a separate nonsecret three-state contract:
+
+```text
+READY | AUTH_REQUIRED | CREDENTIAL_STORE_UNREACHABLE
+```
+
+On Linux, a completed `secret-tool lookup` with no value and no diagnostic is a
+genuine missing credential. Secret Service transport, D-Bus, permission, locked
+collection, timeout, helper-launch, and indeterminate failures are unreachable, not
+missing. The helper returns exit 2 only for `AUTH_REQUIRED` and exit 3 for
+`CREDENTIAL_STORE_UNREACHABLE`; provider output is never copied into diagnostics.
+
+The root reacts only to `authentication_state` or the dedicated exit code. When the
+store is unreachable in a restricted sandbox, it requests ordinary Codex permission
+to rerun the complete official GLM `status` command host-side. If host status is
+`READY`, the complete role `call` command also runs host-side so the OS lookup and
+HTTPS request stay in one trusted process. The root never runs the credential
+helper's `get` action directly and never transports a bearer through tool output,
+prompts, environment variables, configuration, or shell interpolation. An
+unreachable host retry remains fail-closed and never becomes enrollment advice.
+
+### Stateless context integrity
+
+New orchestrated sealed GLM calls use `codex-orchestration.context/v1`; the legacy
+plain task-file path remains available only for backward compatibility. The strict
+packet carries role, phase, round, source version, objective, context, constraints,
+complete current artifact when required, cumulative findings ledger, exact open
+finding IDs, and a code-owned output protocol. Duplicate/unknown keys, stale internal
+artifact versions, incomplete open-finding sets, role/phase mismatches, and malformed
+types fail closed.
+
+A read-only `context` preview returns only safe schema/version/digest/size metadata.
+The subsequent call must supply the same expected source version and SHA-256. The
+model's final nonempty response line acknowledges both values, and the adapter
+revalidates that acknowledgement before releasing content. This proves exact packet
+binding, not semantic completeness; the root remains responsible for including the
+full authoritative state.
+
+Packets and outputs are never stored. Retries are new stateless calls and must resend
+the complete current packet rather than a shortened delta. Before reading the bearer,
+the adapter uses the complete serialized request's UTF-8 byte length as a conservative
+prompt-token upper bound, adds configured output tokens, and fails closed if that sum
+exceeds the manifest context window. Nothing is silently truncated or summarized.
+See [context-packets.md](context-packets.md).
 
 ## Lifecycle
 
@@ -36,11 +132,22 @@ never establishes `USED_CONFIRMED`.
 ## Seat-label entry
 
 A built-in seat label may select a bundled External Model without putting that model
-in the Desktop picker. The currently bundled shorthand is case-insensitive
-`Designer: Kimi K3`, which means task-local role `designer`, provider `openrouter`,
-exact model `moonshotai/kimi-k3`, and effort `max`. Omitted effort or `auto` resolves
-to `max`; every other explicit effort is rejected. Similar labels are accepted only
-after a reviewed plugin release adds an unambiguous bundled mapping.
+in the Desktop picker. Labels are authoritative and never reassign a model to a
+different role.
+
+The official GLM shorthand is case-insensitive `GLM-5.2`, `GLM 5.2`, or exact ID
+`glm-5.2` after any of `planner:`, `advisor:`, `designer:`, or `executor:`. It maps
+to the same lower-case role ID, provider `zai`, exact model `glm-5.2`, and effort
+`high` when omitted or `auto`; explicit `high` and explicit `max` remain supported.
+Every other effort is rejected. It uses the fixed General API endpoint through the
+official sealed Chat Completions adapter at `open.bigmodel.cn`, never Coding Plan,
+OpenRouter, a fallback endpoint, or native Codex model routing.
+
+The Kimi shorthand remains case-insensitive `Designer: Kimi K3`, which means
+task-local role `designer`, provider `openrouter`, exact model `moonshotai/kimi-k3`,
+and effort `max`. Omitted effort or `auto` resolves to `max`; every other explicit
+effort is rejected. Similar labels are accepted only after a reviewed plugin release
+adds an unambiguous bundled mapping.
 
 Root must inspect external status before acting. Dispatch by exact state:
 
@@ -53,6 +160,15 @@ Root must inspect external status before acting. Dispatch by exact state:
 | `RESTART_REQUIRED` | Require a full Desktop restart and new task; do not delegate. |
 | Exact role `READY` | Run `resolve`, then delegate only to its returned loaded agent name. |
 | Role mismatch, drift, shadow, or ambiguity | Stop with the exact blocker; never overwrite, disconnect, repair, or substitute. |
+
+Official GLM seats use the shorter sealed-role lifecycle above rather than the
+native table. Inspect `zai_glm_roles.py status`, require authentication and the exact
+qualified tuple, then preview `seat --seat <role>`. An explicit GLM seat label
+authorizes clean-add with `--apply` only when that exact role is absent. Existing
+exact roles are idempotently `READY`; any mismatch blocks replacement. A task call
+uses a private bounded temporary packet and the exact same-name role. Planner and
+Advisor outputs additionally require their plan protocol signals before any content
+is returned to root.
 
 The explicit seat label authorizes clean preparation and clean role creation, just as
 the equivalent literal configure request does. It never authorizes credential entry,

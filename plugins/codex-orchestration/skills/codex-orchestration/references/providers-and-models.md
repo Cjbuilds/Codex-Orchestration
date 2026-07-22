@@ -96,7 +96,12 @@ There is no global Codex field named `executor_model`. The native same-provider 
 
 That is strong routing, but it is not a separate engine-level scheduler. The root can still choose not to delegate. Tool acceptance proves Codex accepted and validated the requested route; it does not guarantee that every client exposes the effective post-start identity. If the model ignores the required route or the tool rejects it, report that mismatch rather than claiming success.
 
-Setup runs before a future task chooses its root, so it cannot persist a mechanically verified future root-provider identity. Direct routes are valid only when the active task can establish that the requested model belongs to the inherited root provider. If provider identity is missing or ambiguous, fail closed and use a provider-pinned custom agent.
+Setup runs before a future task chooses its root, so it cannot persist a mechanically
+verified future route. A direct model route is valid when the active spawn surface
+exposes and accepts the exact model ID. Provider-qualified direct IDs such as
+`zai/glm-5.2` remain selectable across the root-provider boundary; when the host does
+not expose or accept an exact route, fail closed and use a provider-pinned custom
+agent. Never infer provider identity from model-authored prose.
 
 A custom-agent file is the stronger persistent pin for a reusable role because the role config can set `model`, `model_reasoning_effort`, and `model_provider`. A stronger live parent override can still win, so confirm the effective child metadata either way.
 
@@ -259,6 +264,23 @@ credentials, or imply that an OpenAI login grants access to another provider.
 
 Codex custom providers currently use the Responses wire protocol. An Anthropic Messages endpoint is not automatically compatible. Use a supported integration that the user has configured and tested, such as an appropriate Amazon Bedrock route where available.
 
+Z.AI/BigModel's official GLM-5.2 API is the important concrete exception to
+distinguish. It exposes OpenAI-compatible Chat Completions, while current Codex
+rejects `wire_api = "chat"`. The plugin therefore uses a sealed no-tools GLM role
+adapter, not a native provider-pinned custom agent. It uses the one bundled General
+API manifest at `/api/paas/v4/chat/completions`, the existing `zai` OS credential
+identity, and endpoint-bound qualification. Coding Plan and automatic endpoint
+fallback are not configured. The adapter calls only `open.bigmodel.cn`, verifies
+exact response model metadata, and leaves all Codex tools and edits with the root.
+
+Separately, an active sub-agent surface may explicitly accept selectable direct model
+`zai/glm-5.2`. That host route is not the sealed adapter and does not inherit its
+credential, qualification, registry, or runtime-identity evidence. Both routes are
+stateless with respect to the parent history unless the root supplies it. New calls
+therefore use the versioned `CONTEXT_PACKET_V1` contract described in
+[context-packets.md](context-packets.md); retries resend the complete authoritative
+packet rather than a shortened delta.
+
 ## Planner and Advisor permissions
 
 A task-local Planner or Advisor is planning-only by instruction. Do not claim it is mechanically read-only unless the effective child sandbox confirms that.
@@ -269,7 +291,14 @@ The Claude Fable 5 bridge is mechanically narrower than a child: its tools accep
 
 Planner or Advisor failure is never approval. Configured seats are required for a non-trivial Executor plan unless the user explicitly marks one best-effort for the current task. Transport failure, malformed output, missing context, stale plan versions, or wrong routes stop Executor work by default.
 
-Every Advisor call is fresh and stateless. The root carries the canonical current plan, numbered version, and compact cumulative findings ledger. `PLAN_REVISE` returns to the same Planner route; `PLAN_APPROVED` stops the loop. The root allows at most five Advisor reviews. Review five without approval halts with the current plan, ledger, and unresolved findings instead of silently executing.
+Every Advisor call is fresh and stateless. The root carries the complete current
+`CONTEXT_PACKET_V1`, including objective, numbered plan, full cumulative ledger and
+open IDs, constraints, evidence/dependencies, acceptance, verification, and output
+protocol. Conversational transcripts may be omitted; authoritative fields may not be
+shortened. `PLAN_REVISE` returns to the same Planner route; `PLAN_APPROVED` stops the
+loop. The root allows at most five Advisor reviews. Review five without approval
+halts with the current plan, ledger, and unresolved findings instead of silently
+executing.
 
 ## Goals and task lifetime
 

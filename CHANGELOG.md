@@ -1,6 +1,59 @@
 # Changelog
 
-## 0.7.2 — Unreleased
+## 0.8.4 — 2026-07-22
+
+- Add an opt-in, versioned context-envelope contract for stateless official GLM
+  calls. Structured packets validate role, phase, source version, current artifact,
+  constraints, findings ledger, open findings, and output protocol before dispatch,
+  then bind accepted output to the exact canonical packet digest.
+- Keep legacy plain task files backward-compatible while requiring new orchestrated
+  GLM plan/review calls and direct routed children to carry complete authoritative
+  context on every initial request and retry.
+- Fail closed before credential lookup or network access when the exact request's
+  conservative prompt-token upper bound plus configured output exceeds the bundled
+  model context window. Inputs are never silently truncated or summarized.
+
+## 0.8.3 — 2026-07-21
+
+- Default official GLM `glm-5.2` calls with omitted or `auto` effort to `high`
+  while retaining Thinking-enabled requests and explicit `max` support.
+
+## 0.8.2 — 2026-07-21
+
+- Return a strictly allowlisted token-usage summary from successful official GLM
+  role calls. `usage_state` distinguishes provider-reported counters from an omitted
+  `usage` object without weakening the separate `USED_CONFIRMED` model-identity
+  evidence.
+- Validate prompt, completion, total, and optional cached prompt-token counters as
+  non-negative JSON integers, reject malformed present usage before releasing model
+  content, and never forward raw provider metadata.
+
+- Distinguish a genuinely absent OS-stored provider credential from a credential
+  store that the current sandbox cannot reach. Official GLM status now exposes
+  `READY`, `AUTH_REQUIRED`, or `CREDENTIAL_STORE_UNREACHABLE`, preserves the legacy
+  readiness boolean, and keeps host-visible retries on the complete sealed status
+  or call command without exposing the bearer.
+
+- Allow `GLM-5.2 High` or `GLM-5.2 Max` to appear directly after any built-in
+  `planner:`, `advisor:`, `designer:`, or `executor:` label in task-local mixed-model
+  orchestration. Labels remain authoritative and GLM never gets silently recast as
+  a fixed Advisor or researcher.
+- Add a preview-first `seat` command with deterministic built-in role purposes,
+  clean-add-only collision handling, exact qualification/auth checks, and mandatory
+  Planner/Advisor response protocol signals.
+- Add custom `researcher`, `reviewer`, `designer`, and other bounded roles backed
+  directly by Z.AI/BigModel's official GLM-5.2 API, without OpenRouter.
+- Keep the GLM route honest: Codex currently rejects Chat Completions providers,
+  so the adapter is a sealed no-tools role call rather than a native
+  provider-pinned `spawn_agent` route.
+- Add strict official-endpoint/model/effort manifests, OS credential-store
+  authentication, exact tuple qualification, separately authorized billable
+  Gate 0, bounded task files, response-model identity checks, and non-secret
+  compare-and-swap role state.
+- Refuse the Coding Plan endpoint because Z.AI restricts subscription quota to
+  its named supported tools and does not currently list Codex.
+
+## 0.7.2 — 2026-07-20
 
 - Enable implicit skill discovery for natural-language Kimi K3, External Model,
   and model-role availability questions. The previous metadata required an explicit

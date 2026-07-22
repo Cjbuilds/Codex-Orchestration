@@ -44,6 +44,61 @@ changed helper or CLI bytes. A user-supplied helper is executable code and must 
 explicitly trusted; byte drift changes its status to `CLI_CHANGED` and requires
 re-trust.
 
+Credential-state classification also protects against repeated enrollment and
+secret exfiltration when a restricted execution context cannot reach the host OS
+store. The asset is the persisted provider key; threats include confusing D-Bus,
+permission, locked-store, timeout, or helper-launch failures with an absent item,
+and retrieving a bearer host-side only to return it through Codex output. The
+mitigations are stable nonsecret `READY`, `AUTH_REQUIRED`, and
+`CREDENTIAL_STORE_UNREACHABLE` states, distinct helper exits, exact Linux
+missing-item semantics, withheld store diagnostics, and a host-visible retry of the
+complete sealed GLM status/call command. Credential lookup and HTTPS dispatch stay
+inside one trusted process; the helper's `get` output is never a root-facing retry
+surface.
+
+Official GLM usage accounting treats the provider response as untrusted input. The
+adapter constructs a new allowlisted summary instead of returning the raw `usage`
+object, accepts only non-negative JSON integers, explicitly rejects Python booleans,
+and validates nested cached-token data before releasing model content. An absent
+top-level `usage` object is reported as unavailable without weakening independently
+verified model identity; a present malformed object fails closed with fixed,
+content-free diagnostics. Provider request IDs, future metadata, raw values, and
+response fragments never cross the sealed boundary.
+
+Official GLM endpoint selection is fixed by one bundled manifest. Caller-supplied
+URLs are rejected, the only credential identity is the existing OS-stored `zai`,
+and qualification remains bound to the exact manifest, endpoint digest, model, and
+effort. Coding Plan and automatic endpoint fallback are not configured. Registry
+publication serializes digest revalidation and replacement under a cross-process
+directory lock, then syncs the parent directory on POSIX. Planner and Advisor cannot
+share the same sealed GLM provider/model route, even across effort labels.
+GLM Gate 0 and ordinary role calls send Thinking enabled with their exact qualified
+effort. Strict response equality keeps the Gate 0 transport probe fail-closed. The
+returned signal must still match exactly, so formatting or explanatory text fails
+closed.
+Normal API role calls always send `thinking.type=enabled`; omitted or `auto` effort
+resolves to the manifest default `high`, while explicit `max` remains available.
+
+Versioned GLM context envelopes treat caller packets and model acknowledgements as
+untrusted input. Strict duplicate-key and exact-shape JSON validation rejects
+ambiguous parsing; role/phase, source/artifact version, findings ledger, open-finding,
+and output-protocol checks fail closed before dispatch. The caller separately binds
+the expected source version and canonical SHA-256, and accepted structured output
+must end with exactly one matching acknowledgement. A digest proves byte identity,
+not semantic completeness; root validation remains mandatory. Packet fields stay in
+the user message, and untrusted `expected_output` text is never interpolated into the
+system prompt. Packets, digests, and outputs are not added to registry or recovery
+state.
+
+Before credential lookup or networking, the adapter treats the complete serialized
+request body's UTF-8 bytes as a conservative prompt-token upper bound, adds the
+configured maximum output, and compares the sum to the manifest context window. It
+may reject some otherwise safe inputs, but cannot silently truncate or under-budget
+JSON/chat framing. The legacy task-file path remains response-compatible; new
+orchestration calls opt into the stricter envelope contract. Direct routed children
+have no plugin runtime interception point, so their identical packet contract is
+policy-enforced and explicitly distinct from the mechanically validated sealed route.
+
 The command-backed helper necessarily returns the credential over captured stdout
 to the local readiness check or Codex provider process that invoked it. Those are
 trusted recipients; the value is kept in memory only, discarded immediately, and

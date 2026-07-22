@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from enum import Enum
 import hashlib
 import os
 from pathlib import Path
@@ -16,10 +17,20 @@ from typing import Any
 HELPER_NAME = "external_auth_helper.py"
 HELPER_MARKER = b"codex-orchestration-managed-external-auth-helper-v1"
 PROVIDER_AUTH_TIMEOUT_MS = 5_000
+HELPER_AUTH_REQUIRED_EXIT = 2
+HELPER_STORE_UNREACHABLE_EXIT = 3
 
 
 class CredentialSetupError(RuntimeError):
     """The stable helper cannot be installed without unsafe replacement."""
+
+
+class CredentialState(str, Enum):
+    """Nonsecret result of probing a credential through the stable helper."""
+
+    READY = "READY"
+    AUTH_REQUIRED = "AUTH_REQUIRED"
+    CREDENTIAL_STORE_UNREACHABLE = "CREDENTIAL_STORE_UNREACHABLE"
 
 
 def _require(condition: bool, detail: str) -> None:
@@ -188,14 +199,14 @@ def enrollment_command(
     )
 
 
-def credential_ready(
+def credential_state(
     helper: Path,
     provider_id: str,
     *,
     platform: str | None = None,
     python_executable: Path | None = None,
-) -> bool:
-    """Check presence through a secret-discarding helper operation."""
+) -> CredentialState:
+    """Classify readiness through a secret-discarding helper operation."""
 
     try:
         completed = subprocess.run(
@@ -215,5 +226,33 @@ def credential_ready(
             shell=False,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return False
-    return completed.returncode == 0 and completed.stdout.strip() == "configured"
+        return CredentialState.CREDENTIAL_STORE_UNREACHABLE
+    if (
+        completed.returncode == 0
+        and completed.stdout.strip() == "configured"
+        and not completed.stderr.strip()
+    ):
+        return CredentialState.READY
+    if completed.returncode == HELPER_AUTH_REQUIRED_EXIT and not completed.stdout.strip():
+        return CredentialState.AUTH_REQUIRED
+    return CredentialState.CREDENTIAL_STORE_UNREACHABLE
+
+
+def credential_ready(
+    helper: Path,
+    provider_id: str,
+    *,
+    platform: str | None = None,
+    python_executable: Path | None = None,
+) -> bool:
+    """Compatibility wrapper: only a mechanically ready credential is true."""
+
+    return (
+        credential_state(
+            helper,
+            provider_id,
+            platform=platform,
+            python_executable=python_executable,
+        )
+        == CredentialState.READY
+    )

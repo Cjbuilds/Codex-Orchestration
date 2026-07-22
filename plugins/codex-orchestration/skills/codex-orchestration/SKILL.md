@@ -1,6 +1,6 @@
 ---
 name: codex-orchestration
-description: Use for natural-language questions or requests about whether Kimi K3 or another audited External Model is available or callable as Designer or another role, and for assigning models to Planner, Advisor, Designer, Executor, researcher, reviewer, writer, or supervisor roles. Also use when the user invokes Codex Orchestration to update the plugin, create custom roles, define a workflow, or set up, inspect, repair, change, disable, or temporarily override model routing. Keep the selected task model as root and preserve Codex's Goal, permissions, integration, and verification behavior.
+description: Use for natural-language questions or requests about whether Kimi K3, official Z.AI GLM, or another audited External Model is available or callable as Designer or another role, and for assigning models to Planner, Advisor, Designer, Executor, researcher, reviewer, writer, or supervisor roles. Also use when the user invokes Codex Orchestration to update the plugin, create custom roles, define a workflow, or set up, inspect, repair, change, disable, or temporarily override model routing. Keep the selected task model as root and preserve Codex's Goal, permissions, integration, and verification behavior.
 ---
 
 # Codex Orchestration
@@ -19,11 +19,14 @@ Support these simple forms:
 /codex-orchestration setup planner: Claude Fable 5 High, advisor: GPT-5.6 Sol High, executor: GPT-5.6 Luna Extra High
 /codex-orchestration setup designer: GPT-5.6 Sol High, executor: GPT-5.6 Luna Extra High
 /codex-orchestration Planner: Claude Fable 5 High, Designer: Kimi K3
+/codex-orchestration Planner: GLM-5.2 High, Advisor: GPT-5.6 Sol High, Designer: GPT-5.6 Terra High, Executor: GPT-5.6 Luna High
 /codex-orchestration --update
 /codex-orchestration create project role: researcher
 /codex-orchestration create personal roles: researcher, writer, reviewer
 /codex-orchestration configure external role researcher with OpenRouter model moonshotai/kimi-k3 at max
 /codex-orchestration call researcher at max — <one bounded task>
+/codex-orchestration configure official GLM role researcher with model glm-5.2 at high; job: <purpose>
+/codex-orchestration call official GLM role researcher — <one bounded task>
 /codex-orchestration status
 /codex-orchestration repair
 /codex-orchestration disable
@@ -197,12 +200,42 @@ all unsupported effort values; never clamp, alias, or silently fall back.
 ### External models supplied as seat labels
 
 Treat a supplied built-in seat whose model unambiguously matches a bundled external
-model as an explicit External Model seat assignment. In particular, normalize
-`Designer: Kimi K3`, case-insensitively, to role `designer`, provider `openrouter`,
-model `moonshotai/kimi-k3`, and effort `max`; an omitted or `auto` effort also means
-`max`. Reject every other explicit Kimi K3 effort. This is a manifest-backed display
-name mapping, not permission to guess model IDs or accept fuzzy, dated, or `latest`
-aliases.
+model as an explicit External Model seat assignment. Role labels remain literal:
+an external model supplied after `planner:`, `advisor:`, `designer:`, or `executor:`
+belongs only to that named role. Never convert GLM into an Advisor or researcher just
+because those were earlier examples.
+
+Normalize case-insensitive `GLM-5.2`, `GLM 5.2`, or exact model ID `glm-5.2` in any
+of the four built-in seats to provider `zai`, exact model `glm-5.2`, and the same
+lower-case role ID as the supplied seat. Omitted effort or `auto` resolves to `high`;
+explicit `high` remains `high`, and explicit `max` remains `max`; reject every other
+GLM effort. This route uses
+the official `open.bigmodel.cn` sealed role adapter described below and never
+OpenRouter. It is task-local orchestration state even though the clean-added sealed
+role definition is durable. Do not pass GLM to a native `--planner-model`,
+`--advisor-model`, `--designer-model`, or `--executor-model` flag, and do not claim
+it is a `spawn_agent` route or Desktop-picker model.
+
+For each explicitly supplied GLM seat, inspect official GLM status first. If the
+provider, credential, and exact tuple are ready but that same-name seat role is
+absent, the explicit seat label authorizes preview and clean-add through `seat
+--seat <role>`; it does not authorize replacement. An existing exact role is
+idempotently ready. A role-purpose, model, effort, or output-limit mismatch is a
+collision and must fail closed. Missing authentication stops for user-owned hidden
+enrollment. An unqualified tuple requires separate billing approval immediately
+before Gate 0; never reuse the existing `glm-5.2@high` qualification for `max`.
+After an exact role is ready, a role-selection-only request may report its activation.
+When task work is present, write one bounded private temporary packet, call the exact
+same-name role, delete the packet, validate the response protocol and exact response
+model metadata, then return the result to the root. GLM Planner must return
+`PLAN_DRAFT` or `PLAN_REVISION`; GLM Advisor must return `PLAN_APPROVED` or
+`PLAN_REVISE`. Designer and Executor remain bounded by their supplied handoffs.
+
+Also normalize `Designer: Kimi K3`, case-insensitively, to role `designer`, provider
+`openrouter`, model `moonshotai/kimi-k3`, and effort `max`; an omitted or `auto`
+effort also means `max`. Reject every other explicit Kimi K3 effort. These are
+manifest-backed display-name mappings, not permission to guess model IDs or accept
+fuzzy, dated, or `latest` aliases.
 
 An external Designer is not a native direct-model Designer: never pass it to `--designer-model`,
 the root-provider model catalog, or the persistent routing schema; always inspect `external status` first and compare the requested role, provider,
@@ -250,6 +283,145 @@ authorizes clean preview and preparation, but not entering a key or spending on 
 0. Obtain separate explicit approval for `--acknowledge-billing` immediately before
 that probe. Apply role creation only after Gate 0 succeeds for the exact
 provider/model/effort tuple.
+
+### Official Z.AI GLM roles
+
+When the user explicitly asks for GLM through its official provider rather than
+OpenRouter, use the sealed `scripts/zai_glm_roles.py` path. Do not route this request
+through `external_configurator.py`, an OpenRouter manifest, a Kimi qualification,
+or a native Codex provider table.
+
+The official GLM-5.2 API is Chat Completions at
+`https://open.bigmodel.cn/api/paas/v4/chat/completions`. Coding Plan is not configured or used.
+Current Codex rejects `wire_api = "chat"`, so never describe
+the sealed official adapter as a native custom agent, Desktop-picker model, or
+provider-pinned Codex role. It is a sealed no-tools call owned by the root. The root supplies one bounded packet,
+reviews the returned evidence, and remains responsible for every edit, tool call,
+permission, integration decision, and final answer.
+
+This does not make direct sub-agent selection impossible. When the active host
+explicitly accepts exact model `zai/glm-5.2`, Codex may select that direct route with
+`spawn_agent`; it is a separate host route and does not use the sealed adapter's
+registry, credential helper, qualification, or `USED_CONFIRMED` contract. Never
+infer readiness or identity for one route from the other.
+
+The manifest accepts exact model `glm-5.2` at reasoning effort `high` or `max`;
+omitted effort and `auto` resolve to `high`. Deep thinking stays enabled for every
+normal role call as required by the official
+effort control. Do not invent or clamp other effort levels. This adapter uses only
+the bundled General API endpoint: not Coding Plan, not OpenRouter, not a fallback
+endpoint, and not a third-party gateway. The only credential identity is `zai`.
+
+Before enrollment guidance, seat activation, Gate 0, or a role call, run the
+installed `zai_glm_roles.py status` command and inspect its structured
+`authentication_state`. `authentication_ready` remains a compatibility boolean and
+is true only for `READY`. Follow exactly one state:
+
+- `READY`: continue with the requested official GLM operation.
+- `AUTH_REQUIRED`: print the existing no-paste enrollment guidance and stop.
+- `CREDENTIAL_STORE_UNREACHABLE`: do not recommend or repeat enrollment. Request
+  normal Codex permission to rerun the complete installed `zai_glm_roles.py status`
+  command in a host-visible execution context. If that returns `READY`, run the
+  complete `zai_glm_roles.py call` command, including its task or structured-context
+  arguments, through the
+  same host-visible path. Credential lookup and HTTPS dispatch must remain inside
+  that one trusted adapter process.
+
+Trigger the retry only from the exact structured state or its dedicated exit code
+3, never by matching arbitrary stderr text. Never invoke the helper's `get`
+operation directly, expose its stdout to Codex, place a bearer in shell interpolation
+or an environment variable, or infer that host-visible status makes a later
+sandbox-side call safe. A host-visible retry uses the ordinary Codex approval and
+sandbox boundary; the plugin cannot bypass or persist that approval. If the retry
+remains unreachable, fail closed with host Secret Service remediation and no
+re-enrollment request.
+
+Preview and apply preparation with Python 3.11+ from the installed skill directory:
+
+```bash
+python3 <skill-dir>/scripts/zai_glm_roles.py prepare
+python3 <skill-dir>/scripts/zai_glm_roles.py prepare --apply
+```
+
+Preparation installs the audited OS credential-store helper and creates only strict
+non-secret GLM role state. Print the enrollment command, repeat the required
+no-paste authentication message below, and stop for the user to run it in a trusted
+terminal. After authentication, obtain separate explicit approval immediately
+before one potentially billable exact-tuple Gate 0:
+
+```bash
+python3 <skill-dir>/scripts/zai_glm_roles.py gate0 \
+  --model glm-5.2 --effort high --acknowledge-billing
+```
+
+This fixed exact-signal probe keeps Thinking enabled at the exact qualified effort,
+matching normal API calls, and any decorated response still fails closed.
+
+Then preview and create any clean, non-replacement role:
+
+```bash
+python3 <skill-dir>/scripts/zai_glm_roles.py connect \
+  --role researcher \
+  --purpose "Gather evidence from the bounded packet and report uncertainty." \
+  --model glm-5.2 --effort high
+
+python3 <skill-dir>/scripts/zai_glm_roles.py connect \
+  --role researcher \
+  --purpose "Gather evidence from the bounded packet and report uncertainty." \
+  --model glm-5.2 --effort high --apply
+```
+
+For a built-in seat label, use the deterministic seat command rather than inventing
+a purpose string. It supports all four built-in roles and is preview-first:
+
+```bash
+python3 <skill-dir>/scripts/zai_glm_roles.py seat \
+  --seat planner --model glm-5.2 --effort high
+
+python3 <skill-dir>/scripts/zai_glm_roles.py seat \
+  --seat planner --model glm-5.2 --effort high --apply
+```
+
+Repeat only for GLM-bearing seats explicitly supplied by the user. Do not create all
+four roles proactively. When mixed with GPT or Fable seats, validate each route by
+its own adapter and preserve the user's seat order in activation output. Planner and
+Advisor independence still applies: reject a mapping that assigns both seats to the
+same GLM-5.2 route, even if their effort labels differ.
+
+For every new orchestrated call, write a private versioned
+`codex-orchestration.context/v1` JSON packet, preview it with `context
+--context-envelope-file`, then call the role with `--context-envelope-file`,
+`--expected-source-version`, and `--expected-context-sha256`. Require the returned
+`context_state` to be `ACK_CONFIRMED`, then remove the temporary file. The complete
+schema and commands are in [context-packets.md](references/context-packets.md).
+Legacy `--task-file` remains backward-compatible for existing manual callers; do
+not use it for new Codex-Orchestration GLM calls.
+
+The packet contains the objective, complete current context and artifact, constraints,
+cumulative findings ledger, exact open finding IDs, and code-owned output protocol.
+Hashes bind exact bytes and versions; they do not prove semantic completeness, so the
+root still verifies that the packet contains the authoritative current state. Never
+put a credential in the packet. The adapter rejects symlinks, oversized files,
+unqualified tuples, role replacement, endpoint drift, helper drift, malformed
+responses, and response model-identity mismatch. `USED_CONFIRMED` means the direct
+official response metadata named `glm-5.2`; it does not turn the sealed role into a
+Codex tool-using agent.
+
+The structured adapter sends no history and performs no automatic retry. A retry is
+a fresh request and must resend the complete current packet, never a shortened delta.
+Before credential lookup it also fails closed when the conservative UTF-8 upper bound
+for the complete serialized request plus configured output exceeds the manifest
+context window. It never truncates or summarizes the packet.
+
+A successful official GLM call also returns a separate non-secret usage contract.
+`usage_state` is `REPORTED` only when the response contains validated non-negative
+integer `prompt_tokens`, `completion_tokens`, and `total_tokens`; an optional
+`prompt_tokens_details.cached_tokens` is included only when reported. If the entire
+top-level `usage` object is absent, return `NOT_REPORTED` with `usage: null` while
+preserving independent `USED_CONFIRMED` model evidence. A present null, malformed,
+negative, boolean, fractional, or otherwise invalid usage field must fail closed
+before returning model content. Never return the raw usage object, request IDs, or
+unknown provider metadata.
 
 When authentication is missing, say exactly this before stopping:
 
@@ -543,9 +715,28 @@ fork_turns = "none"
 
 A small positive partial fork is technically valid in Codex, but this skill deliberately requires `none`: it minimizes duplicated context and makes the root send a deliberate self-contained packet. Never use the default `all` with a different route. Full-history forks inherit the root model and Codex rejects the override.
 
+Every such call must send a deterministic `CONTEXT_PACKET_V1` containing objective,
+`source_version`, the complete current artifact or plan, the complete cumulative
+findings ledger, exact open finding IDs, constraints, evidence and dependencies,
+acceptance criteria, verification, and output protocol. A retry resends the complete
+authoritative packet, not a shortened delta. If the source changes, increment its
+version and regenerate the packet. The root rejects stale versions, incomplete
+artifact/ledger state, and a handoff that does not acknowledge the current packet.
+
+The active surface may explicitly expose selectable direct model `zai/glm-5.2`.
+Use the same packet contract for that direct child. The `spawn_agent` host interface
+has no plugin runtime packet-validation hook, so direct-child enforcement remains a
+root policy obligation; the sealed official adapter mechanically validates envelope
+mode. Do not conflate those two GLM routes. See
+[context-packets.md](references/context-packets.md).
+
 For a direct Planner, Advisor, Designer, or Executor route, pass the exact configured model and concrete effort. For a custom route, pass the exact namespaced `agent_type`. Do not force a service tier; supported children may inherit Fast/priority from the parent, so tell users who prioritize allowance savings not to run the root in Fast mode.
 
-Direct model overrides keep the root's provider. Before a direct spawn, establish that the target model is on the same provider. If it differs or cannot be established, mark the route unavailable and require a custom agent that pins `model_provider`.
+Use an exact direct model route only when the active spawn surface exposes and
+accepts that model ID. A provider-qualified route such as `zai/glm-5.2` is selectable
+even when its provider differs from the root. If the host does not accept the exact
+route, require a loaded custom agent that pins `model_provider`; never infer provider
+identity from model prose.
 
 After spawning, use the tool result or client metadata to confirm the accepted route. Distinguish:
 
@@ -574,7 +765,13 @@ Advisor is optional. If none is configured, the root validates the Planner's dra
 6. Increment the version and send the new current plan plus compact ledger to a fresh Advisor call. Ask it to confirm or contest prior dispositions rather than repeat accepted findings.
 7. Stop early on approval. Never exceed five total Advisor reviews.
 
-Carry only the original constraints, current plan, and compact ledger between fresh calls; do not duplicate complete transcripts. The root owns the canonical plan, versions, ledger, round count, semantic validation, and Executor release. Planner and Advisor never contact one another directly.
+Carry the complete authoritative `CONTEXT_PACKET_V1` between fresh calls: objective,
+current artifact and version, full findings ledger and open IDs, constraints,
+evidence/dependencies, acceptance criteria, verification, and output protocol. Prior
+conversational transcripts may be omitted, but no authoritative packet field or
+ledger entry may be reduced to a delta. The root owns the canonical plan, versions,
+ledger, round count, semantic validation, and Executor release. Planner and Advisor
+never contact one another directly.
 
 If review five still returns `PLAN_REVISE`, halt before Executor work. Give the user the latest plan and version, complete ledger, latest unresolved findings, and choices to override, re-scope, or change a route. Never label it approved.
 
