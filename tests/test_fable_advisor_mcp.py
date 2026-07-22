@@ -164,6 +164,10 @@ class FableAdvisorMcpTests(unittest.TestCase):
             "CODEX_HOME": str(self.home),
             "ANTHROPIC_API_KEY": "must-not-leak",
             "ANTHROPIC_AUTH_TOKEN": "must-not-leak",
+            "ANTHROPIC_BASE_URL": "https://must-not-be-used.invalid",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "must-not-be-used",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "must-not-be-used",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "must-not-be-used",
             "CLAUDE_CODE_USE_BEDROCK": "1",
         }
         calls: list[tuple[list[str], dict[str, object]]] = []
@@ -696,6 +700,31 @@ class FableAdvisorMcpTests(unittest.TestCase):
             with self.subTest(effort=effort):
                 self.write_state(advisor=self.route(effort))
                 self.assertEqual(FABLE.load_fable_route(self.home)["effort"], effort)
+
+    def test_main_forces_utf8_on_mcp_stdio(self) -> None:
+        class EmptyStream:
+            def __init__(self) -> None:
+                self.reconfigure_calls: list[dict[str, str]] = []
+
+            def reconfigure(self, **kwargs: str) -> None:
+                self.reconfigure_calls.append(kwargs)
+
+            def __iter__(self) -> object:
+                return iter(())
+
+        streams = [EmptyStream(), EmptyStream(), EmptyStream()]
+        with (
+            mock.patch.object(FABLE.sys, "stdin", streams[0]),
+            mock.patch.object(FABLE.sys, "stdout", streams[1]),
+            mock.patch.object(FABLE.sys, "stderr", streams[2]),
+        ):
+            self.assertEqual(FABLE.main(), 0)
+
+        for stream in streams:
+            self.assertEqual(
+                stream.reconfigure_calls,
+                [{"encoding": "utf-8", "errors": "strict"}],
+            )
 
 
 if __name__ == "__main__":
