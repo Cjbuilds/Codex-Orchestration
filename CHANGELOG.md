@@ -53,6 +53,15 @@
 - Refuse the Coding Plan endpoint because Z.AI restricts subscription quota to
   its named supported tools and does not currently list Codex.
 
+## 0.8.0 — 2026-07-21
+
+- Replace READY External Model execution through Desktop native agents with a
+  sealed direct `codex exec` transport. Packets travel only on bounded stdin;
+  output is a bounded safe last-message artifact; model-facing tools, provider
+  streams, retries, fallback, and lifecycle writes are disabled.
+- Re-attest the explicit absolute active-host Codex executable before launch and
+  preserve exact schema-1 registries and managed role files without migration.
+
 ## 0.7.2 — 2026-07-20
 
 - Enable implicit skill discovery for natural-language Kimi K3, External Model,
