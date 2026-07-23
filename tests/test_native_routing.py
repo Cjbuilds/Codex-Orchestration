@@ -2217,7 +2217,9 @@ class NativeRoutingTests(unittest.TestCase):
         )
         prior_bytes = state_path.read_bytes()
 
-        with mock.patch.object(NATIVE.os, "replace", side_effect=PermissionError("capture")):
+        with mock.patch.object(
+            NATIVE, "_rename_noreplace", side_effect=PermissionError("capture")
+        ):
             with self.assertRaisesRegex(NATIVE.ConfigurationError, "changed concurrently"):
                 NATIVE._write_state(
                     state_path,
@@ -2228,6 +2230,42 @@ class NativeRoutingTests(unittest.TestCase):
 
         self.assertEqual(state_path.read_bytes(), prior_bytes)
         self.assertEqual(state_path.lstat().st_nlink, 1)
+
+    def test_existing_state_capture_race_preserves_both_pathnames(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        prior_digest = NATIVE._write_state(
+            state_path, self.valid_state(), identity_guard, None
+        )
+        prior_bytes = state_path.read_bytes()
+        concurrent_bytes = b"concurrent capture destination"
+        real_capture_path = NATIVE._private_state_capture_path
+        raced_path: Path | None = None
+
+        def occupy_capture_destination(path: Path) -> Path:
+            nonlocal raced_path
+            raced_path = real_capture_path(path)
+            raced_path.write_bytes(concurrent_bytes)
+            return raced_path
+
+        with mock.patch.object(
+            NATIVE,
+            "_private_state_capture_path",
+            side_effect=occupy_capture_destination,
+        ):
+            with self.assertRaisesRegex(
+                NATIVE.ConfigurationError, "changed concurrently"
+            ):
+                NATIVE._write_state(
+                    state_path,
+                    self.valid_state("gpt-5.6-terra"),
+                    identity_guard,
+                    prior_digest,
+                )
+
+        self.assertIsNotNone(raced_path)
+        self.assertEqual(state_path.read_bytes(), prior_bytes)
+        self.assertEqual(raced_path.read_bytes(), concurrent_bytes)
 
     def test_existing_state_publication_failure_restores_prior_bytes(self) -> None:
         state_path = self.home / NATIVE.STATE_FILENAME
@@ -2243,7 +2281,7 @@ class NativeRoutingTests(unittest.TestCase):
         def fail_publication_then_restore(source: Path, destination: Path) -> None:
             nonlocal calls
             calls += 1
-            if calls == 1:
+            if calls == 2:
                 raise PermissionError("publication")
             real_rename(source, destination)
 
@@ -2258,7 +2296,7 @@ class NativeRoutingTests(unittest.TestCase):
                     prior_digest,
                 )
 
-        self.assertEqual(calls, 2)
+        self.assertEqual(calls, 3)
         self.assertEqual(state_path.read_bytes(), prior_bytes)
         self.assertEqual(state_path.lstat().st_nlink, 1)
 
@@ -2306,8 +2344,19 @@ class NativeRoutingTests(unittest.TestCase):
         )
         prior_bytes = state_path.read_bytes()
 
+        real_rename = NATIVE._rename_noreplace
+        calls = 0
+
+        def capture_then_block(source: Path, destination: Path) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                real_rename(source, destination)
+                return
+            raise PermissionError("blocked")
+
         with mock.patch.object(
-            NATIVE, "_rename_noreplace", side_effect=PermissionError("blocked")
+            NATIVE, "_rename_noreplace", side_effect=capture_then_block
         ):
             with self.assertRaisesRegex(
                 NATIVE.ConfigurationError, "restoration failed"
@@ -2343,7 +2392,7 @@ class NativeRoutingTests(unittest.TestCase):
         def fail_publication_then_restore(source: Path, destination: Path) -> None:
             nonlocal calls
             calls += 1
-            if calls == 1:
+            if calls == 2:
                 raise PermissionError("forced publication failure")
             real_rename(source, destination)
 
@@ -2374,7 +2423,7 @@ class NativeRoutingTests(unittest.TestCase):
             result = NATIVE.main()
 
         self.assertEqual(result, 2)
-        self.assertEqual(calls, 2)
+        self.assertEqual(calls, 3)
         self.assertIn("config write was rolled back", stderr.getvalue())
         self.assertEqual(self.read_fake_config(), prior_config)
         self.assertEqual(state_path.read_bytes(), prior_state)

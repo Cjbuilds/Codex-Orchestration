@@ -319,8 +319,6 @@ class _Package:
                     relative = path.relative_to(root).as_posix()
                     self.items.append((relative, _Retained(path, directory=True)))
                 for name in file_names:
-                    if name.endswith((".pyc", ".pyo")):
-                        continue
                     path = current_path / name
                     relative = path.relative_to(root).as_posix()
                     retained = _Retained(path, directory=False)
@@ -356,7 +354,6 @@ class _Package:
             names.extend(
                 (current_path / name).relative_to(self.root).as_posix()
                 for name in file_names
-                if not name.endswith((".pyc", ".pyo"))
             )
         return tuple(names)
 

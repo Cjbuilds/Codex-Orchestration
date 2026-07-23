@@ -917,9 +917,8 @@ def _capture_expected_state(path: Path, expected_digest: str) -> Path:
 
     captured = _private_state_capture_path(path)
     try:
-        os.replace(path, captured)
-    except OSError as exc:
-        captured.unlink(missing_ok=True)
+        _rename_noreplace(path, captured)
+    except (OSError, ConfigurationError) as exc:
         raise ConfigurationError(
             "Saved routing state changed concurrently; refusing state publication."
         ) from exc

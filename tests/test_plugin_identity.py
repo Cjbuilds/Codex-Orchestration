@@ -381,11 +381,35 @@ class GuardTests(IdentityFixture):
                 guard._executing_package.content_fingerprint(),
             )
 
-    def test_runtime_bytecode_exclusions_do_not_break_payload_equivalence(self):
+    def test_sourceless_bytecode_outside_pycache_rejects_payload_equivalence(self):
+        for relative in (Path("cache_only.pyc"), Path("skills/cache_only.pyo")):
+            with self.subTest(relative=relative):
+                payload = self.cache / relative
+                payload.write_bytes(b"cache-only bytecode")
+                inventory = {"installed": [self.record()], "available": []}
+                with mock.patch.object(
+                    IDENTITY, "run_inventory", side_effect=[inventory]
+                ):
+                    with self.assertRaisesRegex(
+                        IDENTITY.SelectionError,
+                        "^Executing plugin cache payload does not match the selected source payload\\.$",
+                    ):
+                        with IDENTITY.PluginIdentityGuard(
+                            self.client,
+                            self.cache,
+                            "setup",
+                            codex_home=self.codex_home,
+                        ):
+                            pass
+                payload.unlink()
+
+    def test_pycache_directories_and_descendants_remain_excluded(self):
         bytecode = self.cache / "skills" / "__pycache__"
         bytecode.mkdir()
         (bytecode / "plugin_identity.cpython-313.pyc").write_bytes(b"runtime metadata")
-        (self.cache / "ignored.pyo").write_bytes(b"runtime metadata")
+        nested = bytecode / "nested"
+        nested.mkdir()
+        (nested / "ignored.pyo").write_bytes(b"runtime metadata")
         with self.guard() as guard:
             self.assertEqual(
                 guard._package.content_fingerprint(),
@@ -408,7 +432,8 @@ class GuardTests(IdentityFixture):
         with self.guard() as first:
             full_digest = first.full_inventory_sha256
             operation_digest = first.operation_identity_sha256
-        shutil.rmtree(self.cache)
+        old_cache = self.cache.with_name("1.0.0-old")
+        self.cache.rename(old_cache)
         shutil.copytree(self.plugin, self.cache)
         with self.guard() as second:
             self.assertEqual(second.full_inventory_sha256, full_digest)
