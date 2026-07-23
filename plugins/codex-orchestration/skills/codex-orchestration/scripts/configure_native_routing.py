@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -89,6 +90,79 @@ EXECUTING_PLUGIN_ROOT = Path(__file__).resolve().parents[3]
 
 class ConfigurationError(RuntimeError):
     pass
+
+
+@contextlib.contextmanager
+def _transaction_directory_lock(root: Path):
+    """Serialize one native-routing transaction per effective CODEX_HOME."""
+
+    if os.name == "posix":
+        try:
+            import fcntl
+        except ImportError as exc:  # pragma: no cover - POSIX always provides it
+            raise ConfigurationError("POSIX transaction locking is unavailable.") from exc
+        flags = os.O_RDONLY
+        if hasattr(os, "O_DIRECTORY"):
+            flags |= os.O_DIRECTORY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(root, flags)
+        locked = False
+        try:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+            except BlockingIOError as exc:
+                raise ConfigurationError(
+                    "Another Codex-Orchestration native-routing transaction is "
+                    "active; wait for it to finish and retry."
+                ) from exc
+            yield
+        finally:
+            try:
+                if locked:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
+        return
+    if os.name == "nt":  # pragma: no cover - exercised on Windows hosts
+        import ctypes
+        from ctypes import wintypes
+
+        lock_identity = os.path.normcase(os.path.realpath(root))
+        name_hash = hashlib.sha256(lock_identity.encode("utf-8")).hexdigest()
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.argtypes = (
+            ctypes.c_void_p,
+            wintypes.BOOL,
+            wintypes.LPCWSTR,
+        )
+        kernel32.CreateMutexW.restype = wintypes.HANDLE
+        kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        kernel32.ReleaseMutex.argtypes = (wintypes.HANDLE,)
+        kernel32.ReleaseMutex.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        mutex = kernel32.CreateMutexW(
+            None, False, f"Local\\CodexOrchestrationNativeRouting-{name_hash}"
+        )
+        if not mutex:
+            raise ConfigurationError("Could not create the Windows transaction mutex.")
+        wait_result = kernel32.WaitForSingleObject(mutex, 0)
+        if wait_result not in {0x00000000, 0x00000080}:
+            kernel32.CloseHandle(mutex)
+            raise ConfigurationError(
+                "Another Codex-Orchestration native-routing transaction is active; "
+                "wait for it to finish and retry."
+            )
+        try:
+            yield
+        finally:
+            kernel32.ReleaseMutex(mutex)
+            kernel32.CloseHandle(mutex)
+        return
+    raise ConfigurationError(f"Unsupported transaction-locking platform: {os.name}.")
 
 
 def parse_args() -> argparse.Namespace:
@@ -683,11 +757,13 @@ def validate_planning_routes(
         )
 
 
-def _read_state(path: Path) -> dict[str, Any] | None:
+def _read_state_snapshot(path: Path) -> tuple[dict[str, Any] | None, str | None]:
+    """Return validated state and the digest of its exact observed bytes."""
+
     try:
         info = path.lstat()
     except FileNotFoundError:
-        return None
+        return None, None
     except OSError as exc:
         raise ConfigurationError(f"Could not inspect routing state {path}: {exc}") from exc
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
@@ -695,13 +771,28 @@ def _read_state(path: Path) -> dict[str, Any] | None:
     if info.st_nlink != 1:
         raise ConfigurationError(f"Routing state has multiple hard links: {path}")
     try:
-        state = json.loads(path.read_text(encoding="utf-8"))
+        payload = path.read_bytes()
+        state = json.loads(payload.decode("utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ConfigurationError(f"Could not read routing state {path}: {exc}") from exc
     try:
-        return validate_routing_state(state)
+        validated = validate_routing_state(state)
     except RoutingStateError as exc:
         raise ConfigurationError("Saved routing state is invalid.") from exc
+    return validated, hashlib.sha256(payload).hexdigest()
+
+
+def _read_state(path: Path) -> dict[str, Any] | None:
+    state, _ = _read_state_snapshot(path)
+    return state
+
+
+def _assert_state_digest(path: Path, expected_digest: str | None) -> None:
+    _, observed_digest = _read_state_snapshot(path)
+    if observed_digest != expected_digest:
+        raise ConfigurationError(
+            "Saved routing state changed concurrently; refusing state publication."
+        )
 
 
 def _validate_state_config(state: dict[str, Any] | None, config_path: Path) -> None:
@@ -720,12 +811,12 @@ def _write_state(
     path: Path,
     state: dict[str, Any],
     identity_guard: plugin_identity.PluginIdentityGuard,
-) -> None:
+    expected_digest: str | None,
+) -> str:
     identity_guard.assert_unchanged("routing-state publication")
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists() or path.is_symlink():
-        _read_state(path)
     payload = json.dumps(state, indent=2, sort_keys=True) + "\n"
+    payload_bytes = payload.encode("utf-8")
     fd, temporary = tempfile.mkstemp(
         prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
     )
@@ -738,6 +829,7 @@ def _write_state(
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
+        _assert_state_digest(path, expected_digest)
         os.replace(temp_path, path)
         try:
             directory_fd = os.open(path.parent, os.O_RDONLY)
@@ -754,15 +846,18 @@ def _write_state(
         except OSError:
             pass
         temp_path.unlink(missing_ok=True)
+    return hashlib.sha256(payload_bytes).hexdigest()
 
 
 def _remove_state(
-    path: Path, identity_guard: plugin_identity.PluginIdentityGuard
+    path: Path,
+    identity_guard: plugin_identity.PluginIdentityGuard,
+    expected_digest: str | None,
 ) -> None:
-    if not path.exists():
-        return
-    _read_state(path)
+    _assert_state_digest(path, expected_digest)
     identity_guard.assert_unchanged("routing-state removal")
+    if expected_digest is None:
+        return
     path.unlink()
     try:
         directory_fd = os.open(path.parent, os.O_RDONLY)
@@ -1452,6 +1547,7 @@ def _status_unbuffered(
     codex_home: Path | None,
     binaries: list[Path],
     require_effective: bool,
+    publish: Any = None,
 ) -> int:
     clients_compatible = True
     for binary in binaries:
@@ -1461,6 +1557,7 @@ def _status_unbuffered(
         clients_compatible = clients_compatible and supported
     with contextlib.ExitStack() as stack:
         app = stack.enter_context(AppServer(target, codex_home))
+        stack.enter_context(_transaction_directory_lock(app.codex_home))
         identity_guard = stack.enter_context(
             plugin_identity.guard_plugin_identity(
                 target,
@@ -1643,6 +1740,8 @@ def _status_unbuffered(
             and not orphaned_roles
         )
         identity_guard.assert_unchanged("status publication")
+        if publish is not None:
+            publish()
     return 1 if require_effective and not healthy else 0
 
 
@@ -1655,14 +1754,15 @@ def _status(
     """Publish status only after the identity guard's final recheck succeeds."""
 
     output = io.StringIO()
+    destination = sys.stdout
     with contextlib.redirect_stdout(output):
         result = _status_unbuffered(
             target,
             codex_home,
             binaries,
             require_effective,
+            lambda: print(output.getvalue(), end="", file=destination),
         )
-    print(output.getvalue(), end="")
     return result
 
 
@@ -1965,6 +2065,7 @@ def _repair(
     config: dict[str, Any],
     version: str | None,
     state: dict[str, Any] | None,
+    state_digest: str | None,
     workspace: Path,
     identity_guard: plugin_identity.PluginIdentityGuard,
     plugin_id: str,
@@ -2146,7 +2247,8 @@ def _repair(
         )
 
     state_path = app.codex_home / STATE_FILENAME
-    if _read_state(state_path) != state:
+    _, current_state_digest = _read_state_snapshot(state_path)
+    if current_state_digest != state_digest:
         raise ConfigurationError(
             "Saved routing state changed concurrently during repair. It was not "
             "overwritten; run status before any further routing change."
@@ -2165,6 +2267,7 @@ def _disable(
     config: dict[str, Any],
     version: str | None,
     state: dict[str, Any] | None,
+    state_digest: str | None,
     identity_guard: plugin_identity.PluginIdentityGuard,
     plugin_id: str,
     apply: bool,
@@ -2274,7 +2377,7 @@ def _disable(
     )
     if result.get("status") not in {"ok", "okOverridden"}:
         raise ConfigurationError(f"Unexpected config write status: {result.get('status')!r}")
-    _remove_state(state_path, identity_guard)
+    _remove_state(state_path, identity_guard, state_digest)
     identity_guard.assert_unchanged("disable success publication")
     print("Native routing disabled. Start a new Codex task to clear the loaded policy.")
     return 0
@@ -2308,6 +2411,7 @@ def main() -> int:
 
         with contextlib.ExitStack() as stack:
             app = stack.enter_context(AppServer(target, args.codex_home))
+            stack.enter_context(_transaction_directory_lock(app.codex_home))
             workspace = Path.cwd().resolve()
             read_result = app.request(
                 "config/read",
@@ -2319,7 +2423,7 @@ def main() -> int:
                     "Could not obtain the user config version needed for a safe write."
                 )
             state_path = app.codex_home / STATE_FILENAME
-            state = _read_state(state_path)
+            state, state_digest = _read_state_snapshot(state_path)
             _validate_state_config(state, app.config_path)
             if args.disable and state is not None:
                 if state["schema"] >= 7:
@@ -2350,6 +2454,7 @@ def main() -> int:
                     config,
                     version,
                     state,
+                    state_digest,
                     identity_guard,
                     plugin_id,
                     args.apply,
@@ -2360,6 +2465,7 @@ def main() -> int:
                     config,
                     version,
                     state,
+                    state_digest,
                     workspace,
                     identity_guard,
                     plugin_id,
@@ -2603,7 +2709,12 @@ def main() -> int:
                     f"Unexpected config write status: {result.get('status')!r}"
                 )
             try:
-                _write_state(state_path, new_state, identity_guard)
+                published_state_digest = _write_state(
+                    state_path,
+                    new_state,
+                    identity_guard,
+                    state_digest,
+                )
             except (ConfigurationError, OSError) as state_exc:
                 try:
                     rollback_result = _batch_write(
@@ -2665,9 +2776,18 @@ def main() -> int:
                             f"{rollback_result.get('status')!r}"
                         )
                     if state is None:
-                        _remove_state(state_path, identity_guard)
+                        _remove_state(
+                            state_path,
+                            identity_guard,
+                            published_state_digest,
+                        )
                     else:
-                        _write_state(state_path, state, identity_guard)
+                        _write_state(
+                            state_path,
+                            state,
+                            identity_guard,
+                            published_state_digest,
+                        )
                 except (ConfigurationError, OSError) as rollback_exc:
                     raise ConfigurationError(
                         "Codex accepted the write but current-workspace effective "

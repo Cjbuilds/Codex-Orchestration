@@ -122,12 +122,17 @@ source identity, the executing package's documented cache coordinate, and
 deterministic payload hashes are guarded independently from App Server's config
 version. On Windows, identity sources are held through strict non-write/non-delete
 shared handles and every identity, stat, and hash recheck uses those retained handles.
-Setup and repair require the enabled executing installation;
+One nonblocking transaction lock per effective `CODEX_HOME` serializes status,
+setup, repair, disable, rollback, and publication across cooperating configurators.
+State replacement/removal additionally compares the exact originally observed byte
+digest or absence and carries each new digest through rollback. Setup and repair
+require the enabled executing installation;
 disable resolves the saved namespace from the full installed inventory even when it
-is disabled. Schemas 1–6 remain bound only to the historical canonical marketplace
-identity, and their MCP restore snapshots are never transplanted to another
-namespace. Missing, malformed, duplicate, disabled-executing, or drifted identity
-fails closed.
+is disabled. Unmigrated schemas 1–6 remain bound to the historical canonical
+marketplace identity. A legacy state without an MCP snapshot may be upgraded to the
+validated executing identity only after its global managed fields match exactly; a
+legacy MCP restore snapshot is never transplanted to another namespace. Missing,
+malformed, duplicate, disabled-executing, or drifted identity fails closed.
 
 Schema 6 introduced the sealed `qwen_cli` Advisor route (a stable saved-state tag
 for the Token Plan transport), while schema 5 introduced only the sealed `kimi_cli`

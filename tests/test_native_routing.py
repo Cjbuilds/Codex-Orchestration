@@ -91,6 +91,7 @@ mutate_after_write = home / ".fake-mutate-after-write"
 mutate_namespace_after_write = home / ".fake-mutate-namespace-after-write"
 mutate_feature_after_write = home / ".fake-mutate-feature-after-write"
 mutate_state_after_write = home / ".fake-mutate-state-after-write"
+reformat_state_after_write = home / ".fake-reformat-state-after-write"
 ok_overridden = home / ".fake-ok-overridden"
 overridden_returned = home / ".fake-overridden-returned"
 fail_overridden_rollback = home / ".fake-fail-overridden-rollback"
@@ -262,6 +263,11 @@ for line in sys.stdin:
             }
             state_path.write_text(json.dumps(state), encoding="utf-8")
             mutate_state_after_write.unlink()
+        if reformat_state_after_write.exists():
+            state_path = home / ".codex-orchestration-routing.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            reformat_state_after_write.unlink()
         new_version = version() + 1
         version_file.write_text(str(new_version), encoding="utf-8")
         status = "ok"
@@ -469,6 +475,22 @@ class NativeRoutingTests(unittest.TestCase):
         return json.loads(
             (self.home / ".fake-user-config.json").read_text(encoding="utf-8")
         )
+
+    def valid_state(self, model: str = "gpt-5.6-luna") -> dict[str, object]:
+        state, _, _ = NATIVE._prepare_setup_state(
+            {},
+            None,
+            self.plugin_id,
+            f"{NATIVE.MANAGED_MARKER}\nmode",
+            f"{NATIVE.MANAGED_MARKER}\nusage",
+            {"kind": "model", "model": model, "effort": "high"},
+            None,
+            None,
+            None,
+            self.home / "config.toml",
+            False,
+        )
+        return state
 
     def run_main_with_identity_failure(
         self, phase: str, *arguments: str
@@ -1684,6 +1706,31 @@ class NativeRoutingTests(unittest.TestCase):
             state["previous"]["usage"]["value"], "CONCURRENT STATE EDIT"
         )
 
+    def test_repair_detects_same_object_state_byte_replacement(self) -> None:
+        self.run_script(
+            "--executor-model",
+            "gpt-5.6-sol",
+            "--executor-effort",
+            "medium",
+            "--apply",
+        )
+        config = self.read_fake_config()
+        config["features"]["multi_agent_v2"]["usage_hint_text"] = (
+            f"{NATIVE.MANAGED_MARKER}\ndifferent usage"
+        )
+        (self.home / ".fake-user-config.json").write_text(
+            json.dumps(config), encoding="utf-8"
+        )
+        state_path = self.home / NATIVE.STATE_FILENAME
+        parsed_before = json.loads(state_path.read_text(encoding="utf-8"))
+        (self.home / ".fake-reformat-state-after-write").touch()
+
+        repaired = self.run_script("--repair", "--apply", check=False)
+
+        self.assertEqual(repaired.returncode, 2)
+        self.assertIn("state changed concurrently", repaired.stderr)
+        self.assertEqual(json.loads(state_path.read_text(encoding="utf-8")), parsed_before)
+
     def test_repair_handles_one_hint_in_a_scalar_conversion_only(self) -> None:
         initial = {"features": {"multi_agent_v2": True}, "keep": "yes"}
         (self.home / ".fake-user-config.json").write_text(
@@ -1974,12 +2021,105 @@ class NativeRoutingTests(unittest.TestCase):
             "config_file": str(self.home / "config.toml"),
         }
         identity_guard = mock.Mock(spec=["assert_unchanged"])
-        with mock.patch.object(NATIVE.os, "fchmod", None):
-            NATIVE._write_state(state_path, state, identity_guard)
+        with mock.patch.object(NATIVE.os, "fchmod", None, create=True):
+            digest = NATIVE._write_state(state_path, state, identity_guard, None)
         identity_guard.assert_unchanged.assert_called_once_with(
             "routing-state publication"
         )
         self.assertEqual(json.loads(state_path.read_text(encoding="utf-8")), state)
+        self.assertEqual(digest, NATIVE.hashlib.sha256(state_path.read_bytes()).hexdigest())
+
+    def test_transaction_lock_rejects_a_concurrent_process(self) -> None:
+        probe = textwrap.dedent(
+            """\
+            import importlib.util
+            from pathlib import Path
+            import sys
+
+            script = Path(sys.argv[1])
+            spec = importlib.util.spec_from_file_location("native_lock_probe", script)
+            module = importlib.util.module_from_spec(spec)
+            sys.path.insert(0, str(script.parent))
+            spec.loader.exec_module(module)
+            try:
+                with module._transaction_directory_lock(Path(sys.argv[2])):
+                    raise SystemExit(0)
+            except module.ConfigurationError as exc:
+                print(str(exc), file=sys.stderr)
+                raise SystemExit(23)
+            """
+        )
+        with NATIVE._transaction_directory_lock(self.home):
+            result = subprocess.run(
+                [sys.executable, "-c", probe, str(SCRIPT), str(self.home)],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+        self.assertEqual(result.returncode, 23, result.stderr)
+        self.assertIn("native-routing transaction is active", result.stderr)
+
+    def test_absent_state_cas_refuses_an_intervening_valid_state(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        state = self.valid_state()
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+
+        with self.assertRaisesRegex(
+            NATIVE.ConfigurationError, "changed concurrently"
+        ):
+            NATIVE._write_state(state_path, state, identity_guard, None)
+
+    def test_existing_state_cas_refuses_replacement_and_removal(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        original = self.valid_state()
+        original_digest = NATIVE._write_state(
+            state_path, original, identity_guard, None
+        )
+        intervening = self.valid_state("gpt-5.6-terra")
+        state_path.write_text(json.dumps(intervening), encoding="utf-8")
+
+        with self.assertRaisesRegex(
+            NATIVE.ConfigurationError, "changed concurrently"
+        ):
+            NATIVE._write_state(
+                state_path, original, identity_guard, original_digest
+            )
+        with self.assertRaisesRegex(
+            NATIVE.ConfigurationError, "changed concurrently"
+        ):
+            NATIVE._remove_state(state_path, identity_guard, original_digest)
+        self.assertEqual(
+            json.loads(state_path.read_text(encoding="utf-8")), intervening
+        )
+
+    def test_state_cas_digest_progression_binds_write_remove_and_rollback(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        original = self.valid_state()
+        original_digest = NATIVE._write_state(
+            state_path, original, identity_guard, None
+        )
+        replacement = self.valid_state("gpt-5.6-terra")
+
+        replacement_digest = NATIVE._write_state(
+            state_path, replacement, identity_guard, original_digest
+        )
+        self.assertEqual(
+            NATIVE._read_state_snapshot(state_path)[1], replacement_digest
+        )
+        NATIVE._remove_state(state_path, identity_guard, replacement_digest)
+        self.assertFalse(state_path.exists())
+        republished_digest = NATIVE._write_state(
+            state_path, replacement, identity_guard, None
+        )
+        rollback_digest = NATIVE._write_state(
+            state_path, original, identity_guard, republished_digest
+        )
+        self.assertEqual(rollback_digest, original_digest)
+        self.assertEqual(NATIVE._read_state_snapshot(state_path)[1], original_digest)
 
     def test_effective_project_override_is_reported_and_blocks_setup(self) -> None:
         self.run_script(

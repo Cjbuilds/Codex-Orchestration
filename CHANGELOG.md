@@ -8,14 +8,18 @@
   version cache coordinates while independently retaining the inventory source.
   Missing, disabled, malformed, ambiguous, cache-mismatched, or concurrently changed
   identity now fails closed before publication.
-- Add routing schema/policy version 7 with an exact persisted `plugin_id`. Schemas
-  1–6 remain historical and are never reinterpreted across marketplace namespaces;
-  disable restores the saved historical namespace even when that installation is
-  currently disabled.
+- Add routing schema/policy version 7 with an exact persisted `plugin_id`. Unmigrated
+  schemas 1–6 remain bound to the historical canonical namespace. A legacy state
+  with no plugin-scoped MCP snapshot may upgrade after its global managed fields
+  match exactly; a legacy MCP snapshot is never moved across marketplace namespaces.
+  Disable restores the saved historical namespace even when it is currently disabled.
 - Guard setup, status, repair, rollback, disable, and state publication with separate
   full-inventory and operation-identity digests. Windows source and executing-cache
   identity, stat, and payload hashes are rechecked through retained strict handles
   rather than weaker path reopens.
+- Serialize native routing operations with one nonblocking per-`CODEX_HOME`
+  transaction lock and compare-and-swap every state replacement/removal against the
+  exact originally observed byte digest or absence.
 - Clear Git's repository-local environment before versioned pre-commit and pre-push
   preflight so linked-worktree hooks cannot redirect nested Git fixture tests into
   the parent repository metadata.
