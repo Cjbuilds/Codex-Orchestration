@@ -2903,6 +2903,57 @@ def _disable(
         reload_user_config=True,
     )
     if result.get("status") == "okOverridden":
+        if state is not None:
+            try:
+                if managed_compensation is None:
+                    raise ConfigurationError(
+                        "managed compensation edits were unavailable"
+                    )
+                compensation_result = _batch_write(
+                    app,
+                    managed_compensation,
+                    result.get("version"),
+                    identity_guard=identity_guard,
+                    identity_phase="disable override compensation",
+                    reload_user_config=True,
+                )
+                if compensation_result.get("status") not in {
+                    "ok",
+                    "okOverridden",
+                }:
+                    raise ConfigurationError(
+                        "unexpected compensation status "
+                        f"{compensation_result.get('status')!r}"
+                    )
+                compensation_read = app.request(
+                    "config/read",
+                    {"includeLayers": True, "cwd": str(workspace)},
+                )
+                compensation_config, _ = _user_layer(compensation_read)
+                compensation_current = _current_values(
+                    compensation_config, plugin_id
+                )
+                if not _managed_matches(state, compensation_current):
+                    raise ConfigurationError(
+                        "forward-compensated user config did not match saved managed "
+                        "state"
+                    )
+                _, retained_state_digest = _read_state_snapshot(state_path)
+                if retained_state_digest != state_digest:
+                    raise ConfigurationError(
+                        "saved routing state changed during override compensation"
+                    )
+            except BaseException as compensation_exc:
+                raise ConfigurationError(
+                    "A higher-priority layer overrides the restored routing values, "
+                    "and managed-config compensation or verification failed. Config "
+                    "and state may be inconsistent. Run status before continuing."
+                ) from compensation_exc
+            raise ConfigurationError(
+                "A higher-priority layer overrides the restored routing values; the "
+                "managed user config and saved restore state were re-paired and "
+                "retained."
+            )
         raise ConfigurationError(
             "A higher-priority layer overrides the restored routing values; saved "
             "restore state was retained."

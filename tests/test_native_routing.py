@@ -1252,13 +1252,107 @@ class NativeRoutingTests(unittest.TestCase):
         )
         state_path = self.home / NATIVE.STATE_FILENAME
         state_bytes = state_path.read_bytes()
+        managed_config = self.read_fake_config()
         (self.home / ".fake-ok-overridden").touch()
 
         disabled = self.run_script("--disable", "--apply", check=False)
 
         self.assertEqual(disabled.returncode, 2)
         self.assertIn("higher-priority layer overrides", disabled.stderr)
+        self.assertIn("re-paired and retained", disabled.stderr)
         self.assertNotIn("Native routing disabled", disabled.stdout)
+        self.assertEqual(state_path.read_bytes(), state_bytes)
+        self.assertEqual(self.read_fake_config(), managed_config)
+        state = NATIVE._read_state(state_path)
+        self.assertIsNotNone(state)
+        self.assertTrue(
+            NATIVE._managed_matches(
+                state,
+                NATIVE._current_values(self.read_fake_config(), self.plugin_id),
+            )
+        )
+
+    def test_disable_overridden_scalar_restore_recompensates_managed_table(self) -> None:
+        initial = {
+            "features": {"multi_agent_v2": True},
+            "unrelated": {"keep": True},
+        }
+        (self.home / ".fake-user-config.json").write_text(
+            json.dumps(initial), encoding="utf-8"
+        )
+        self.run_script("--executor-model", "gpt-5.6-luna", "--apply")
+        state_path = self.home / NATIVE.STATE_FILENAME
+        state_bytes = state_path.read_bytes()
+        managed_config = self.read_fake_config()
+        (self.home / ".fake-ok-overridden").touch()
+
+        disabled = self.run_script("--disable", "--apply", check=False)
+
+        self.assertEqual(disabled.returncode, 2)
+        self.assertIn("re-paired and retained", disabled.stderr)
+        self.assertEqual(self.read_fake_config(), managed_config)
+        self.assertEqual(state_path.read_bytes(), state_bytes)
+        self.assertIsInstance(
+            self.read_fake_config()["features"]["multi_agent_v2"], dict
+        )
+
+    def test_disable_overridden_mcp_restore_stays_in_saved_plugin_namespace(
+        self,
+    ) -> None:
+        initial = {
+            "features": {
+                "multi_agent_v2": {"max_concurrent_threads_per_session": 5}
+            },
+            "plugins": {
+                self.plugin_id: {
+                    "mcp_servers": {
+                        "fable-advisor-python3": {"enabled": False}
+                    }
+                },
+                "sibling@elsewhere": {
+                    "mcp_servers": {
+                        "fable-advisor-python3": {"enabled": "sentinel"}
+                    }
+                },
+            },
+            "unrelated": {"keep": True},
+        }
+        (self.home / ".fake-user-config.json").write_text(
+            json.dumps(initial), encoding="utf-8"
+        )
+        self.run_script(
+            "--executor-model", "gpt-5.6-luna", "--advisor-fable", "--apply"
+        )
+        state_path = self.home / NATIVE.STATE_FILENAME
+        state_bytes = state_path.read_bytes()
+        managed_config = self.read_fake_config()
+        (self.home / ".fake-ok-overridden").touch()
+
+        disabled = self.run_script("--disable", "--apply", check=False)
+
+        self.assertEqual(disabled.returncode, 2)
+        self.assertIn("re-paired and retained", disabled.stderr)
+        self.assertEqual(self.read_fake_config(), managed_config)
+        self.assertEqual(state_path.read_bytes(), state_bytes)
+        self.assertEqual(
+            self.read_fake_config()["plugins"]["sibling@elsewhere"],
+            initial["plugins"]["sibling@elsewhere"],
+        )
+
+    def test_disable_overridden_compensation_failure_is_actionable(self) -> None:
+        self.run_script("--executor-model", "gpt-5.6-luna", "--apply")
+        state_path = self.home / NATIVE.STATE_FILENAME
+        state_bytes = state_path.read_bytes()
+        (self.home / ".fake-ok-overridden").touch()
+        (self.home / ".fake-fail-overridden-rollback").touch()
+
+        disabled = self.run_script("--disable", "--apply", check=False)
+
+        self.assertEqual(disabled.returncode, 2)
+        self.assertIn("compensation or verification failed", disabled.stderr)
+        self.assertIn("may be inconsistent", disabled.stderr)
+        self.assertIn("Run status", disabled.stderr)
+        self.assertNotIn("re-paired and retained", disabled.stderr)
         self.assertEqual(state_path.read_bytes(), state_bytes)
 
     def test_disable_readback_preserves_state_after_post_write_edit(self) -> None:
