@@ -288,6 +288,8 @@ def binary_version(binary: Path) -> str:
         result = subprocess.run(
             [str(binary), "--version"],
             text=True,
+            encoding="utf-8",
+            errors="replace",
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             timeout=PROBE_TIMEOUT_SECONDS,
@@ -331,6 +333,8 @@ def supports_native_policy(binary: Path) -> tuple[bool, str]:
                 ],
                 env=env,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 timeout=PROBE_TIMEOUT_SECONDS,
@@ -387,6 +391,7 @@ class AppServer:
                 stderr=self._stderr,
                 text=True,
                 encoding="utf-8",
+                errors="replace",
                 bufsize=1,
                 env=env,
             )
@@ -833,6 +838,8 @@ def select_fable_server() -> str:
             result = subprocess.run(
                 [executable, *prefix, "--version"],
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 timeout=PROBE_TIMEOUT_SECONDS,
@@ -872,6 +879,8 @@ def verify_fable_prerequisites(effort: str) -> dict[str, str]:
                 }
             },
             text=True,
+            encoding="utf-8",
+            errors="replace",
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             timeout=PROBE_TIMEOUT_SECONDS,

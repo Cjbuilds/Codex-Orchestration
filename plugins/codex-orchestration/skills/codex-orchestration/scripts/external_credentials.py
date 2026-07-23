@@ -212,6 +212,8 @@ def credential_ready(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=False,
             timeout=20,
             shell=False,
