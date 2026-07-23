@@ -99,6 +99,18 @@ class StateTransactionIndeterminateError(ConfigurationError):
 
 
 @contextlib.contextmanager
+def _suppress_bytecode_writes():
+    """Keep optional local imports from mutating the guarded plugin payload."""
+
+    previous = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        yield
+    finally:
+        sys.dont_write_bytecode = previous
+
+
+@contextlib.contextmanager
 def _transaction_directory_lock(root: Path):
     """Serialize one native-routing transaction per effective CODEX_HOME."""
 
@@ -793,6 +805,20 @@ def _read_state(path: Path) -> dict[str, Any] | None:
     return state
 
 
+def _state_entry_exists(path: Path) -> bool:
+    """Return whether the pathname entry exists without following its target."""
+
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise ConfigurationError(
+            f"Could not inspect routing-state pathname {path}: {exc}"
+        ) from exc
+    return True
+
+
 def _assert_state_digest(path: Path, expected_digest: str | None) -> None:
     _, observed_digest = _read_state_snapshot(path)
     if observed_digest != expected_digest:
@@ -1238,7 +1264,7 @@ def _remove_state(
         raise
     except BaseException as exc:
         _reconcile_state_capture(path, captured, expected_digest, exc)
-    if path.exists():
+    if _state_entry_exists(path):
         raise ConfigurationError(
             "A newer routing-state pathname appeared during removal; it was preserved."
         )
@@ -3082,12 +3108,13 @@ def main() -> int:
         target = resolve_binary(args.codex_bin)
         binaries = discover_compatibility_binaries(target, args.compat_bin)
         if args.status:
-            return _status(
-                target,
-                args.codex_home,
-                binaries,
-                args.require_effective,
-            )
+            with _suppress_bytecode_writes():
+                return _status(
+                    target,
+                    args.codex_home,
+                    binaries,
+                    args.require_effective,
+                )
         # Disable must remain available when the policy itself is what makes an
         # older shared-config client incompatible.
         _compatibility_report(
@@ -3096,6 +3123,7 @@ def main() -> int:
         )
 
         with contextlib.ExitStack() as stack:
+            stack.enter_context(_suppress_bytecode_writes())
             app = stack.enter_context(AppServer(target, args.codex_home))
             stack.enter_context(_transaction_directory_lock(app.codex_home))
             workspace = Path.cwd().resolve()
@@ -3114,7 +3142,11 @@ def main() -> int:
             if args.disable and state is not None:
                 if state["schema"] >= 7:
                     identity_selector = "disable-schema7"
-                    saved_plugin_id = state["plugin_id"]
+                    saved_plugin_id = _state_plugin_id(state)
+                    if saved_plugin_id is None:
+                        raise ConfigurationError(
+                            "Schema-7 routing state is missing its saved plugin identity."
+                        )
                 else:
                     identity_selector = "disable-legacy"
                     saved_plugin_id = None

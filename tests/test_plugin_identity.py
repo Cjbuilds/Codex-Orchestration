@@ -305,8 +305,51 @@ class SelectionTests(IdentityFixture):
     def test_saved_and_legacy_disable_resolve_disabled(self):
         saved = self.record(enabled=False)
         legacy = self.record(plugin_id=IDENTITY.LEGACY_PLUGIN_ID, marketplace="codex-orchestration", enabled=False)
+        legacy_cache = (
+            self.codex_home
+            / "plugins"
+            / "cache"
+            / "codex-orchestration"
+            / "codex-orchestration"
+            / "1.0.0"
+        )
+        shutil.copytree(self.plugin, legacy_cache)
         self.assertEqual(self.select([saved], "disable-schema7", saved="codex-orchestration@market")["plugin_id"], "codex-orchestration@market")
-        self.assertEqual(self.select([legacy], "disable-legacy")["plugin_id"], IDENTITY.LEGACY_PLUGIN_ID)
+        self.assertEqual(self.select([legacy], "disable-legacy", executing=legacy_cache)["plugin_id"], IDENTITY.LEGACY_PLUGIN_ID)
+
+    def test_disable_rejects_alternate_executing_identity_for_saved_and_legacy_state(self):
+        alternate_cache = (
+            self.codex_home
+            / "plugins"
+            / "cache"
+            / "alternate"
+            / "codex-orchestration"
+            / "1.0.0"
+        )
+        shutil.copytree(self.plugin, alternate_cache)
+        alternate = self.record(
+            plugin_id="codex-orchestration@alternate",
+            marketplace="alternate",
+        )
+        legacy = self.record(
+            plugin_id=IDENTITY.LEGACY_PLUGIN_ID,
+            marketplace="codex-orchestration",
+            enabled=False,
+        )
+        for selector, saved in (
+            ("disable-schema7", "codex-orchestration@market"),
+            ("disable-legacy", None),
+        ):
+            with self.subTest(selector=selector), self.assertRaisesRegex(
+                IDENTITY.SelectionError,
+                "Executing plugin identity does not match the saved disable target",
+            ):
+                self.select(
+                    [self.record(enabled=False), legacy, alternate],
+                    selector,
+                    saved=saved,
+                    executing=alternate_cache,
+                )
 
     def test_disable_missing_and_duplicate_fail(self):
         with self.assertRaises(IDENTITY.SelectionError):
@@ -495,6 +538,27 @@ class GuardTests(IdentityFixture):
                 )
                 guard.assert_unchanged("status publication")
 
+    def test_schema_seven_disable_guard_accepts_disabled_saved_identity(self):
+        inventory = {
+            "installed": [self.record(enabled=False)],
+            "available": [],
+        }
+        with mock.patch.object(
+            IDENTITY, "run_inventory", side_effect=[inventory, inventory, inventory]
+        ):
+            with IDENTITY.PluginIdentityGuard(
+                self.client,
+                self.cache,
+                "disable-schema7",
+                saved_plugin_id="codex-orchestration@market",
+                codex_home=self.codex_home,
+            ) as guard:
+                self.assertEqual(
+                    guard.selected_plugin_id, "codex-orchestration@market"
+                )
+                self.assertEqual(guard.executing_plugin_id, guard.selected_plugin_id)
+                guard.assert_unchanged("disable publication")
+
     def test_colliding_plugin_id_with_contradictory_name_is_rejected(self):
         contradictory = self.record(name="different-plugin")
         inventory = {
@@ -580,6 +644,36 @@ class GuardTests(IdentityFixture):
                 guard._package.content_fingerprint(),
                 guard._executing_package.content_fingerprint(),
             )
+
+    def test_pycache_bytecode_drift_is_caught_without_cross_installation_matching(self):
+        bytecode = self.cache / "skills" / "__pycache__"
+        bytecode.mkdir()
+        payload = bytecode / "routing_state.cpython-313.pyc"
+        payload.write_bytes(b"runtime metadata")
+        with self.guard(
+            inventories=[[self.record()], [self.record()], [self.record()]]
+        ) as guard:
+            if os.name != "nt":
+                payload.write_bytes(b"runtime metadata changed")
+                with self.assertRaises(IDENTITY.IdentityDriftError):
+                    guard.assert_unchanged("bytecode mutation")
+            else:
+                retained = next(
+                    retained
+                    for relative, retained in guard._executing_package.ignored_items
+                    if relative.endswith("routing_state.cpython-313.pyc")
+                )
+                original = retained.snapshot
+
+                def drifted(*, include_hash):
+                    value = original(include_hash=include_hash)
+                    if include_hash:
+                        value["sha256"] = "f" * 64
+                    return value
+
+                with mock.patch.object(retained, "snapshot", side_effect=drifted):
+                    with self.assertRaises(IDENTITY.IdentityDriftError):
+                        guard.assert_unchanged("bytecode mutation")
 
     def test_capture_and_recheck(self):
         with self.guard(inventories=[[self.record()], [self.record()], [self.record()]]) as guard:

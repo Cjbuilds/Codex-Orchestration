@@ -291,20 +291,35 @@ for line in sys.stdin:
 
 
 class NativeRoutingTests(unittest.TestCase):
+    def write_python_fixture(self, path: Path, source: str) -> tuple[Path, Path]:
+        """Create a Python-backed command that is executable on this platform."""
+
+        script = path if os.name != "nt" else path.with_suffix(".py")
+        script.write_text(textwrap.dedent(source), encoding="utf-8")
+        script.chmod(0o755)
+        if os.name != "nt":
+            return script, script
+
+        launcher = path.with_suffix(".cmd")
+        launcher.write_text(
+            f'@echo off\r\n"{sys.executable}" "%~dp0{script.name}" %*\r\n',
+            encoding="utf-8",
+        )
+        return launcher, script
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.home = self.root / "home"
         self.home.mkdir()
-        self.codex = self.root / "fake-codex"
-        self.codex.write_text(textwrap.dedent(FAKE_CODEX), encoding="utf-8")
-        self.codex.chmod(0o755)
+        self.codex, _ = self.write_python_fixture(
+            self.root / "fake-codex", FAKE_CODEX
+        )
         self.bin = self.root / "bin"
         self.bin.mkdir()
-        self.claude = self.bin / "claude"
-        self.claude.write_text(
-            textwrap.dedent(
-                """\
+        _, self.claude = self.write_python_fixture(
+            self.bin / "claude",
+            """\
                 #!/usr/bin/env python3
                 import json
                 import sys
@@ -324,15 +339,11 @@ class NativeRoutingTests(unittest.TestCase):
                     )
                     raise SystemExit(0)
                 raise SystemExit(2)
-                """
-            ),
-            encoding="utf-8",
+                """,
         )
-        self.claude.chmod(0o755)
-        self.kimi = self.bin / "kimi"
-        self.kimi.write_text(
-            textwrap.dedent(
-                """\
+        _, self.kimi = self.write_python_fixture(
+            self.bin / "kimi",
+            """\
                 #!/usr/bin/env python3
                 import json
                 import sys
@@ -359,17 +370,12 @@ class NativeRoutingTests(unittest.TestCase):
                     }))
                     raise SystemExit(0)
                 raise SystemExit(2)
-                """
-            ),
-            encoding="utf-8",
+                """,
         )
-        self.kimi.chmod(0o755)
-        self.acpx = self.bin / "acpx"
-        self.acpx.write_text(
+        _, self.acpx = self.write_python_fixture(
+            self.bin / "acpx",
             "#!/usr/bin/env python3\nimport sys\nprint('0.12.0') if sys.argv[1:] == ['--version'] else sys.exit(2)\n",
-            encoding="utf-8",
         )
-        self.acpx.chmod(0o755)
         self.source_plugin_root = SCRIPT.resolve().parents[3]
         self.plugin_id = "codex-orchestration@test-marketplace"
         self._original_executing_plugin_root = NATIVE.EXECUTING_PLUGIN_ROOT
@@ -930,6 +936,52 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertEqual(self.read_fake_config(), managed_config)
         self.assertEqual(state_path.read_bytes(), managed_state)
 
+    @unittest.skipUnless(os.name == "posix", "requires dangling symlink support")
+    def test_disable_dangling_symlink_race_retains_capture_and_fails_closed(self) -> None:
+        self.run_script("--executor-model", "gpt-5.6-luna", "--apply")
+        state_path = self.home / NATIVE.STATE_FILENAME
+        original_bytes = state_path.read_bytes()
+        missing_target = self.home / "missing-disable-state-target"
+        original_assert = NATIVE._assert_state_digest
+
+        def create_dangling_symlink(path: Path, digest: str | None) -> None:
+            original_assert(path, digest)
+            if path.name.endswith(".cas-backup"):
+                state_path.symlink_to(missing_target)
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", self.disable_main_argv()),
+            mock.patch.object(
+                NATIVE,
+                "_assert_state_digest",
+                side_effect=create_dangling_symlink,
+            ),
+            mock.patch.object(sys, "stdout", stdout),
+            mock.patch.object(sys, "stderr", stderr),
+            mock.patch.dict(os.environ, self.fake_env()),
+        ):
+            result = NATIVE.main()
+
+        self.assertEqual(result, 2)
+        self.assertNotIn("Native routing disabled", stdout.getvalue())
+        self.assertIn("may be inconsistent", stderr.getvalue())
+        self.assertIn("Run status", stderr.getvalue())
+        self.assertTrue(state_path.is_symlink())
+        self.assertEqual(state_path.readlink(), missing_target)
+        captures = list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.cas-backup"))
+        self.assertEqual(len(captures), 1)
+        self.assertEqual(captures[0].read_bytes(), original_bytes)
+        self.assertEqual(
+            self.read_fake_config()["features"]["multi_agent_v2"],
+            {"max_concurrent_threads_per_session": 5},
+        )
+
+        status = self.run_script("--status", check=False)
+        self.assertEqual(status.returncode, 2)
+        self.assertIn("Routing state is not a regular file", status.stderr)
+
     @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
     def test_update_disable_interrupt_before_removal_recompensates_pair(self) -> None:
         self.run_script("--executor-model", "gpt-5.6-luna", "--apply")
@@ -1249,6 +1301,16 @@ class NativeRoutingTests(unittest.TestCase):
         )
         self.assertIn("Advisor: Claude Fable 5 high", status.stdout)
         self.assertNotIn("managed fields conflict", status.stdout)
+        self.assertEqual(state_path.read_bytes(), state_before)
+
+        config_before_disable = self.read_fake_config()
+        refused_disable = self.run_script("--disable", "--apply", check=False)
+        self.assertEqual(refused_disable.returncode, 2)
+        self.assertIn(
+            "Executing plugin identity does not match the saved disable target",
+            refused_disable.stderr,
+        )
+        self.assertEqual(self.read_fake_config(), config_before_disable)
         self.assertEqual(state_path.read_bytes(), state_before)
 
     def test_status_rechecks_exact_state_digest_before_publication(self) -> None:
@@ -1619,7 +1681,7 @@ class NativeRoutingTests(unittest.TestCase):
         alternate_servers = restored["plugins"][self.plugin_id]["mcp_servers"]
         self.assertNotIn("enabled", alternate_servers["fable-advisor-python3"])
 
-    def test_legacy_mcp_state_refuses_alternate_setup_and_disables_canonical_only(self) -> None:
+    def test_legacy_mcp_state_refuses_alternate_setup_repair_and_disable(self) -> None:
         canonical_id = NATIVE.LEGACY_PLUGIN_ID
         alternate_id = self.plugin_id
         initial = {
@@ -1684,9 +1746,14 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertIn("Saved plugin identity", refused_repair.stderr)
         self.assertEqual(self.read_fake_config(), before_refused_setup)
 
-        self.run_script("--disable", "--apply")
-        self.assertEqual(self.read_fake_config(), initial)
-        self.assertFalse(state_path.exists())
+        refused_disable = self.run_script("--disable", "--apply", check=False)
+        self.assertEqual(refused_disable.returncode, 2)
+        self.assertIn(
+            "Executing plugin identity does not match the saved disable target",
+            refused_disable.stderr,
+        )
+        self.assertEqual(self.read_fake_config(), before_refused_setup)
+        self.assertTrue(state_path.exists())
 
     def test_prepare_qwen_installs_only_stable_helper_and_prints_hidden_prompt_lane(self) -> None:
         target = (
@@ -2493,9 +2560,9 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertEqual(feature["tool_namespace"], "agents")
 
     def test_incompatible_client_blocks_setup_but_never_disable(self) -> None:
-        old_codex = self.root / "old-codex"
-        old_codex.write_text(textwrap.dedent(FAKE_CODEX), encoding="utf-8")
-        old_codex.chmod(0o755)
+        old_codex, _ = self.write_python_fixture(
+            self.root / "old-codex", FAKE_CODEX
+        )
         refused = self.run_script(
             "--executor-model",
             "gpt-5.6-luna",
@@ -2542,9 +2609,9 @@ class NativeRoutingTests(unittest.TestCase):
             "high",
             "--apply",
         )
-        old_codex = self.root / "old-status-codex"
-        old_codex.write_text(textwrap.dedent(FAKE_CODEX), encoding="utf-8")
-        old_codex.chmod(0o755)
+        old_codex, _ = self.write_python_fixture(
+            self.root / "old-status-codex", FAKE_CODEX
+        )
         incompatible = self.run_script(
             "--status",
             "--require-effective",
@@ -3791,6 +3858,75 @@ class NativeRoutingTests(unittest.TestCase):
                 NATIVE._remove_state(state_path, identity_guard, original_digest)
         self.assertEqual(state_path.read_bytes(), newer_bytes)
 
+    @unittest.skipUnless(os.name == "posix", "requires dangling symlink support")
+    def test_remove_preserves_capture_when_dangling_symlink_recreates_path(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        original_digest = NATIVE._write_state(
+            state_path, self.valid_state(), identity_guard, None
+        )
+        original_bytes = state_path.read_bytes()
+        missing_target = self.home / "missing-state-target"
+        original_assert = NATIVE._assert_state_digest
+
+        def create_dangling_symlink(path: Path, digest: str | None) -> None:
+            original_assert(path, digest)
+            if path.name.endswith(".cas-backup"):
+                state_path.symlink_to(missing_target)
+
+        with mock.patch.object(
+            NATIVE,
+            "_assert_state_digest",
+            side_effect=create_dangling_symlink,
+        ):
+            with self.assertRaisesRegex(
+                NATIVE.ConfigurationError, "appeared during removal"
+            ):
+                NATIVE._remove_state(state_path, identity_guard, original_digest)
+
+        self.assertTrue(state_path.is_symlink())
+        self.assertEqual(state_path.readlink(), missing_target)
+        captures = list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.cas-backup"))
+        self.assertEqual(len(captures), 1)
+        self.assertEqual(captures[0].read_bytes(), original_bytes)
+
+    def test_remove_preserves_capture_when_directory_recreates_path(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        original_digest = NATIVE._write_state(
+            state_path, self.valid_state(), identity_guard, None
+        )
+        original_bytes = state_path.read_bytes()
+        original_assert = NATIVE._assert_state_digest
+
+        def create_directory(path: Path, digest: str | None) -> None:
+            original_assert(path, digest)
+            if path.name.endswith(".cas-backup"):
+                state_path.mkdir()
+
+        with mock.patch.object(
+            NATIVE, "_assert_state_digest", side_effect=create_directory
+        ):
+            with self.assertRaisesRegex(
+                NATIVE.ConfigurationError, "appeared during removal"
+            ):
+                NATIVE._remove_state(state_path, identity_guard, original_digest)
+
+        self.assertTrue(state_path.is_dir())
+        captures = list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.cas-backup"))
+        self.assertEqual(len(captures), 1)
+        self.assertEqual(captures[0].read_bytes(), original_bytes)
+
+    def test_state_entry_inspection_error_is_not_treated_as_absent(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        with mock.patch.object(
+            Path, "lstat", side_effect=PermissionError("inspection denied")
+        ):
+            with self.assertRaisesRegex(
+                NATIVE.ConfigurationError, "Could not inspect routing-state pathname"
+            ):
+                NATIVE._state_entry_exists(state_path)
+
     def test_state_cas_digest_progression_binds_write_remove_and_rollback(self) -> None:
         state_path = self.home / NATIVE.STATE_FILENAME
         identity_guard = mock.Mock(spec=["assert_unchanged"])
@@ -4635,6 +4771,12 @@ class NativeRoutingTests(unittest.TestCase):
             NATIVE.ConfigurationError, "low.*medium.*high.*xhigh.*max.*ultra"
         ):
             NATIVE.normalize_fable_effort("extreme")
+
+    def test_bytecode_write_suppression_is_transaction_scoped(self) -> None:
+        previous = sys.dont_write_bytecode
+        with NATIVE._suppress_bytecode_writes():
+            self.assertTrue(sys.dont_write_bytecode)
+        self.assertEqual(sys.dont_write_bytecode, previous)
 
     def test_fable_setup_rejects_effort_missing_from_installed_claude(self) -> None:
         self.claude.write_text(
