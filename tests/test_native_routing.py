@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import py_compile
 import shutil
 import subprocess
 import sys
@@ -307,6 +308,27 @@ class NativeRoutingTests(unittest.TestCase):
         )
         return launcher, script
 
+    def write_unchecked_bytecode(
+        self, source: Path, sentinel: Path, label: str
+    ) -> Path:
+        malicious = self.root / f"malicious-{label}.py"
+        malicious.write_text(
+            "from pathlib import Path\n"
+            f"Path({str(sentinel)!r}).write_text('executed', encoding='utf-8')\n"
+            f"_source = Path({str(source)!r})\n"
+            "exec(compile(_source.read_bytes(), str(_source), 'exec'), globals())\n",
+            encoding="utf-8",
+        )
+        cache = Path(importlib.util.cache_from_source(str(source)))
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        py_compile.compile(
+            str(malicious),
+            cfile=str(cache),
+            doraise=True,
+            invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH,
+        )
+        return cache
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
@@ -379,10 +401,18 @@ class NativeRoutingTests(unittest.TestCase):
         self.source_plugin_root = SCRIPT.resolve().parents[3]
         self.plugin_id = "codex-orchestration@test-marketplace"
         self._original_executing_plugin_root = NATIVE.EXECUTING_PLUGIN_ROOT
+        self._original_source_attestations = {
+            name: dict(record)
+            for name, record in NATIVE._LOCAL_SOURCE_ATTESTATIONS.items()
+        }
         self.activate_plugin_cache(self.plugin_id)
 
     def tearDown(self) -> None:
         NATIVE.EXECUTING_PLUGIN_ROOT = self._original_executing_plugin_root
+        NATIVE._LOCAL_SOURCE_ATTESTATIONS.clear()
+        NATIVE._LOCAL_SOURCE_ATTESTATIONS.update(
+            self._original_source_attestations
+        )
         self.temp.cleanup()
 
     def activate_plugin_cache(self, plugin_id: str) -> None:
@@ -411,6 +441,16 @@ class NativeRoutingTests(unittest.TestCase):
             / "configure_native_routing.py"
         )
         NATIVE.EXECUTING_PLUGIN_ROOT = plugin_root
+        scripts = self.installed_script.parent
+        NATIVE._LOCAL_SOURCE_ATTESTATIONS.clear()
+        for name in (
+            "external_cli_trust",
+            "external_credentials",
+            "plugin_identity",
+            "routing_state",
+        ):
+            _, attestation = NATIVE._read_local_source(scripts / f"{name}.py")
+            NATIVE._LOCAL_SOURCE_ATTESTATIONS[name] = attestation
 
     def run_script(
         self,
@@ -2742,6 +2782,38 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertEqual(json.loads(state_path.read_text(encoding="utf-8")), state)
         self.assertEqual(digest, NATIVE.hashlib.sha256(state_path.read_bytes()).hexdigest())
 
+    def test_batch_write_post_identity_drift_is_indeterminate_without_compensation(
+        self,
+    ) -> None:
+        app = mock.Mock(spec=["request"])
+        app.request.return_value = {"status": "ok", "version": "sha256:v2"}
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        identity_guard.assert_unchanged.side_effect = [
+            None,
+            NATIVE.plugin_identity.IdentityDriftError("replaced after write"),
+        ]
+
+        with self.assertRaisesRegex(
+            NATIVE.StateTransactionIndeterminateError,
+            "No automatic compensation was attempted",
+        ):
+            NATIVE._batch_write(
+                app,
+                [{"keyPath": "example", "value": True}],
+                "sha256:v1",
+                identity_guard=identity_guard,
+                identity_phase="test write",
+                reload_user_config=True,
+            )
+
+        identity_guard.assert_unchanged.assert_has_calls(
+            [
+                mock.call("test write"),
+                mock.call("test write completion"),
+            ]
+        )
+        app.request.assert_called_once()
+
     @unittest.skipUnless(sys.platform == "win32", "requires Windows rename semantics")
     def test_rename_noreplace_windows_consumes_source_without_overwrite(self) -> None:
         source = self.home / "rename-source"
@@ -4256,6 +4328,56 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertNotIn("automatic rollback failed", result.stderr)
         self.assertEqual(self.read_fake_config(), initial)
         self.assertFalse((self.home / NATIVE.STATE_FILENAME).exists())
+
+    def test_source_only_bootstrap_ignores_valid_plugin_local_bytecode(self) -> None:
+        control = self.root / "bytecode-control"
+        control.mkdir()
+        control_source = control / "victim.py"
+        control_source.write_text("value = 'source'\n", encoding="utf-8")
+        control_sentinel = self.root / "control-bytecode-executed"
+        control_malicious = self.root / "control-malicious.py"
+        control_malicious.write_text(
+            "from pathlib import Path\n"
+            f"Path({str(control_sentinel)!r}).write_text('executed', encoding='utf-8')\n",
+            encoding="utf-8",
+        )
+        control_cache = Path(importlib.util.cache_from_source(str(control_source)))
+        control_cache.parent.mkdir()
+        py_compile.compile(
+            str(control_malicious),
+            cfile=str(control_cache),
+            doraise=True,
+            invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH,
+        )
+        control_result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                f"import sys; sys.path.insert(0, {str(control)!r}); import victim",
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=20,
+            check=False,
+        )
+        self.assertEqual(control_result.returncode, 0, control_result.stderr)
+        self.assertTrue(control_sentinel.exists())
+
+        sentinels: list[Path] = []
+        for module_name in (
+            "external_cli_trust",
+            "external_credentials",
+            "plugin_identity",
+            "routing_state",
+        ):
+            source = self.installed_script.with_name(f"{module_name}.py")
+            sentinel = self.root / f"{module_name}-bytecode-executed"
+            self.write_unchecked_bytecode(source, sentinel, module_name)
+            sentinels.append(sentinel)
+
+        self.run_script("--executor-model", "gpt-5.6-luna")
+        self.assertTrue(all(not sentinel.exists() for sentinel in sentinels))
 
     def test_ok_overridden_rollback_failure_is_reported_truthfully(self) -> None:
         (self.home / ".fake-ok-overridden").touch()

@@ -122,6 +122,19 @@ source identity, the executing package's documented cache coordinate, and
 deterministic payload hashes are guarded independently from App Server's config
 version. On Windows, identity sources are held through strict non-write/non-delete
 shared handles and every identity, stat, and hash recheck uses those retained handles.
+On POSIX, each retained root, directory, file, and client pathname is reopened with
+no-follow semantics and its live device/inode/type/hash is compared with the retained
+object before and after guarded mutations; observed same-name replacements fail
+closed. Plugin-local security modules are loaded from single-link source descriptors
+through an exact allowlist, never from package-local bytecode, and their loaded
+identity and hash are bound into the operation digest. Package `__pycache__` content
+may differ only because it is unreachable to that source-only loader. If identity
+drifts immediately after App Server accepts a write, the outcome is reported as
+indeterminate and no automatic compensation is attempted under the changed package.
+These finite checks detect observed concurrent drift; they do not claim immunity to
+a hostile same-user process that can perform an unobserved POSIX ABA swap after the
+last check. That stronger threat requires an independently immutable installation or
+trusted external launcher.
 One nonblocking transaction lock per effective `CODEX_HOME` serializes status,
 setup, repair, disable, rollback, and publication across cooperating configurators.
 State replacement/removal additionally captures the prior pathname into a private

@@ -16,7 +16,10 @@
 - Guard setup, status, repair, rollback, disable, and state publication with separate
   full-inventory and operation-identity digests. Windows source and executing-cache
   identity, stat, and payload hashes are rechecked through retained strict handles
-  rather than weaker path reopens.
+  rather than weaker path reopens. POSIX live path identities are independently
+  reopened with no-follow semantics to catch same-name replacement, while an
+  allowlisted source-only loader makes package-local bytecode unreachable and binds
+  the loaded security modules into the operation digest.
 - Serialize native routing operations with one nonblocking per-`CODEX_HOME`
   transaction lock. State replacement/removal atomically captures the prior pathname,
   validates its exact originally observed bytes, and publishes with a platform-native

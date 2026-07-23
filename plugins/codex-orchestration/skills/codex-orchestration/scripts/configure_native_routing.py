@@ -15,6 +15,8 @@ import ctypes
 import errno
 import hashlib
 import io
+import importlib.abc
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -30,21 +32,141 @@ import threading
 import time
 from typing import Any
 
-import external_credentials
-import plugin_identity
-from routing_state import (
-    BUNDLED_MCP_SERVERS,
-    FABLE_EFFORTS,
-    FABLE_MODEL,
-    KIMI_MODEL,
-    MANAGED_MARKER,
-    QWEN_MODEL,
-    QWEN_REGION_CONFIG,
-    QWEN_REGIONS,
-    ROUTING_TOOL_NAMESPACE,
-    RoutingStateError,
-    validate_routing_state,
+
+_LOCAL_SOURCE_MODULES = frozenset(
+    {
+        "external_cli_trust",
+        "external_credentials",
+        "fable_advisor_mcp",
+        "kimi_designer_mcp",
+        "plugin_identity",
+        "qwen_advisor_mcp",
+        "routing_state",
+    }
 )
+_LOCAL_SOURCE_ROOT = Path(__file__).resolve().parent
+_LOCAL_SOURCE_ATTESTATIONS: dict[str, dict[str, Any]] = {}
+_MAX_LOCAL_SOURCE_BYTES = 4 * 1024 * 1024
+
+
+def _source_identity(info: os.stat_result) -> tuple[int, int]:
+    return int(info.st_dev), int(info.st_ino)
+
+
+def _read_local_source(path: Path) -> tuple[bytes, dict[str, Any]]:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    try:
+        before = path.lstat()
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise ImportError("Plugin-local source could not be opened safely.") from exc
+    try:
+        opened = os.fstat(descriptor)
+        reparse = bool(
+            getattr(before, "st_file_attributes", 0)
+            & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        )
+        if (
+            reparse
+            or not stat.S_ISREG(before.st_mode)
+            or not stat.S_ISREG(opened.st_mode)
+            or before.st_nlink != 1
+            or opened.st_nlink != 1
+            or _source_identity(before) != _source_identity(opened)
+            or opened.st_size > _MAX_LOCAL_SOURCE_BYTES
+        ):
+            raise ImportError("Plugin-local source identity is unsafe.")
+        payload = bytearray()
+        while True:
+            chunk = os.read(descriptor, 1024 * 128)
+            if not chunk:
+                break
+            payload.extend(chunk)
+            if len(payload) > _MAX_LOCAL_SOURCE_BYTES:
+                raise ImportError("Plugin-local source is too large.")
+        after = path.lstat()
+        if (
+            _source_identity(after) != _source_identity(opened)
+            or after.st_mode != opened.st_mode
+            or after.st_size != opened.st_size
+            or after.st_nlink != opened.st_nlink
+        ):
+            raise ImportError("Plugin-local source changed while it was read.")
+    finally:
+        os.close(descriptor)
+    source = bytes(payload)
+    return source, {
+        "path": str(path),
+        "device": int(opened.st_dev),
+        "inode": int(opened.st_ino),
+        "size": len(source),
+        "sha256": hashlib.sha256(source).hexdigest(),
+    }
+
+
+class _SourceOnlyLoader(importlib.abc.Loader):
+    def __init__(self, name: str, path: Path) -> None:
+        self.name = name
+        self.path = path
+
+    def create_module(self, spec: Any) -> None:
+        return None
+
+    def exec_module(self, module: Any) -> None:
+        source, attestation = _read_local_source(self.path)
+        code = compile(source, str(self.path), "exec", dont_inherit=True)
+        module.__file__ = str(self.path)
+        module.__cached__ = None
+        exec(code, module.__dict__)
+        _LOCAL_SOURCE_ATTESTATIONS[self.name] = attestation
+
+
+class _SourceOnlyFinder(importlib.abc.MetaPathFinder):
+    def find_spec(
+        self, fullname: str, path: Any = None, target: Any = None
+    ) -> Any:
+        del path, target
+        if fullname not in _LOCAL_SOURCE_MODULES:
+            return None
+        source = _LOCAL_SOURCE_ROOT / f"{fullname}.py"
+        return importlib.util.spec_from_loader(
+            fullname,
+            _SourceOnlyLoader(fullname, source),
+            origin=str(source),
+        )
+
+
+@contextlib.contextmanager
+def _source_only_local_imports():
+    finder = _SourceOnlyFinder()
+    previous_dont_write = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    sys.meta_path.insert(0, finder)
+    try:
+        yield
+    finally:
+        with contextlib.suppress(ValueError):
+            sys.meta_path.remove(finder)
+        sys.dont_write_bytecode = previous_dont_write
+
+
+with _source_only_local_imports():
+    import external_credentials
+    import plugin_identity
+    from routing_state import (
+        BUNDLED_MCP_SERVERS,
+        FABLE_EFFORTS,
+        FABLE_MODEL,
+        KIMI_MODEL,
+        MANAGED_MARKER,
+        QWEN_MODEL,
+        QWEN_REGION_CONFIG,
+        QWEN_REGIONS,
+        ROUTING_TOOL_NAMESPACE,
+        RoutingStateError,
+        validate_routing_state,
+    )
 
 try:
     import tomllib
@@ -100,14 +222,10 @@ class StateTransactionIndeterminateError(ConfigurationError):
 
 @contextlib.contextmanager
 def _suppress_bytecode_writes():
-    """Keep optional local imports from mutating the guarded plugin payload."""
+    """Load optional plugin modules from source without reading local bytecode."""
 
-    previous = sys.dont_write_bytecode
-    sys.dont_write_bytecode = True
-    try:
+    with _source_only_local_imports():
         yield
-    finally:
-        sys.dont_write_bytecode = previous
 
 
 @contextlib.contextmanager
@@ -2071,7 +2189,7 @@ def _batch_write(
     reload_user_config: bool,
 ) -> dict[str, Any]:
     identity_guard.assert_unchanged(identity_phase)
-    return app.request(
+    result = app.request(
         "config/batchWrite",
         {
             "edits": edits,
@@ -2079,6 +2197,15 @@ def _batch_write(
             "reloadUserConfig": reload_user_config,
         },
     )
+    try:
+        identity_guard.assert_unchanged(f"{identity_phase} completion")
+    except plugin_identity.PluginIdentityError as exc:
+        raise StateTransactionIndeterminateError(
+            "Codex accepted the configuration write, but plugin identity drifted "
+            "before completion could be verified. No automatic compensation was "
+            "attempted under the changed package. Run status before continuing."
+        ) from exc
+    return result
 
 
 def _status_unbuffered(
@@ -2108,6 +2235,7 @@ def _status_unbuffered(
                 "status",
                 saved_plugin_id=saved_plugin_id,
                 codex_home=app.codex_home,
+                loaded_sources=dict(_LOCAL_SOURCE_ATTESTATIONS),
             )
         )
         plugin_id = identity_guard.selected_plugin_id
@@ -3168,6 +3296,7 @@ def main() -> int:
                     identity_selector,
                     saved_plugin_id=saved_plugin_id,
                     codex_home=app.codex_home,
+                    loaded_sources=dict(_LOCAL_SOURCE_ATTESTATIONS),
                 )
             )
             plugin_id = identity_guard.selected_plugin_id

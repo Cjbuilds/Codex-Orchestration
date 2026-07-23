@@ -172,6 +172,41 @@ def set_plugin_enabled(
         )
 
 
+def wait_for_plugin_tree_stable(root: Path) -> None:
+    """Wait for Codex's asynchronous cache refresh to stop replacing payload files."""
+
+    previous: str | None = None
+    consecutive = 0
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        try:
+            hasher = hashlib.sha256()
+            for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
+                info = path.lstat()
+                relative = path.relative_to(root).as_posix().encode("utf-8")
+                hasher.update(relative)
+                hasher.update(
+                    f"|{info.st_dev}|{info.st_ino}|{info.st_mode}|{info.st_size}|{info.st_mtime_ns}|".encode()
+                )
+                if stat.S_ISREG(info.st_mode):
+                    hasher.update(path.read_bytes())
+            current = hasher.hexdigest()
+        except (FileNotFoundError, PermissionError, OSError):
+            previous = None
+            consecutive = 0
+            time.sleep(0.2)
+            continue
+        if current == previous:
+            consecutive += 1
+            if consecutive >= 3:
+                return
+        else:
+            previous = current
+            consecutive = 0
+        time.sleep(0.2)
+    raise SmokeFailure("Codex plugin cache did not become stable after enablement change")
+
+
 def probe_mcp_subprocess(
     script: Path,
     *,
@@ -1000,6 +1035,7 @@ def main() -> int:
                 enabled=False,
                 cwd=project,
             )
+            wait_for_plugin_tree_stable(alternate_installed_root)
             disabled_sibling_inventory = run_json(
                 [codex, "plugin", "list", "--json"], cwd=project, env=env
             )
@@ -1074,6 +1110,7 @@ def main() -> int:
                 enabled=False,
                 cwd=project,
             )
+            wait_for_plugin_tree_stable(alternate_installed_root)
             disabled_saved_inventory = run_json(
                 [codex, "plugin", "list", "--json"], cwd=project, env=env
             )
@@ -1147,6 +1184,7 @@ def main() -> int:
                 enabled=True,
                 cwd=project,
             )
+            wait_for_plugin_tree_stable(installed_root)
             assert_equal(
                 installed_entry(
                     run_json(

@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 import stat
 import subprocess
+import sys
 import tempfile
 from typing import Any, Mapping, Sequence
 
@@ -24,6 +25,15 @@ LEGACY_PLUGIN_ID = "codex-orchestration@codex-orchestration"
 MAX_OUTPUT_BYTES = 1024 * 1024
 DEFAULT_TIMEOUT_SECONDS = 15.0
 _MARKETPLACE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_SOURCE_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+_REQUIRED_LOADED_SOURCE_MODULES = frozenset(
+    {"external_cli_trust", "external_credentials", "plugin_identity", "routing_state"}
+)
+_ALLOWED_LOADED_SOURCE_MODULES = _REQUIRED_LOADED_SOURCE_MODULES | {
+    "fable_advisor_mcp",
+    "kimi_designer_mcp",
+    "qwen_advisor_mcp",
+}
 
 
 class PluginIdentityError(RuntimeError):
@@ -48,6 +58,42 @@ class SelectionError(PluginIdentityError):
 
 class IdentityDriftError(PluginIdentityError):
     pass
+
+
+class _BytecodeIsolation:
+    """Make package-local bytecode non-executable for one guarded transaction."""
+
+    def __init__(self) -> None:
+        self.cache_root: Path | None = None
+        self._temporary: tempfile.TemporaryDirectory[str] | None = None
+        self._previous_prefix: str | None = None
+        self._previous_dont_write = False
+
+    def __enter__(self) -> "_BytecodeIsolation":
+        if self._temporary is not None:
+            raise PackageIdentityError("Bytecode isolation is already active.")
+        self._previous_prefix = sys.pycache_prefix
+        self._previous_dont_write = sys.dont_write_bytecode
+        self._temporary = tempfile.TemporaryDirectory(
+            prefix="codex-orchestration-bytecode-"
+        )
+        self.cache_root = Path(self._temporary.name).resolve()
+        sys.pycache_prefix = str(self.cache_root)
+        sys.dont_write_bytecode = True
+        return self
+
+    def close(self) -> None:
+        temporary = self._temporary
+        if temporary is None:
+            return
+        sys.pycache_prefix = self._previous_prefix
+        sys.dont_write_bytecode = self._previous_dont_write
+        self._temporary = None
+        self.cache_root = None
+        temporary.cleanup()
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        self.close()
 
 
 def _canonical_json(value: Any) -> bytes:
@@ -315,6 +361,46 @@ class _Retained:
             result["sha256"] = hasher.hexdigest()
         return result
 
+    def live_snapshot(self, *, include_hash: bool) -> dict[str, Any]:
+        """Reopen the live POSIX pathname and bind it to the retained object."""
+
+        retained = self.snapshot(include_hash=include_hash)
+        if os.name == "nt":
+            # The retained Windows handle denies delete sharing, so same-name
+            # replacement cannot occur while the transaction is active.
+            return retained
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        if self.directory:
+            flags |= getattr(os, "O_DIRECTORY", 0)
+        try:
+            descriptor = os.open(self.path, flags)
+        except OSError as error:
+            raise IdentityDriftError(
+                "Plugin payload pathname could not be reopened safely."
+            ) from error
+        try:
+            info = os.fstat(descriptor)
+            live: dict[str, Any] = {
+                "identity": f"{info.st_dev:x}:{info.st_ino:x}",
+                "mode": info.st_mode,
+                "size": info.st_size,
+                "links": info.st_nlink,
+            }
+            if include_hash:
+                hasher = hashlib.sha256()
+                while True:
+                    chunk = os.read(descriptor, 1024 * 128)
+                    if not chunk:
+                        break
+                    hasher.update(chunk)
+                live["sha256"] = hasher.hexdigest()
+        finally:
+            os.close(descriptor)
+        if live != retained:
+            raise IdentityDriftError("Plugin payload pathname identity drifted.")
+        return retained
+
     def close(self) -> None:
         if self.fd is not None:
             os.close(self.fd)
@@ -322,6 +408,66 @@ class _Retained:
         if self.handle is not None and os.name == "nt":
             _kernel32.CloseHandle(self.handle)
             self.handle = None
+
+
+def _loaded_source_records(
+    value: Mapping[str, Mapping[str, Any]], executing_plugin_root: Path
+) -> dict[str, dict[str, Any]]:
+    names = set(value)
+    if not _REQUIRED_LOADED_SOURCE_MODULES.issubset(names) or not names.issubset(
+        _ALLOWED_LOADED_SOURCE_MODULES
+    ):
+        raise PackageIdentityError("Loaded plugin-local source set is incomplete.")
+    scripts_root = (
+        executing_plugin_root / "skills" / "codex-orchestration" / "scripts"
+    )
+    result: dict[str, dict[str, Any]] = {}
+    for name in sorted(names):
+        raw = value[name]
+        if not isinstance(raw, Mapping) or set(raw) != {
+            "path",
+            "device",
+            "inode",
+            "size",
+            "sha256",
+        }:
+            raise PackageIdentityError("Loaded plugin-local source record is malformed.")
+        expected = Path(os.path.abspath(scripts_root / f"{name}.py"))
+        supplied = raw["path"]
+        if not isinstance(supplied, str) or _path_key(supplied) != _path_key(expected):
+            raise PackageIdentityError("Loaded plugin-local source path is invalid.")
+        integers = (raw["device"], raw["inode"], raw["size"])
+        if any(type(item) is not int or item < 0 for item in integers):
+            raise PackageIdentityError("Loaded plugin-local source identity is invalid.")
+        digest = raw["sha256"]
+        if not isinstance(digest, str) or _SOURCE_SHA_RE.fullmatch(digest) is None:
+            raise PackageIdentityError("Loaded plugin-local source digest is invalid.")
+        retained = _Retained(expected, directory=False)
+        try:
+            if retained.fd is None:
+                raise PackageIdentityError(
+                    "Loaded plugin-local source handle is unavailable."
+                )
+            info = os.fstat(retained.fd)
+            snapshot = retained.live_snapshot(include_hash=True)
+        finally:
+            retained.close()
+        if int(info.st_dev) != raw["device"] or int(info.st_ino) != raw["inode"]:
+            raise IdentityDriftError(
+                f"Loaded plugin-local source path identity drifted: {name}."
+            )
+        if snapshot["size"] != raw["size"] or snapshot["sha256"] != digest:
+            raise IdentityDriftError(
+                f"Loaded plugin-local source content drifted: {name}."
+            )
+        result[name] = {
+            "path": _path_key(expected),
+            "device": raw["device"],
+            "inode": raw["inode"],
+            "size": raw["size"],
+            "sha256": digest,
+        }
+    return result
 
 
 class _Package:
@@ -461,7 +607,7 @@ class _Package:
 
     @property
     def root_identity(self) -> str:
-        return self.items[0][1].snapshot(include_hash=False)["identity"]
+        return self.items[0][1].live_snapshot(include_hash=False)["identity"]
 
     def _fingerprint(self, *, include_file_identity: bool) -> str:
         if self._enumerate_names() != tuple(relative for relative, _ in self.items):
@@ -472,9 +618,9 @@ class _Package:
             raise IdentityDriftError("Plugin bytecode names drifted.")
         payload = []
         for relative, retained in self.items:
+            snap = retained.live_snapshot(include_hash=not retained.directory)
             if retained.directory:
                 continue
-            snap = retained.snapshot(include_hash=True)
             if not stat.S_ISREG(snap["mode"]) or snap["links"] != 1:
                 raise IdentityDriftError("Plugin payload identity drifted.")
             item = {
@@ -485,11 +631,9 @@ class _Package:
             if include_file_identity:
                 item["file_identity"] = snap["identity"]
             payload.append(item)
-        if include_file_identity:
-            for relative, retained in self.ignored_items:
-                if retained.directory:
-                    continue
-                snap = retained.snapshot(include_hash=True)
+        for relative, retained in self.ignored_items:
+            snap = retained.live_snapshot(include_hash=not retained.directory)
+            if include_file_identity and not retained.directory:
                 if not stat.S_ISREG(snap["mode"]) or snap["links"] != 1:
                     raise IdentityDriftError("Plugin bytecode identity drifted.")
                 item = {
@@ -500,6 +644,9 @@ class _Package:
                     "file_identity": snap["identity"],
                 }
                 payload.append(item)
+        # Rebind the live root after traversal so a root swap during inspection
+        # cannot pass on only the opening observation.
+        self.items[0][1].live_snapshot(include_hash=False)
         return _digest(payload)
 
     def fingerprint(self) -> str:
@@ -519,7 +666,7 @@ class _Package:
 
 
 def _client_identity(codex_binary: Path, retained: _Retained) -> dict[str, Any]:
-    snap = retained.snapshot(include_hash=True)
+    snap = retained.live_snapshot(include_hash=True)
     if not stat.S_ISREG(snap["mode"]) or snap["links"] != 1:
         raise PackageIdentityError("Codex client identity is not a regular file.")
     return {
@@ -793,6 +940,7 @@ class PluginIdentityGuard:
         *,
         saved_plugin_id: str | None = None,
         codex_home: str | os.PathLike[str] | None = None,
+        loaded_sources: Mapping[str, Mapping[str, Any]] | None = None,
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
     ) -> None:
         supplied_binary = Path(codex_binary)
@@ -803,6 +951,11 @@ class PluginIdentityGuard:
         self.selector = selector
         self.saved_plugin_id = saved_plugin_id
         self.codex_home = codex_home
+        self.loaded_sources = (
+            {name: dict(record) for name, record in loaded_sources.items()}
+            if loaded_sources is not None
+            else None
+        )
         self.timeout = timeout
         self.selected_plugin_id = ""
         self.executing_plugin_id = ""
@@ -814,9 +967,17 @@ class PluginIdentityGuard:
         self._package: _Package | None = None
         self._selected_template: dict[str, Any] | None = None
         self._executing_template: dict[str, Any] | None = None
+        self._bytecode_isolation: _BytecodeIsolation | None = None
+        self._loaded_source_records: dict[str, dict[str, Any]] = {}
 
     def __enter__(self) -> "PluginIdentityGuard":
         try:
+            self._bytecode_isolation = _BytecodeIsolation()
+            self._bytecode_isolation.__enter__()
+            if self.loaded_sources is not None:
+                self._loaded_source_records = _loaded_source_records(
+                    self.loaded_sources, self.executing_plugin_root
+                )
             self._client = _Retained(self.codex_binary, directory=False)
             self._executing_package = _Package(self.executing_plugin_root)
             client = _client_identity(self.codex_binary, self._client)
@@ -870,6 +1031,7 @@ class PluginIdentityGuard:
                 "namespace": PLUGIN_NAME,
                 "selector": self.selector,
                 "client": client,
+                "loaded_sources": self._loaded_source_records,
                 "selected": selected_second,
                 "executing": _operation_selected_record(
                     executing_second, self._executing_package
@@ -917,6 +1079,13 @@ class PluginIdentityGuard:
             "namespace": PLUGIN_NAME,
             "selector": self.selector,
             "client": _client_identity(self.codex_binary, self._client),
+            "loaded_sources": (
+                _loaded_source_records(
+                    self.loaded_sources, self.executing_plugin_root
+                )
+                if self.loaded_sources is not None
+                else {}
+            ),
             "selected": selected,
             "executing": _operation_selected_record(
                 executing, self._executing_package
@@ -930,12 +1099,16 @@ class PluginIdentityGuard:
             package.close()
         self._packages.clear()
         self._package = None
+        self._loaded_source_records.clear()
         if self._executing_package:
             self._executing_package.close()
             self._executing_package = None
         if self._client:
             self._client.close()
             self._client = None
+        if self._bytecode_isolation:
+            self._bytecode_isolation.close()
+            self._bytecode_isolation = None
 
     def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
         self.close()
@@ -948,6 +1121,7 @@ def guard_plugin_identity(
     *,
     saved_plugin_id: str | None = None,
     codex_home: str | os.PathLike[str] | None = None,
+    loaded_sources: Mapping[str, Mapping[str, Any]] | None = None,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
 ) -> PluginIdentityGuard:
     return PluginIdentityGuard(
@@ -956,5 +1130,6 @@ def guard_plugin_identity(
         selector,
         saved_plugin_id=saved_plugin_id,
         codex_home=codex_home,
+        loaded_sources=loaded_sources,
         timeout=timeout,
     )

@@ -640,6 +640,15 @@ class GuardTests(IdentityFixture):
         nested.mkdir()
         (nested / "ignored.pyo").write_bytes(b"runtime metadata")
         with self.guard() as guard:
+            self.assertIsNotNone(guard._bytecode_isolation)
+            self.assertIsNotNone(guard._bytecode_isolation.cache_root)
+            self.assertEqual(
+                Path(sys.pycache_prefix or ""),
+                guard._bytecode_isolation.cache_root,
+            )
+            self.assertFalse(
+                guard._bytecode_isolation.cache_root.is_relative_to(self.cache)
+            )
             self.assertEqual(
                 guard._package.content_fingerprint(),
                 guard._executing_package.content_fingerprint(),
@@ -743,6 +752,74 @@ class GuardTests(IdentityFixture):
                 with mock.patch.object(payload, "snapshot", side_effect=drifted):
                     with self.assertRaises(IDENTITY.IdentityDriftError):
                         guard.assert_unchanged("mutation")
+
+    @unittest.skipUnless(os.name == "posix", "POSIX same-name replacement semantics")
+    def test_posix_same_name_file_replacement_is_caught(self):
+        with self.guard(
+            inventories=[[self.record()], [self.record()], [self.record()]]
+        ) as guard:
+            target = self.plugin / "skills" / "SKILL.md"
+            replacement = target.with_name("replacement.md")
+            replacement.write_bytes(target.read_bytes())
+            os.replace(replacement, target)
+            with self.assertRaisesRegex(
+                IDENTITY.IdentityDriftError, "pathname identity drifted"
+            ):
+                guard.assert_unchanged("same-name file replacement")
+
+    @unittest.skipUnless(os.name == "posix", "POSIX same-name replacement semantics")
+    def test_posix_same_name_nested_directory_replacement_is_caught(self):
+        with self.guard(
+            inventories=[[self.record()], [self.record()], [self.record()]]
+        ) as guard:
+            target = self.plugin / "skills"
+            moved = self.root / "skills-original"
+            target.rename(moved)
+            shutil.copytree(moved, target)
+            with self.assertRaisesRegex(
+                IDENTITY.IdentityDriftError, "pathname identity drifted"
+            ):
+                guard.assert_unchanged("same-name directory replacement")
+
+    @unittest.skipUnless(os.name == "posix", "POSIX same-name replacement semantics")
+    def test_posix_same_name_package_root_replacement_is_caught(self):
+        with self.guard(
+            inventories=[[self.record()], [self.record()], [self.record()]]
+        ) as guard:
+            moved = self.plugin.with_name("plugin-original")
+            self.plugin.rename(moved)
+            shutil.copytree(moved, self.plugin)
+            with self.assertRaisesRegex(
+                IDENTITY.IdentityDriftError, "pathname identity drifted"
+            ):
+                guard.assert_unchanged("same-name package replacement")
+
+    @unittest.skipUnless(os.name == "posix", "POSIX same-name replacement semantics")
+    def test_posix_same_name_client_replacement_is_caught(self):
+        with self.guard(
+            inventories=[[self.record()], [self.record()], [self.record()]]
+        ) as guard:
+            replacement = self.client.with_name("replacement-codex")
+            shutil.copyfile(self.client, replacement)
+            os.replace(replacement, self.client)
+            with self.assertRaisesRegex(
+                IDENTITY.IdentityDriftError, "pathname identity drifted"
+            ):
+                guard.assert_unchanged("same-name client replacement")
+
+    @unittest.skipUnless(os.name == "posix", "POSIX no-follow replacement semantics")
+    def test_posix_symlink_replacement_is_not_followed(self):
+        with self.guard(
+            inventories=[[self.record()], [self.record()], [self.record()]]
+        ) as guard:
+            target = self.plugin / "skills" / "SKILL.md"
+            moved = target.with_name("original.md")
+            target.rename(moved)
+            target.symlink_to(moved)
+            with self.assertRaisesRegex(
+                IDENTITY.IdentityDriftError, "could not be reopened safely"
+            ):
+                guard.assert_unchanged("symlink replacement")
 
     def test_setup_rejects_cache_alias(self):
         alias = self.root / "cache-alias"
