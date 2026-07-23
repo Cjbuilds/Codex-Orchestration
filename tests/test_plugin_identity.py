@@ -45,10 +45,10 @@ class IdentityFixture(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
-    def record(self, *, plugin_id="codex-orchestration@market", marketplace="market", root=None, version="1.0.0", enabled=True, installed=True, source_type="local", marketplace_type="git", marketplace_source="https://example.invalid/repo"):
+    def record(self, *, plugin_id="codex-orchestration@market", name="codex-orchestration", marketplace="market", root=None, version="1.0.0", enabled=True, installed=True, source_type="local", marketplace_type="git", marketplace_source="https://example.invalid/repo"):
         return {
             "pluginId": plugin_id,
-            "name": "codex-orchestration",
+            "name": name,
             "marketplaceName": marketplace,
             "version": version,
             "installed": installed,
@@ -110,6 +110,31 @@ class DigestTests(IdentityFixture):
         shutil.copytree(self.plugin, extra)
         added = self.record(plugin_id="codex-orchestration@extra", marketplace="extra", root=extra)
         self.assertNotEqual(baseline, self.canonical([self.record(), added])[1])
+
+    def test_unrelated_valid_installed_plugin_is_not_opened_digested_or_selected(self):
+        unrelated = self.record(
+            plugin_id="different-plugin@other",
+            name="different-plugin",
+            marketplace="other",
+            root=self.root / "missing-unrelated-source",
+            source_type="unsupported-unrelated-source",
+        )
+        records, packages = IDENTITY._inventory(
+            {"installed": [self.record(), unrelated], "available": []}
+        )
+        try:
+            self.assertEqual(len(records), 1)
+            self.assertEqual(set(packages), {"codex-orchestration@market"})
+            self.assertEqual(
+                IDENTITY._digest(records), self.canonical([self.record()])[1]
+            )
+            selected = IDENTITY._select(
+                records, "setup", self.cache, None, self.codex_home
+            )
+            self.assertEqual(selected["plugin_id"], "codex-orchestration@market")
+        finally:
+            for package in packages.values():
+                package.close()
 
     def test_operation_digest_has_independent_inputs(self):
         selected = {"plugin_id": "codex-orchestration@market", "version": "1"}
@@ -349,6 +374,25 @@ class FormatAndCommandTests(IdentityFixture):
 
 
 class GuardTests(IdentityFixture):
+    def test_colliding_plugin_id_with_contradictory_name_is_rejected(self):
+        contradictory = self.record(name="different-plugin")
+        inventory = {
+            "installed": [self.record(), contradictory],
+            "available": [],
+        }
+        with mock.patch.object(IDENTITY, "run_inventory", return_value=inventory):
+            with self.assertRaisesRegex(
+                IDENTITY.InventoryFormatError,
+                "^Plugin inventory identity fields are inconsistent\\.$",
+            ):
+                with IDENTITY.PluginIdentityGuard(
+                    self.client,
+                    self.cache,
+                    "setup",
+                    codex_home=self.codex_home,
+                ):
+                    pass
+
     def test_different_payload_at_exact_cache_coordinate_is_rejected_before_entry(self):
         (self.cache / "skills" / "SKILL.md").write_text(
             "stale cache payload", encoding="utf-8"

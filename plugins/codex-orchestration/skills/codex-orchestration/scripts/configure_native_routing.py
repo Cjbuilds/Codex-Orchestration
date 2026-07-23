@@ -946,6 +946,19 @@ def _validate_state_config(state: dict[str, Any] | None, config_path: Path) -> N
         )
 
 
+def _fsync_directory(path: Path) -> None:
+    if sys.platform == "win32":
+        # Python does not expose a supported directory-fsync handle on Windows.
+        # Preserve the prior best-effort behavior instead of warning on every
+        # successful Windows state transaction.
+        return
+    directory_fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
 def _write_state(
     path: Path,
     state: dict[str, Any],
@@ -960,6 +973,7 @@ def _write_state(
         prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
     )
     temp_path = Path(temporary)
+    captured: Path | None = None
     try:
         fchmod = getattr(os, "fchmod", None)
         if callable(fchmod):
@@ -988,26 +1002,38 @@ def _write_state(
                     "it was not overwritten.",
                     exc,
                 )
+        try:
+            _fsync_directory(path.parent)
+        except OSError as exc:
+            recovery = (
+                f" Prior-state recovery remains at {captured}." if captured else ""
+            )
+            print(
+                "WARNING: routing state was published, but directory durability "
+                f"could not be confirmed.{recovery} Error: {exc}",
+                file=sys.stderr,
+            )
+        else:
+            if captured is None:
+                return hashlib.sha256(payload_bytes).hexdigest()
             try:
                 captured.unlink()
             except OSError as exc:
-                # Publication is already complete. Reporting this as a failed write
-                # would make the caller roll config back while leaving the new state
-                # live, so retain the harmless prior-state recovery object and warn.
                 print(
                     "WARNING: routing state was published, but the prior-state "
                     f"recovery artifact remains at {captured}: {exc}",
                     file=sys.stderr,
                 )
-        try:
-            directory_fd = os.open(path.parent, os.O_RDONLY)
-        except OSError:
-            directory_fd = None
-        if directory_fd is not None:
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+            else:
+                try:
+                    _fsync_directory(path.parent)
+                except OSError as exc:
+                    print(
+                        "WARNING: routing state was published and prior-state "
+                        "recovery cleanup completed, but cleanup directory durability "
+                        f"could not be confirmed: {exc}",
+                        file=sys.stderr,
+                    )
     finally:
         try:
             os.close(fd)
@@ -1032,27 +1058,37 @@ def _remove_state(
         _assert_state_digest(path, None)
         return
     captured = _capture_expected_state(path, expected_digest)
-    try:
-        captured.unlink()
-    except OSError as exc:
-        _restore_captured_state(
-            path,
-            captured,
-            "Could not remove the captured routing state.",
-            exc,
-        )
     if path.exists():
         raise ConfigurationError(
             "A newer routing-state pathname appeared during removal; it was preserved."
         )
     try:
-        directory_fd = os.open(path.parent, os.O_RDONLY)
-    except OSError:
+        _fsync_directory(path.parent)
+    except OSError as exc:
+        print(
+            "WARNING: routing state was removed, but directory durability could not "
+            f"be confirmed. Prior-state recovery remains at {captured}. Error: {exc}",
+            file=sys.stderr,
+        )
         return
     try:
-        os.fsync(directory_fd)
-    finally:
-        os.close(directory_fd)
+        captured.unlink()
+    except OSError as exc:
+        print(
+            "WARNING: routing state was removed, but the prior-state recovery "
+            f"artifact remains at {captured}: {exc}",
+            file=sys.stderr,
+        )
+        return
+    try:
+        _fsync_directory(path.parent)
+    except OSError as exc:
+        print(
+            "WARNING: routing state was removed and prior-state recovery cleanup "
+            "completed, but cleanup directory durability could not be confirmed: "
+            f"{exc}",
+            file=sys.stderr,
+        )
 
 
 def _agent_files_with_name(directory: Path, name: str) -> list[Path]:

@@ -74,14 +74,39 @@ def _boolean(value: Any, label: str) -> bool:
     return value
 
 
-def _plugin_id(value: Any) -> str:
+def _inventory_plugin_id(value: Any) -> tuple[str, str, str]:
     result = _text(value, "plugin ID")
     if result.count("@") != 1:
         raise InventoryFormatError("Plugin inventory has an invalid plugin ID.")
     name, marketplace = result.split("@")
-    if name != PLUGIN_NAME or _MARKETPLACE_RE.fullmatch(marketplace) is None:
+    if (
+        _MARKETPLACE_RE.fullmatch(name) is None
+        or _MARKETPLACE_RE.fullmatch(marketplace) is None
+    ):
+        raise InventoryFormatError("Plugin inventory has an invalid plugin ID.")
+    return result, name, marketplace
+
+
+def _plugin_id(value: Any) -> str:
+    result, name, _ = _inventory_plugin_id(value)
+    if name != PLUGIN_NAME:
         raise InventoryFormatError("Plugin inventory has an invalid plugin ID.")
     return result
+
+
+def _record_identity(
+    raw: Mapping[str, Any],
+) -> tuple[str, str, str, bool, bool]:
+    plugin_id, identity_name, identity_marketplace = _inventory_plugin_id(
+        raw.get("pluginId")
+    )
+    name = _text(raw.get("name"), "plugin name")
+    marketplace = _text(raw.get("marketplaceName"), "marketplace name")
+    if name != identity_name or marketplace != identity_marketplace:
+        raise InventoryFormatError("Plugin inventory identity fields are inconsistent.")
+    installed = _boolean(raw.get("installed"), "installed state")
+    enabled = _boolean(raw.get("enabled"), "enabled state")
+    return plugin_id, name, marketplace, installed, enabled
 
 
 def _canonical_path(value: Any, label: str) -> Path:
@@ -470,14 +495,8 @@ def _records(value: Any) -> list[Mapping[str, Any]]:
 
 
 def _canonical_record(raw: Mapping[str, Any], package: _Package | None = None) -> tuple[dict[str, Any], _Package]:
-    plugin_id = _plugin_id(raw.get("pluginId"))
-    name = _text(raw.get("name"), "plugin name")
-    installed = _boolean(raw.get("installed"), "installed state")
-    enabled = _boolean(raw.get("enabled"), "enabled state")
+    plugin_id, name, marketplace, installed, enabled = _record_identity(raw)
     version = _text(raw.get("version"), "plugin version")
-    marketplace = _text(raw.get("marketplaceName"), "marketplace name")
-    if name != PLUGIN_NAME or plugin_id != f"{name}@{marketplace}":
-        raise InventoryFormatError("Plugin inventory identity fields are inconsistent.")
     source = raw.get("source")
     market_source = raw.get("marketplaceSource")
     if not isinstance(source, dict) or set(source) != {"source", "path"}:
@@ -517,14 +536,11 @@ def _inventory(
     seen: set[str] = set()
     try:
         for raw in _records(value):
-            installed = raw.get("installed")
-            name = raw.get("name")
-            if type(installed) is not bool or not isinstance(name, str):
-                raise InventoryFormatError("Plugin inventory has invalid required fields.")
+            plugin_id, name, _, installed, _ = _record_identity(raw)
             if not installed or name != PLUGIN_NAME:
                 continue
             package = (
-                retained_packages.get(raw.get("pluginId"))
+                retained_packages.get(plugin_id)
                 if retained_packages is not None
                 else None
             )
@@ -559,7 +575,9 @@ def _select(
         matches = [
             record
             for record in records
-            if record["enabled"]
+            if record["name"] == PLUGIN_NAME
+            and record["installed"]
+            and record["enabled"]
             and _path_key(_expected_cache_path(codex_home, record))
             == _path_key(executing_plugin_root)
         ]

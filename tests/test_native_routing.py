@@ -2336,6 +2336,139 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertEqual(len(captures), 1)
         self.assertEqual(captures[0].lstat().st_nlink, 1)
 
+    def test_absent_state_directory_fsync_failure_is_committed(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        state = self.valid_state()
+        stderr = io.StringIO()
+
+        with (
+            mock.patch.object(
+                NATIVE,
+                "_fsync_directory",
+                side_effect=PermissionError("durability"),
+            ),
+            mock.patch.object(sys, "stderr", stderr),
+        ):
+            digest = NATIVE._write_state(state_path, state, identity_guard, None)
+
+        self.assertEqual(NATIVE._read_state_snapshot(state_path)[1], digest)
+        self.assertEqual(NATIVE._read_state(state_path), state)
+        self.assertIn("routing state was published", stderr.getvalue())
+        self.assertIn("durability could not be confirmed", stderr.getvalue())
+
+    def test_replacement_directory_fsync_failure_retains_prior_capture(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        prior_digest = NATIVE._write_state(
+            state_path, self.valid_state(), identity_guard, None
+        )
+        prior_bytes = state_path.read_bytes()
+        replacement = self.valid_state("gpt-5.6-terra")
+        stderr = io.StringIO()
+
+        with (
+            mock.patch.object(
+                NATIVE,
+                "_fsync_directory",
+                side_effect=PermissionError("durability"),
+            ),
+            mock.patch.object(sys, "stderr", stderr),
+        ):
+            digest = NATIVE._write_state(
+                state_path, replacement, identity_guard, prior_digest
+            )
+
+        self.assertEqual(NATIVE._read_state_snapshot(state_path)[1], digest)
+        self.assertEqual(NATIVE._read_state(state_path), replacement)
+        captures = list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.cas-backup"))
+        self.assertEqual(len(captures), 1)
+        self.assertEqual(captures[0].read_bytes(), prior_bytes)
+        self.assertIn(f"recovery remains at {captures[0]}", stderr.getvalue())
+
+    def test_removal_directory_fsync_failure_retains_prior_capture(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        prior_digest = NATIVE._write_state(
+            state_path, self.valid_state(), identity_guard, None
+        )
+        prior_bytes = state_path.read_bytes()
+        stderr = io.StringIO()
+
+        with (
+            mock.patch.object(
+                NATIVE,
+                "_fsync_directory",
+                side_effect=PermissionError("durability"),
+            ),
+            mock.patch.object(sys, "stderr", stderr),
+        ):
+            NATIVE._remove_state(state_path, identity_guard, prior_digest)
+
+        self.assertFalse(state_path.exists())
+        captures = list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.cas-backup"))
+        self.assertEqual(len(captures), 1)
+        self.assertEqual(captures[0].read_bytes(), prior_bytes)
+        self.assertIn("routing state was removed", stderr.getvalue())
+        self.assertIn(f"recovery remains at {captures[0]}", stderr.getvalue())
+
+    def test_replacement_cleanup_fsync_failure_does_not_fail_publication(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        prior_digest = NATIVE._write_state(
+            state_path, self.valid_state(), identity_guard, None
+        )
+        replacement = self.valid_state("gpt-5.6-terra")
+        stderr = io.StringIO()
+
+        with (
+            mock.patch.object(
+                NATIVE,
+                "_fsync_directory",
+                side_effect=[None, PermissionError("cleanup durability")],
+            ),
+            mock.patch.object(sys, "stderr", stderr),
+        ):
+            digest = NATIVE._write_state(
+                state_path, replacement, identity_guard, prior_digest
+            )
+
+        self.assertEqual(NATIVE._read_state_snapshot(state_path)[1], digest)
+        self.assertEqual(
+            list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.cas-backup")), []
+        )
+        self.assertIn("cleanup directory durability", stderr.getvalue())
+
+    def test_removal_cleanup_failure_does_not_restore_canonical(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        prior_digest = NATIVE._write_state(
+            state_path, self.valid_state(), identity_guard, None
+        )
+        original_unlink = Path.unlink
+        capture_unlinks = 0
+
+        def fail_capture_unlink(candidate: Path, missing_ok: bool = False) -> None:
+            nonlocal capture_unlinks
+            if candidate.name.endswith(".cas-backup"):
+                capture_unlinks += 1
+                if capture_unlinks == 2:
+                    raise PermissionError("cleanup")
+            original_unlink(candidate, missing_ok=missing_ok)
+
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(Path, "unlink", new=fail_capture_unlink),
+            mock.patch.object(sys, "stderr", stderr),
+        ):
+            NATIVE._remove_state(state_path, identity_guard, prior_digest)
+
+        self.assertFalse(state_path.exists())
+        captures = list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.cas-backup"))
+        self.assertEqual(len(captures), 1)
+        self.assertIn("routing state was removed", stderr.getvalue())
+        self.assertIn("recovery artifact remains", stderr.getvalue())
+
     def test_complete_restore_failure_retains_captured_prior_bytes(self) -> None:
         state_path = self.home / NATIVE.STATE_FILENAME
         identity_guard = mock.Mock(spec=["assert_unchanged"])
@@ -2428,6 +2561,96 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertEqual(self.read_fake_config(), prior_config)
         self.assertEqual(state_path.read_bytes(), prior_state)
         self.assertEqual(state_path.lstat().st_nlink, 1)
+
+    @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
+    def test_postcommit_fsync_failures_keep_config_and_visible_state_consistent(
+        self,
+    ) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+
+        def invoke(*arguments: str) -> tuple[int, str, str]:
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            argv = [
+                str(self.installed_script),
+                "--codex-bin",
+                str(self.codex),
+                "--codex-home",
+                str(self.home),
+                "--allow-incompatible-client",
+                *arguments,
+            ]
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(sys, "stdout", stdout),
+                mock.patch.object(sys, "stderr", stderr),
+                mock.patch.dict(os.environ, self.fake_env()),
+                mock.patch.object(
+                    NATIVE,
+                    "_fsync_directory",
+                    side_effect=PermissionError("forced directory fsync failure"),
+                ),
+            ):
+                result = NATIVE.main()
+            return result, stdout.getvalue(), stderr.getvalue()
+
+        result, stdout, stderr = invoke(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "high",
+            "--apply",
+        )
+        self.assertEqual(result, 0)
+        self.assertIn("Native routing policy installed", stdout)
+        self.assertIn("directory durability could not be confirmed", stderr)
+        self.assertNotIn("rolled back", stderr)
+        state = NATIVE._read_state(state_path)
+        self.assertIsNotNone(state)
+        self.assertTrue(
+            NATIVE._managed_matches(
+                state,
+                NATIVE._current_values(self.read_fake_config(), self.plugin_id),
+            )
+        )
+
+        prior_bytes = state_path.read_bytes()
+        result, stdout, stderr = invoke(
+            "--executor-model",
+            "gpt-5.6-terra",
+            "--executor-effort",
+            "high",
+            "--apply",
+        )
+        self.assertEqual(result, 0)
+        self.assertIn("Native routing policy installed", stdout)
+        self.assertIn("Prior-state recovery remains", stderr)
+        state = NATIVE._read_state(state_path)
+        self.assertIsNotNone(state)
+        self.assertEqual(state["executor"]["model"], "gpt-5.6-terra")
+        self.assertTrue(
+            NATIVE._managed_matches(
+                state,
+                NATIVE._current_values(self.read_fake_config(), self.plugin_id),
+            )
+        )
+        captures = list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.cas-backup"))
+        self.assertEqual(len(captures), 1)
+        self.assertEqual(captures[0].read_bytes(), prior_bytes)
+
+        removed_bytes = state_path.read_bytes()
+        result, stdout, stderr = invoke("--disable", "--apply")
+        self.assertEqual(result, 0)
+        self.assertIn("Native routing disabled", stdout)
+        self.assertIn("routing state was removed", stderr)
+        self.assertFalse(state_path.exists())
+        self.assertEqual(
+            self.read_fake_config()["features"]["multi_agent_v2"],
+            {"max_concurrent_threads_per_session": 5},
+        )
+        captures = list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.cas-backup"))
+        self.assertEqual(len(captures), 2)
+        self.assertIn(removed_bytes, [capture.read_bytes() for capture in captures])
 
     def test_transaction_lock_rejects_a_concurrent_process(self) -> None:
         probe = textwrap.dedent(
