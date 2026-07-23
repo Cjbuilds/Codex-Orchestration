@@ -364,7 +364,7 @@ class _Package:
     def root_identity(self) -> str:
         return self.items[0][1].snapshot(include_hash=False)["identity"]
 
-    def fingerprint(self) -> str:
+    def _fingerprint(self, *, include_file_identity: bool) -> str:
         if self._enumerate_names() != tuple(relative for relative, _ in self.items):
             raise IdentityDriftError("Plugin payload names drifted.")
         payload = []
@@ -374,15 +374,22 @@ class _Package:
             snap = retained.snapshot(include_hash=True)
             if not stat.S_ISREG(snap["mode"]) or snap["links"] != 1:
                 raise IdentityDriftError("Plugin payload identity drifted.")
-            payload.append(
-                {
-                    "path": relative,
-                    "size": snap["size"],
-                    "file_identity": snap["identity"],
-                    "sha256": snap["sha256"],
-                }
-            )
+            item = {
+                "path": relative,
+                "size": snap["size"],
+                "sha256": snap["sha256"],
+            }
+            if include_file_identity:
+                item["file_identity"] = snap["identity"]
+            payload.append(item)
         return _digest(payload)
+
+    def fingerprint(self) -> str:
+        return self._fingerprint(include_file_identity=True)
+
+    def content_fingerprint(self) -> str:
+        """Fingerprint payload bytes and paths, excluding filesystem identity."""
+        return self._fingerprint(include_file_identity=False)
 
     def close(self) -> None:
         for _, retained in reversed(self.items):
@@ -643,6 +650,13 @@ class PluginIdentityGuard:
             )
             self.selected_plugin_id = str(selected["plugin_id"])
             self._package = self._packages[self.selected_plugin_id]
+            if (
+                self._package.content_fingerprint()
+                != self._executing_package.content_fingerprint()
+            ):
+                raise SelectionError(
+                    "Executing plugin cache payload does not match the selected source payload."
+                )
             second, transient = _inventory(
                 run_inventory(
                     self.codex_binary,

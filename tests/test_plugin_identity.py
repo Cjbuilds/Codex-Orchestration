@@ -349,6 +349,49 @@ class FormatAndCommandTests(IdentityFixture):
 
 
 class GuardTests(IdentityFixture):
+    def test_different_payload_at_exact_cache_coordinate_is_rejected_before_entry(self):
+        (self.cache / "skills" / "SKILL.md").write_text(
+            "stale cache payload", encoding="utf-8"
+        )
+        inventory = {"installed": [self.record()], "available": []}
+        with mock.patch.object(
+            IDENTITY, "run_inventory", side_effect=[inventory, inventory]
+        ) as run_inventory:
+            with self.assertRaisesRegex(
+                IDENTITY.SelectionError,
+                "^Executing plugin cache payload does not match the selected source payload\\.$",
+            ):
+                with IDENTITY.PluginIdentityGuard(
+                    self.client,
+                    self.cache,
+                    "setup",
+                    codex_home=self.codex_home,
+                ):
+                    pass
+        self.assertEqual(run_inventory.call_count, 1)
+
+    def test_identical_source_and_executing_payloads_are_accepted(self):
+        with self.guard() as guard:
+            self.assertNotEqual(
+                guard._package.root_identity,
+                guard._executing_package.root_identity,
+            )
+            self.assertEqual(
+                guard._package.content_fingerprint(),
+                guard._executing_package.content_fingerprint(),
+            )
+
+    def test_runtime_bytecode_exclusions_do_not_break_payload_equivalence(self):
+        bytecode = self.cache / "skills" / "__pycache__"
+        bytecode.mkdir()
+        (bytecode / "plugin_identity.cpython-313.pyc").write_bytes(b"runtime metadata")
+        (self.cache / "ignored.pyo").write_bytes(b"runtime metadata")
+        with self.guard() as guard:
+            self.assertEqual(
+                guard._package.content_fingerprint(),
+                guard._executing_package.content_fingerprint(),
+            )
+
     def test_capture_and_recheck(self):
         with self.guard(inventories=[[self.record()], [self.record()], [self.record()]]) as guard:
             self.assertEqual(guard.selected_plugin_id, "codex-orchestration@market")
@@ -365,9 +408,8 @@ class GuardTests(IdentityFixture):
         with self.guard() as first:
             full_digest = first.full_inventory_sha256
             operation_digest = first.operation_identity_sha256
-        (self.cache / "skills" / "SKILL.md").write_text(
-            "new cache identity", encoding="utf-8"
-        )
+        shutil.rmtree(self.cache)
+        shutil.copytree(self.plugin, self.cache)
         with self.guard() as second:
             self.assertEqual(second.full_inventory_sha256, full_digest)
             self.assertNotEqual(second.operation_identity_sha256, operation_digest)
