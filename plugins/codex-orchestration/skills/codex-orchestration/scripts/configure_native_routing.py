@@ -856,8 +856,10 @@ def _detach_canonical_link_if_same(
     detached = Path(temporary)
     preserve_detached = False
     try:
-        detached.unlink()
         try:
+            # Replacing the same-directory placeholder is atomic and avoids a
+            # pre-capture unlink failure that could leave the invalid canonical
+            # hard link live.
             os.replace(path, detached)
         except FileNotFoundError:
             return False
@@ -890,9 +892,19 @@ def _detach_canonical_link_if_same(
             detached.unlink()
         except OSError as exc:
             preserve_detached = True
+            try:
+                owned_path.unlink()
+            except OSError as owned_exc:
+                raise ConfigurationError(
+                    f"{message} The owned canonical pathname was captured and is "
+                    "no longer live, but all private-link cleanup failed; both "
+                    f"recovery paths remain at {owned_path} and {detached}: "
+                    f"{exc}; {owned_exc}"
+                ) from cause
             raise ConfigurationError(
                 f"{message} The owned canonical pathname was captured, but its "
-                f"private detached link remains at {detached}: {exc}"
+                "detached-link cleanup failed. Its other private link was "
+                f"removed and recovery bytes remain at {detached}: {exc}"
             ) from cause
         return True
     finally:

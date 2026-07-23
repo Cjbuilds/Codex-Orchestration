@@ -2420,6 +2420,162 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertTrue(captured.exists())
         self.assertEqual(captured.lstat().st_nlink, 1)
 
+    def test_detach_placeholder_never_requires_pre_capture_unlink(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        original_unlink = Path.unlink
+        temp_unlinks = 0
+
+        def fault_if_placeholder_unlinked(
+            candidate: Path, missing_ok: bool = False
+        ) -> None:
+            nonlocal temp_unlinks
+            if candidate.parent == self.home and candidate.name.endswith(".tmp"):
+                temp_unlinks += 1
+                if temp_unlinks == 1:
+                    raise PermissionError("forced state temp cleanup failure")
+            if (
+                candidate.parent == self.home
+                and candidate.name.endswith(".cas-detach")
+                and candidate.exists()
+                and candidate.stat().st_size == 0
+            ):
+                raise AssertionError("detach placeholder unlink was attempted")
+            original_unlink(candidate, missing_ok=missing_ok)
+
+        with mock.patch.object(Path, "unlink", new=fault_if_placeholder_unlinked):
+            with self.assertRaisesRegex(
+                NATIVE.ConfigurationError, "canonical pathname was removed"
+            ):
+                NATIVE._write_state(
+                    state_path, self.valid_state(), identity_guard, None
+                )
+
+        self.assertFalse(state_path.exists())
+        retained = list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.tmp"))
+        self.assertEqual(len(retained), 1)
+        self.assertEqual(retained[0].lstat().st_nlink, 1)
+
+    def test_post_capture_detach_cleanup_failure_rolls_back_fail_closed(
+        self,
+    ) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        prior_config = {
+            "features": {
+                "multi_agent_v2": {"max_concurrent_threads_per_session": 5}
+            },
+            "unrelated": {"keep": True},
+        }
+        original_unlink = Path.unlink
+        temp_unlinks = 0
+
+        def fail_post_capture_detach(
+            candidate: Path, missing_ok: bool = False
+        ) -> None:
+            nonlocal temp_unlinks
+            if candidate.parent == self.home and candidate.name.endswith(".tmp"):
+                temp_unlinks += 1
+                if temp_unlinks == 1:
+                    raise PermissionError("forced state temp cleanup failure")
+            if candidate.parent == self.home and candidate.name.endswith(
+                ".cas-detach"
+            ):
+                raise PermissionError("forced detached cleanup failure")
+            original_unlink(candidate, missing_ok=missing_ok)
+
+        argv = [
+            str(self.installed_script),
+            "--codex-bin",
+            str(self.codex),
+            "--codex-home",
+            str(self.home),
+            "--allow-incompatible-client",
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "high",
+            "--apply",
+        ]
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(Path, "unlink", new=fail_post_capture_detach),
+            mock.patch.object(sys, "stderr", stderr),
+            mock.patch.dict(os.environ, self.fake_env()),
+        ):
+            result = NATIVE.main()
+
+        self.assertEqual(result, 2)
+        self.assertIn("other private link was removed", stderr.getvalue())
+        self.assertEqual(self.read_fake_config(), prior_config)
+        self.assertFalse(state_path.exists())
+        self.assertEqual(list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.tmp")), [])
+        detached = list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.cas-detach"))
+        self.assertEqual(len(detached), 1)
+        self.assertEqual(detached[0].lstat().st_nlink, 1)
+
+    def test_complete_private_unlink_refusal_retains_recoverable_prior_bytes(
+        self,
+    ) -> None:
+        self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "high",
+            "--apply",
+        )
+        state_path = self.home / NATIVE.STATE_FILENAME
+        prior_state = state_path.read_bytes()
+        prior_config = self.read_fake_config()
+        original_unlink = Path.unlink
+
+        def refuse_private_unlinks(
+            candidate: Path, missing_ok: bool = False
+        ) -> None:
+            if candidate.parent == self.home and (
+                candidate.name.endswith(".tmp")
+                or candidate.name.endswith(".cas-detach")
+            ):
+                raise PermissionError("forced complete private unlink refusal")
+            original_unlink(candidate, missing_ok=missing_ok)
+
+        argv = [
+            str(self.installed_script),
+            "--codex-bin",
+            str(self.codex),
+            "--codex-home",
+            str(self.home),
+            "--allow-incompatible-client",
+            "--executor-model",
+            "gpt-5.6-terra",
+            "--executor-effort",
+            "high",
+            "--apply",
+        ]
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(Path, "unlink", new=refuse_private_unlinks),
+            mock.patch.object(sys, "stderr", stderr),
+            mock.patch.dict(os.environ, self.fake_env()),
+        ):
+            result = NATIVE.main()
+
+        self.assertEqual(result, 2)
+        self.assertIn("both recovery paths remain", stderr.getvalue())
+        self.assertEqual(self.read_fake_config(), prior_config)
+        self.assertFalse(state_path.exists())
+        retained = list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.tmp"))
+        detached = list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.cas-detach"))
+        captured = list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.cas-backup"))
+        self.assertEqual(len(retained), 1)
+        self.assertEqual(len(detached), 1)
+        self.assertEqual(retained[0].lstat().st_nlink, 2)
+        self.assertEqual(detached[0].lstat().st_nlink, 2)
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0].read_bytes(), prior_state)
+        self.assertEqual(captured[0].lstat().st_nlink, 1)
+
     def test_state_cas_preserves_write_after_captured_validation(self) -> None:
         state_path = self.home / NATIVE.STATE_FILENAME
         identity_guard = mock.Mock(spec=["assert_unchanged"])
