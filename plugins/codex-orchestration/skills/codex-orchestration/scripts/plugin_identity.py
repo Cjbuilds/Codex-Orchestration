@@ -565,31 +565,53 @@ def _inventory(
         raise
 
 
-def _select(
+def _enabled_executing_record(
+    records: Sequence[Mapping[str, Any]],
+    executing_plugin_root: Path,
+    codex_home: str | os.PathLike[str] | None,
+) -> Mapping[str, Any]:
+    if codex_home is None:
+        raise SelectionError("Effective CODEX_HOME is required for plugin cache identity.")
+    _validate_exact_cache_path(executing_plugin_root)
+    matches = [
+        record
+        for record in records
+        if record["name"] == PLUGIN_NAME
+        and record["installed"]
+        and record["enabled"]
+        and _path_key(_expected_cache_path(codex_home, record))
+        == _path_key(executing_plugin_root)
+    ]
+    if len(matches) != 1:
+        raise SelectionError("Enabled executing plugin identity is missing or ambiguous.")
+    return matches[0]
+
+
+def _select_identities(
     records: Sequence[Mapping[str, Any]],
     selector: str,
     executing_plugin_root: Path,
     saved_plugin_id: str | None,
     codex_home: str | os.PathLike[str] | None,
-) -> Mapping[str, Any]:
-    if selector in {"setup", "repair"}:
-        if codex_home is None:
-            raise SelectionError("Effective CODEX_HOME is required for setup or repair.")
-        _validate_exact_cache_path(executing_plugin_root)
-        matches = [
-            record
-            for record in records
-            if record["name"] == PLUGIN_NAME
-            and record["installed"]
-            and record["enabled"]
-            and _path_key(_expected_cache_path(codex_home, record))
-            == _path_key(executing_plugin_root)
-        ]
-        if len(matches) != 1:
-            raise SelectionError("Enabled executing plugin identity is missing or ambiguous.")
-        if selector == "repair" and saved_plugin_id is not None and _plugin_id(saved_plugin_id) != matches[0]["plugin_id"]:
-            raise SelectionError("Saved plugin identity does not match the executing plugin.")
-        return matches[0]
+) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+    if selector in {"setup", "repair", "status"}:
+        executing = _enabled_executing_record(
+            records, executing_plugin_root, codex_home
+        )
+        if selector == "repair" and saved_plugin_id is not None:
+            if _plugin_id(saved_plugin_id) != executing["plugin_id"]:
+                raise SelectionError(
+                    "Saved plugin identity does not match the executing plugin."
+                )
+        if selector == "status" and saved_plugin_id is not None:
+            target = _plugin_id(saved_plugin_id)
+            matches = [record for record in records if record["plugin_id"] == target]
+            if len(matches) != 1:
+                raise SelectionError(
+                    "Saved status plugin identity is missing or ambiguous."
+                )
+            return matches[0], executing
+        return executing, executing
     if selector == "disable-schema7":
         if saved_plugin_id is None:
             raise SelectionError("Saved plugin identity is required for schema-7 disable.")
@@ -601,7 +623,24 @@ def _select(
     matches = [record for record in records if record["plugin_id"] == target]
     if len(matches) != 1:
         raise SelectionError("Requested installed plugin identity is missing or ambiguous.")
-    return matches[0]
+    return matches[0], matches[0]
+
+
+def _select(
+    records: Sequence[Mapping[str, Any]],
+    selector: str,
+    executing_plugin_root: Path,
+    saved_plugin_id: str | None,
+    codex_home: str | os.PathLike[str] | None,
+) -> Mapping[str, Any]:
+    selected, _ = _select_identities(
+        records,
+        selector,
+        executing_plugin_root,
+        saved_plugin_id,
+        codex_home,
+    )
+    return selected
 
 
 def _operation_selected_record(
@@ -639,6 +678,7 @@ class PluginIdentityGuard:
         self.codex_home = codex_home
         self.timeout = timeout
         self.selected_plugin_id = ""
+        self.executing_plugin_id = ""
         self.full_inventory_sha256 = ""
         self.operation_identity_sha256 = ""
         self._client: _Retained | None = None
@@ -646,6 +686,7 @@ class PluginIdentityGuard:
         self._packages: dict[str, _Package] = {}
         self._package: _Package | None = None
         self._selected_template: dict[str, Any] | None = None
+        self._executing_template: dict[str, Any] | None = None
 
     def __enter__(self) -> "PluginIdentityGuard":
         try:
@@ -660,7 +701,7 @@ class PluginIdentityGuard:
                 )
             )
             self._packages = opened
-            selected = _select(
+            selected, executing = _select_identities(
                 first,
                 self.selector,
                 self.executing_plugin_root,
@@ -668,14 +709,15 @@ class PluginIdentityGuard:
                 self.codex_home,
             )
             self.selected_plugin_id = str(selected["plugin_id"])
+            self.executing_plugin_id = str(executing["plugin_id"])
             self._package = self._packages[self.selected_plugin_id]
-            if (
-                self._package.content_fingerprint()
-                != self._executing_package.content_fingerprint()
-            ):
-                raise SelectionError(
-                    "Executing plugin cache payload does not match the selected source payload."
-                )
+            executing_source = self._packages[self.executing_plugin_id]
+            cache_fingerprint = self._executing_package.content_fingerprint()
+            for package in {self._package, executing_source}:
+                if package.content_fingerprint() != cache_fingerprint:
+                    raise SelectionError(
+                        "Executing plugin cache payload does not match the selected source payload."
+                    )
             second, transient = _inventory(
                 run_inventory(
                     self.codex_binary,
@@ -691,14 +733,19 @@ class PluginIdentityGuard:
             if first_digest != second_digest:
                 raise IdentityDriftError("Plugin inventory drifted during identity capture.")
             selected_second = next(item for item in second if item["plugin_id"] == self.selected_plugin_id)
+            executing_second = next(
+                item for item in second if item["plugin_id"] == self.executing_plugin_id
+            )
             self.full_inventory_sha256 = second_digest
             self._selected_template = dict(selected_second)
+            self._executing_template = dict(executing_second)
             self.operation_identity_sha256 = _digest({
                 "namespace": PLUGIN_NAME,
                 "selector": self.selector,
                 "client": client,
-                "selected": _operation_selected_record(
-                    selected_second, self._executing_package
+                "selected": selected_second,
+                "executing": _operation_selected_record(
+                    executing_second, self._executing_package
                 ),
             })
             return self
@@ -713,6 +760,7 @@ class PluginIdentityGuard:
             or not self._package
             or not self._executing_package
             or not self._selected_template
+            or not self._executing_template
         ):
             raise IdentityDriftError("Plugin identity guard is not active.")
         records, transient = _inventory(
@@ -730,12 +778,21 @@ class PluginIdentityGuard:
         selected = next((item for item in records if item["plugin_id"] == self.selected_plugin_id), None)
         if selected is None:
             raise IdentityDriftError(f"Selected plugin identity disappeared before {phase}.")
+        executing = next(
+            (item for item in records if item["plugin_id"] == self.executing_plugin_id),
+            None,
+        )
+        if executing is None:
+            raise IdentityDriftError(
+                f"Executing plugin identity disappeared before {phase}."
+            )
         operation = _digest({
             "namespace": PLUGIN_NAME,
             "selector": self.selector,
             "client": _client_identity(self.codex_binary, self._client),
-            "selected": _operation_selected_record(
-                selected, self._executing_package
+            "selected": selected,
+            "executing": _operation_selected_record(
+                executing, self._executing_package
             ),
         })
         if operation != self.operation_identity_sha256:

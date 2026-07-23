@@ -190,6 +190,47 @@ class SelectionTests(IdentityFixture):
         )
         self.assertEqual(selected["plugin_id"], "codex-orchestration@alternate")
 
+    def test_status_selects_saved_namespace_owner_and_exact_executing_identity(self):
+        alternate_source = self.root / "alternate-source"
+        shutil.copytree(self.plugin, alternate_source)
+        alternate_cache = (
+            self.codex_home
+            / "plugins"
+            / "cache"
+            / "alternate"
+            / "codex-orchestration"
+            / "1.0.0"
+        )
+        shutil.copytree(self.plugin, alternate_cache)
+        saved = self.record(enabled=False)
+        executing = self.record(
+            plugin_id="codex-orchestration@alternate",
+            marketplace="alternate",
+            root=alternate_source,
+        )
+        canonical, packages = IDENTITY._inventory(
+            {"installed": [saved, executing], "available": []}
+        )
+        try:
+            selected, active = IDENTITY._select_identities(
+                canonical,
+                "status",
+                alternate_cache,
+                "codex-orchestration@market",
+                self.codex_home,
+            )
+            self.assertEqual(selected["plugin_id"], "codex-orchestration@market")
+            self.assertEqual(active["plugin_id"], "codex-orchestration@alternate")
+
+            selected, active = IDENTITY._select_identities(
+                canonical, "status", alternate_cache, None, self.codex_home
+            )
+            self.assertEqual(selected["plugin_id"], active["plugin_id"])
+            self.assertEqual(active["plugin_id"], "codex-orchestration@alternate")
+        finally:
+            for package in packages.values():
+                package.close()
+
     def test_setup_requires_explicit_home_and_exact_versioned_path(self):
         canonical, packages = IDENTITY._inventory(
             {"installed": [self.record()], "available": []}
@@ -415,6 +456,45 @@ class FormatAndCommandTests(IdentityFixture):
 
 
 class GuardTests(IdentityFixture):
+    def test_status_guard_exposes_saved_and_executing_identities(self):
+        alternate_source = self.root / "alternate-source"
+        shutil.copytree(self.plugin, alternate_source)
+        alternate_cache = (
+            self.codex_home
+            / "plugins"
+            / "cache"
+            / "alternate"
+            / "codex-orchestration"
+            / "1.0.0"
+        )
+        shutil.copytree(self.plugin, alternate_cache)
+        records = [
+            self.record(enabled=False),
+            self.record(
+                plugin_id="codex-orchestration@alternate",
+                marketplace="alternate",
+                root=alternate_source,
+            ),
+        ]
+        inventory = {"installed": records, "available": []}
+        with mock.patch.object(
+            IDENTITY, "run_inventory", side_effect=[inventory, inventory, inventory]
+        ):
+            with IDENTITY.PluginIdentityGuard(
+                self.client,
+                alternate_cache,
+                "status",
+                saved_plugin_id="codex-orchestration@market",
+                codex_home=self.codex_home,
+            ) as guard:
+                self.assertEqual(
+                    guard.selected_plugin_id, "codex-orchestration@market"
+                )
+                self.assertEqual(
+                    guard.executing_plugin_id, "codex-orchestration@alternate"
+                )
+                guard.assert_unchanged("status publication")
+
     def test_colliding_plugin_id_with_contradictory_name_is_rejected(self):
         contradictory = self.record(name="different-plugin")
         inventory = {

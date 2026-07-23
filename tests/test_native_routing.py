@@ -875,6 +875,9 @@ class NativeRoutingTests(unittest.TestCase):
 
         status = self.run_script("--status")
         self.assertIn("Native policy: installed and effective", status.stdout)
+        self.assertIn(f"Plugin identity: {self.plugin_id}", status.stdout)
+        self.assertIn(f"Executing plugin identity: {self.plugin_id}", status.stdout)
+        self.assertNotIn("Plugin identity mismatch:", status.stdout)
         self.assertIn("V2 activation: not inferred", status.stdout)
         self.assertIn("Executor: gpt-5.6-luna@xhigh", status.stdout)
         self.assertIn("Designer: none", status.stdout)
@@ -890,6 +893,87 @@ class NativeRoutingTests(unittest.TestCase):
         feature = self.read_fake_config()["features"]["multi_agent_v2"]
         self.assertEqual(feature, {"max_concurrent_threads_per_session": 5})
         self.assertFalse((self.home / NATIVE.STATE_FILENAME).exists())
+
+    def test_status_uses_saved_namespace_when_an_alternate_identity_executes(self) -> None:
+        saved_id = self.plugin_id
+        self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "high",
+            "--advisor-fable",
+            "--apply",
+        )
+        state_path = self.home / NATIVE.STATE_FILENAME
+        state_before = state_path.read_bytes()
+        config = self.read_fake_config()
+        alternate_id = "codex-orchestration@alternate-status"
+        config.setdefault("plugins", {})[alternate_id] = {
+            "mcp_servers": {"fable-advisor-python3": {"enabled": False}}
+        }
+        (self.home / ".fake-user-config.json").write_text(
+            json.dumps(config), encoding="utf-8"
+        )
+        (self.home / ".fake-effective-config.json").write_text(
+            json.dumps(config), encoding="utf-8"
+        )
+        self.activate_plugin_cache(alternate_id)
+        self.write_plugin_inventory(
+            self.plugin_inventory_record(
+                saved_id, self.source_plugin_root, enabled=False
+            ),
+            self.plugin_inventory_record(
+                alternate_id, self.source_plugin_root, enabled=True
+            ),
+        )
+
+        status = self.run_script("--status", "--require-effective", check=False)
+
+        self.assertEqual(status.returncode, 1)
+        self.assertIn("Native policy: installed and effective", status.stdout)
+        self.assertIn(f"Plugin identity: {saved_id}", status.stdout)
+        self.assertIn(f"Executing plugin identity: {alternate_id}", status.stdout)
+        self.assertIn(
+            f"Plugin identity mismatch: saved namespace owner {saved_id}; "
+            f"executing cache owner {alternate_id}",
+            status.stdout,
+        )
+        self.assertIn("Advisor: Claude Fable 5 high", status.stdout)
+        self.assertNotIn("managed fields conflict", status.stdout)
+        self.assertEqual(state_path.read_bytes(), state_before)
+
+    def test_status_rechecks_exact_state_digest_before_publication(self) -> None:
+        self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "high",
+            "--apply",
+        )
+        real_assert = NATIVE._assert_state_digest
+
+        def mutate_before_publication(path: Path, digest: str | None) -> None:
+            state = json.loads(path.read_text(encoding="utf-8"))
+            state["executor"]["model"] = "gpt-5.6-terra"
+            path.write_text(json.dumps(state), encoding="utf-8")
+            real_assert(path, digest)
+
+        stdout = io.StringIO()
+        with (
+            mock.patch.dict(os.environ, self.fake_env()),
+            mock.patch.object(
+                NATIVE,
+                "_assert_state_digest",
+                side_effect=mutate_before_publication,
+            ),
+            mock.patch.object(sys, "stdout", stdout),
+            self.assertRaisesRegex(
+                NATIVE.ConfigurationError,
+                "Saved routing state changed concurrently",
+            ),
+        ):
+            NATIVE._status(self.codex, self.home, [self.codex], False)
+        self.assertEqual(stdout.getvalue(), "")
 
     def test_disable_refuses_overridden_restore_and_retains_state(self) -> None:
         self.run_script(
@@ -1176,7 +1260,9 @@ class NativeRoutingTests(unittest.TestCase):
         )
         status = self.run_script("--status", "--require-effective", check=False)
         self.assertEqual(status.returncode, 1)
-        self.assertIn("Plugin identity:", status.stdout)
+        self.assertIn(f"Plugin identity: {canonical_id}", status.stdout)
+        self.assertIn(f"Executing plugin identity: {alternate_id}", status.stdout)
+        self.assertIn("Plugin identity mismatch:", status.stdout)
 
         before_refused_setup = self.read_fake_config()
         refused_setup = self.run_script(
@@ -2042,6 +2128,9 @@ class NativeRoutingTests(unittest.TestCase):
         )
         self.assertEqual(inactive.returncode, 1)
         self.assertIn("Native policy: inactive", inactive.stdout)
+        self.assertIn(f"Plugin identity: {self.plugin_id}", inactive.stdout)
+        self.assertIn(f"Executing plugin identity: {self.plugin_id}", inactive.stdout)
+        self.assertNotIn("Plugin identity mismatch:", inactive.stdout)
 
         self.run_script(
             "--executor-model",

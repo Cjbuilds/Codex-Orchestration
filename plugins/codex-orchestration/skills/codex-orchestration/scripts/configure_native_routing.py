@@ -2018,15 +2018,21 @@ def _status_unbuffered(
     with contextlib.ExitStack() as stack:
         app = stack.enter_context(AppServer(target, codex_home))
         stack.enter_context(_transaction_directory_lock(app.codex_home))
+        state_path = app.codex_home / STATE_FILENAME
+        state, state_digest = _read_state_snapshot(state_path)
+        _validate_state_config(state, app.config_path)
+        saved_plugin_id = _state_plugin_id(state) if state is not None else None
         identity_guard = stack.enter_context(
             plugin_identity.guard_plugin_identity(
                 target,
                 EXECUTING_PLUGIN_ROOT,
-                "setup",
+                "status",
+                saved_plugin_id=saved_plugin_id,
                 codex_home=app.codex_home,
             )
         )
         plugin_id = identity_guard.selected_plugin_id
+        executing_plugin_id = identity_guard.executing_plugin_id
         workspace = Path.cwd().resolve()
         read_result = app.request(
             "config/read",
@@ -2038,15 +2044,15 @@ def _status_unbuffered(
         effective = _current_values(
             effective_config if isinstance(effective_config, dict) else {}, plugin_id
         )
-        state_path = app.codex_home / STATE_FILENAME
-        state = _read_state(state_path)
-        _validate_state_config(state, app.config_path)
-        identity_matches = state is None or _state_plugin_id(state) == plugin_id
+        state_owner_matches = state is None or _state_plugin_id(state) == plugin_id
+        execution_matches = plugin_id == executing_plugin_id
         managed_pair = _is_managed(current["mode"]) and _is_managed(
             current["usage"]
         )
         state_matches = (
-            state is not None and identity_matches and _managed_matches(state, current)
+            state is not None
+            and state_owner_matches
+            and _managed_matches(state, current)
         )
         if state is not None and managed_pair and not state_matches:
             routing_state = "managed fields conflict with local restore state"
@@ -2072,6 +2078,12 @@ def _status_unbuffered(
             routing_state = "partial or user-authored"
         print(f"Native policy: {routing_state}")
         print(f"Plugin identity: {plugin_id}")
+        print(f"Executing plugin identity: {executing_plugin_id}")
+        if not execution_matches:
+            print(
+                "Plugin identity mismatch: saved namespace owner "
+                f"{plugin_id}; executing cache owner {executing_plugin_id}"
+            )
         if routing_state == "managed fields conflict with local restore state":
             print(
                 "Recovery: run --repair as a dry run only when the saved plugin "
@@ -2191,7 +2203,8 @@ def _status_unbuffered(
             clients_compatible
             and routing_state.startswith("installed and effective")
             and state_matches
-            and identity_matches
+            and state_owner_matches
+            and execution_matches
             and agent_routes_available
             and fable_available
             and kimi_available
@@ -2200,6 +2213,7 @@ def _status_unbuffered(
             and not orphaned_roles
         )
         identity_guard.assert_unchanged("status publication")
+        _assert_state_digest(state_path, state_digest)
         if publish is not None:
             publish()
     return 1 if require_effective and not healthy else 0
