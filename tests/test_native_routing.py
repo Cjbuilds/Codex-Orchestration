@@ -11,7 +11,6 @@ import sys
 import tempfile
 import textwrap
 import unittest
-from typing import Any
 from unittest import mock
 
 
@@ -2097,6 +2096,290 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertEqual(json.loads(state_path.read_text(encoding="utf-8")), state)
         self.assertEqual(digest, NATIVE.hashlib.sha256(state_path.read_bytes()).hexdigest())
 
+    @unittest.skipUnless(sys.platform == "win32", "requires Windows rename semantics")
+    def test_rename_noreplace_windows_consumes_source_without_overwrite(self) -> None:
+        source = self.home / "rename-source"
+        destination = self.home / "rename-destination"
+        source.write_bytes(b"new")
+
+        NATIVE._rename_noreplace(source, destination)
+
+        self.assertFalse(source.exists())
+        self.assertEqual(destination.read_bytes(), b"new")
+        self.assertEqual(destination.lstat().st_nlink, 1)
+
+        source.write_bytes(b"blocked")
+        with self.assertRaises(FileExistsError):
+            NATIVE._rename_noreplace(source, destination)
+        self.assertEqual(source.read_bytes(), b"blocked")
+        self.assertEqual(destination.read_bytes(), b"new")
+
+    def test_rename_noreplace_linux_native_contract(self) -> None:
+        source = self.home / "linux-source"
+        destination = self.home / "linux-destination"
+
+        for result, error, expected in (
+            (0, 0, None),
+            (-1, NATIVE.errno.EEXIST, FileExistsError),
+            (-1, NATIVE.errno.ENOSYS, NATIVE.ConfigurationError),
+            (-1, NATIVE.errno.EACCES, OSError),
+        ):
+            with self.subTest(result=result, error=error):
+                native_rename = mock.Mock(return_value=result)
+                libc = mock.Mock()
+                libc.renameat2 = native_rename
+                patches = (
+                    mock.patch.object(NATIVE.sys, "platform", "linux"),
+                    mock.patch.object(NATIVE.ctypes, "CDLL", return_value=libc),
+                    mock.patch.object(NATIVE.ctypes, "get_errno", return_value=error),
+                    mock.patch.object(NATIVE.os, "rename", side_effect=AssertionError),
+                )
+                with patches[0], patches[1], patches[2], patches[3]:
+                    if expected is None:
+                        NATIVE._rename_noreplace(source, destination)
+                    else:
+                        with self.assertRaises(expected):
+                            NATIVE._rename_noreplace(source, destination)
+                native_rename.assert_called_once_with(
+                    -100,
+                    os.fsencode(source),
+                    -100,
+                    os.fsencode(destination),
+                    1,
+                )
+
+        with (
+            mock.patch.object(NATIVE.sys, "platform", "linux"),
+            mock.patch.object(NATIVE.ctypes, "CDLL", return_value=object()),
+        ):
+            with self.assertRaisesRegex(NATIVE.ConfigurationError, "unavailable"):
+                NATIVE._rename_noreplace(source, destination)
+
+    def test_rename_noreplace_macos_native_contract(self) -> None:
+        source = self.home / "macos-source"
+        destination = self.home / "macos-destination"
+
+        for result, error, expected in (
+            (0, 0, None),
+            (-1, NATIVE.errno.EEXIST, FileExistsError),
+            (-1, NATIVE.errno.EINVAL, NATIVE.ConfigurationError),
+            (-1, NATIVE.errno.EIO, OSError),
+        ):
+            with self.subTest(result=result, error=error):
+                native_rename = mock.Mock(return_value=result)
+                libc = mock.Mock()
+                libc.renamex_np = native_rename
+                with (
+                    mock.patch.object(NATIVE.sys, "platform", "darwin"),
+                    mock.patch.object(NATIVE.ctypes, "CDLL", return_value=libc),
+                    mock.patch.object(NATIVE.ctypes, "get_errno", return_value=error),
+                    mock.patch.object(NATIVE.os, "rename", side_effect=AssertionError),
+                ):
+                    if expected is None:
+                        NATIVE._rename_noreplace(source, destination)
+                    else:
+                        with self.assertRaises(expected):
+                            NATIVE._rename_noreplace(source, destination)
+                native_rename.assert_called_once_with(
+                    os.fsencode(source), os.fsencode(destination), 0x00000004
+                )
+
+    def test_rename_noreplace_other_platform_fails_closed(self) -> None:
+        with mock.patch.object(NATIVE.sys, "platform", "freebsd14"):
+            with self.assertRaisesRegex(NATIVE.ConfigurationError, "unsupported"):
+                NATIVE._rename_noreplace(
+                    self.home / "source", self.home / "destination"
+                )
+
+    def test_state_publication_and_restore_never_use_hard_links(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        state = self.valid_state()
+        with mock.patch.object(NATIVE.os, "link") as hard_link:
+            first_digest = NATIVE._write_state(
+                state_path, state, identity_guard, None
+            )
+            NATIVE._write_state(
+                state_path,
+                self.valid_state("gpt-5.6-terra"),
+                identity_guard,
+                first_digest,
+            )
+            hard_link.assert_not_called()
+        self.assertEqual(state_path.lstat().st_nlink, 1)
+
+    def test_existing_state_capture_failure_preserves_canonical(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        prior = self.valid_state()
+        prior_digest = NATIVE._write_state(
+            state_path, prior, identity_guard, None
+        )
+        prior_bytes = state_path.read_bytes()
+
+        with mock.patch.object(NATIVE.os, "replace", side_effect=PermissionError("capture")):
+            with self.assertRaisesRegex(NATIVE.ConfigurationError, "changed concurrently"):
+                NATIVE._write_state(
+                    state_path,
+                    self.valid_state("gpt-5.6-terra"),
+                    identity_guard,
+                    prior_digest,
+                )
+
+        self.assertEqual(state_path.read_bytes(), prior_bytes)
+        self.assertEqual(state_path.lstat().st_nlink, 1)
+
+    def test_existing_state_publication_failure_restores_prior_bytes(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        prior = self.valid_state()
+        prior_digest = NATIVE._write_state(
+            state_path, prior, identity_guard, None
+        )
+        prior_bytes = state_path.read_bytes()
+        real_rename = NATIVE._rename_noreplace
+        calls = 0
+
+        def fail_publication_then_restore(source: Path, destination: Path) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise PermissionError("publication")
+            real_rename(source, destination)
+
+        with mock.patch.object(
+            NATIVE, "_rename_noreplace", side_effect=fail_publication_then_restore
+        ):
+            with self.assertRaisesRegex(NATIVE.ConfigurationError, "appeared during publication"):
+                NATIVE._write_state(
+                    state_path,
+                    self.valid_state("gpt-5.6-terra"),
+                    identity_guard,
+                    prior_digest,
+                )
+
+        self.assertEqual(calls, 2)
+        self.assertEqual(state_path.read_bytes(), prior_bytes)
+        self.assertEqual(state_path.lstat().st_nlink, 1)
+
+    def test_prior_capture_cleanup_failure_keeps_published_state(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        prior_digest = NATIVE._write_state(
+            state_path, self.valid_state(), identity_guard, None
+        )
+        original_unlink = Path.unlink
+        capture_unlinks = 0
+
+        def fail_final_capture_unlink(candidate: Path, missing_ok: bool = False) -> None:
+            nonlocal capture_unlinks
+            if candidate.name.endswith(".cas-backup"):
+                capture_unlinks += 1
+                if capture_unlinks == 2:
+                    raise PermissionError("cleanup")
+            original_unlink(candidate, missing_ok=missing_ok)
+
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(Path, "unlink", new=fail_final_capture_unlink),
+            mock.patch.object(sys, "stderr", stderr),
+        ):
+            digest = NATIVE._write_state(
+                state_path,
+                self.valid_state("gpt-5.6-terra"),
+                identity_guard,
+                prior_digest,
+            )
+
+        self.assertEqual(NATIVE._read_state_snapshot(state_path)[1], digest)
+        self.assertEqual(state_path.lstat().st_nlink, 1)
+        self.assertIn("WARNING: routing state was published", stderr.getvalue())
+        captures = list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.cas-backup"))
+        self.assertEqual(len(captures), 1)
+        self.assertEqual(captures[0].lstat().st_nlink, 1)
+
+    def test_complete_restore_failure_retains_captured_prior_bytes(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        prior_digest = NATIVE._write_state(
+            state_path, self.valid_state(), identity_guard, None
+        )
+        prior_bytes = state_path.read_bytes()
+
+        with mock.patch.object(
+            NATIVE, "_rename_noreplace", side_effect=PermissionError("blocked")
+        ):
+            with self.assertRaisesRegex(
+                NATIVE.ConfigurationError, "restoration failed"
+            ):
+                NATIVE._write_state(
+                    state_path,
+                    self.valid_state("gpt-5.6-terra"),
+                    identity_guard,
+                    prior_digest,
+                )
+
+        self.assertFalse(state_path.exists())
+        captures = list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.cas-backup"))
+        self.assertEqual(len(captures), 1)
+        self.assertEqual(captures[0].read_bytes(), prior_bytes)
+        self.assertEqual(captures[0].lstat().st_nlink, 1)
+
+    @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
+    def test_publication_failure_restores_state_and_rolls_back_config(self) -> None:
+        self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "high",
+            "--apply",
+        )
+        state_path = self.home / NATIVE.STATE_FILENAME
+        prior_state = state_path.read_bytes()
+        prior_config = self.read_fake_config()
+        real_rename = NATIVE._rename_noreplace
+        calls = 0
+
+        def fail_publication_then_restore(source: Path, destination: Path) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise PermissionError("forced publication failure")
+            real_rename(source, destination)
+
+        argv = [
+            str(self.installed_script),
+            "--codex-bin",
+            str(self.codex),
+            "--codex-home",
+            str(self.home),
+            "--allow-incompatible-client",
+            "--executor-model",
+            "gpt-5.6-terra",
+            "--executor-effort",
+            "high",
+            "--apply",
+        ]
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(
+                NATIVE,
+                "_rename_noreplace",
+                side_effect=fail_publication_then_restore,
+            ),
+            mock.patch.object(sys, "stderr", stderr),
+            mock.patch.dict(os.environ, self.fake_env()),
+        ):
+            result = NATIVE.main()
+
+        self.assertEqual(result, 2)
+        self.assertEqual(calls, 2)
+        self.assertIn("config write was rolled back", stderr.getvalue())
+        self.assertEqual(self.read_fake_config(), prior_config)
+        self.assertEqual(state_path.read_bytes(), prior_state)
+        self.assertEqual(state_path.lstat().st_nlink, 1)
+
     def test_transaction_lock_rejects_a_concurrent_process(self) -> None:
         probe = textwrap.dedent(
             """\
@@ -2205,376 +2488,6 @@ class NativeRoutingTests(unittest.TestCase):
             NATIVE._write_state(state_path, self.valid_state(), identity_guard, None)
         self.assertEqual(state_path.read_bytes(), replacement_bytes)
 
-    def test_absent_state_temp_cleanup_failure_rolls_back_config_fail_closed(
-        self,
-    ) -> None:
-        state_path = self.home / NATIVE.STATE_FILENAME
-        prior_config = {
-            "features": {
-                "multi_agent_v2": {"max_concurrent_threads_per_session": 5}
-            },
-            "unrelated": {"keep": True},
-        }
-        original_unlink = Path.unlink
-
-        def fail_state_temp_unlink(
-            candidate: Path, missing_ok: bool = False
-        ) -> None:
-            if candidate.parent == self.home and candidate.name.endswith(".tmp"):
-                raise PermissionError("forced state temp cleanup failure")
-            original_unlink(candidate, missing_ok=missing_ok)
-
-        argv = [
-            str(self.installed_script),
-            "--codex-bin",
-            str(self.codex),
-            "--codex-home",
-            str(self.home),
-            "--allow-incompatible-client",
-            "--executor-model",
-            "gpt-5.6-luna",
-            "--executor-effort",
-            "high",
-            "--apply",
-        ]
-        stderr = io.StringIO()
-        with (
-            mock.patch.object(sys, "argv", argv),
-            mock.patch.object(Path, "unlink", new=fail_state_temp_unlink),
-            mock.patch.object(sys, "stderr", stderr),
-            mock.patch.dict(os.environ, self.fake_env()),
-        ):
-            result = NATIVE.main()
-
-        self.assertEqual(result, 2)
-        self.assertIn("canonical pathname was removed", stderr.getvalue())
-        self.assertEqual(self.read_fake_config(), prior_config)
-        self.assertFalse(state_path.exists())
-        retained = list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.tmp"))
-        self.assertEqual(len(retained), 1)
-        self.assertEqual(retained[0].lstat().st_nlink, 1)
-
-    def test_existing_state_temp_cleanup_failure_restores_state_and_config(
-        self,
-    ) -> None:
-        self.run_script(
-            "--executor-model",
-            "gpt-5.6-luna",
-            "--executor-effort",
-            "high",
-            "--apply",
-        )
-        state_path = self.home / NATIVE.STATE_FILENAME
-        prior_state = state_path.read_bytes()
-        prior_config = self.read_fake_config()
-        original_unlink = Path.unlink
-
-        def fail_state_temp_unlink(
-            candidate: Path, missing_ok: bool = False
-        ) -> None:
-            if candidate.parent == self.home and candidate.name.endswith(".tmp"):
-                raise PermissionError("forced state temp cleanup failure")
-            original_unlink(candidate, missing_ok=missing_ok)
-
-        argv = [
-            str(self.installed_script),
-            "--codex-bin",
-            str(self.codex),
-            "--codex-home",
-            str(self.home),
-            "--allow-incompatible-client",
-            "--executor-model",
-            "gpt-5.6-terra",
-            "--executor-effort",
-            "high",
-            "--apply",
-        ]
-        stderr = io.StringIO()
-        with (
-            mock.patch.object(sys, "argv", argv),
-            mock.patch.object(Path, "unlink", new=fail_state_temp_unlink),
-            mock.patch.object(sys, "stderr", stderr),
-            mock.patch.dict(os.environ, self.fake_env()),
-        ):
-            result = NATIVE.main()
-
-        self.assertEqual(result, 2)
-        self.assertIn("prior state was restored", stderr.getvalue())
-        self.assertEqual(self.read_fake_config(), prior_config)
-        self.assertEqual(state_path.read_bytes(), prior_state)
-        self.assertEqual(state_path.lstat().st_nlink, 1)
-        retained = list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.tmp"))
-        self.assertEqual(len(retained), 1)
-        self.assertEqual(retained[0].lstat().st_nlink, 1)
-        self.assertEqual(list(self.home.glob("*.cas-backup")), [])
-
-    def test_temp_cleanup_failure_preserves_concurrent_canonical_replacement(
-        self,
-    ) -> None:
-        state_path = self.home / NATIVE.STATE_FILENAME
-        identity_guard = mock.Mock(spec=["assert_unchanged"])
-        replacement_bytes = json.dumps(
-            self.valid_state("gpt-5.6-terra")
-        ).encode("utf-8")
-        original_unlink = Path.unlink
-
-        def replace_during_temp_unlink(
-            candidate: Path, missing_ok: bool = False
-        ) -> None:
-            if candidate.parent == self.home and candidate.name.endswith(".tmp"):
-                original_unlink(state_path)
-                state_path.write_bytes(replacement_bytes)
-                raise PermissionError("forced state temp cleanup failure")
-            original_unlink(candidate, missing_ok=missing_ok)
-
-        with mock.patch.object(Path, "unlink", new=replace_during_temp_unlink):
-            with self.assertRaisesRegex(
-                NATIVE.ConfigurationError, "concurrent canonical replacement"
-            ):
-                NATIVE._write_state(
-                    state_path, self.valid_state(), identity_guard, None
-                )
-
-        self.assertEqual(state_path.read_bytes(), replacement_bytes)
-        self.assertEqual(state_path.lstat().st_nlink, 1)
-        retained = list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.tmp"))
-        self.assertEqual(len(retained), 1)
-        self.assertEqual(retained[0].lstat().st_nlink, 1)
-
-    def test_temp_cleanup_recovery_preserves_second_concurrent_replacement(
-        self,
-    ) -> None:
-        state_path = self.home / NATIVE.STATE_FILENAME
-        identity_guard = mock.Mock(spec=["assert_unchanged"])
-        first_bytes = json.dumps(
-            self.valid_state("gpt-5.6-terra")
-        ).encode("utf-8")
-        second_bytes = json.dumps(
-            self.valid_state("gpt-5.6-sol")
-        ).encode("utf-8")
-        original_unlink = Path.unlink
-        original_link = os.link
-
-        def replace_during_temp_unlink(
-            candidate: Path, missing_ok: bool = False
-        ) -> None:
-            if candidate.parent == self.home and candidate.name.endswith(".tmp"):
-                original_unlink(state_path)
-                state_path.write_bytes(first_bytes)
-                raise PermissionError("forced state temp cleanup failure")
-            original_unlink(candidate, missing_ok=missing_ok)
-
-        def replace_during_detached_restore(src: Any, dst: Any, *args: Any, **kwargs: Any) -> None:
-            source = Path(src)
-            destination = Path(dst)
-            if source.name.endswith(".cas-detach") and destination == state_path:
-                state_path.write_bytes(second_bytes)
-            original_link(src, dst, *args, **kwargs)
-
-        with (
-            mock.patch.object(Path, "unlink", new=replace_during_temp_unlink),
-            mock.patch.object(os, "link", new=replace_during_detached_restore),
-        ):
-            with self.assertRaisesRegex(
-                NATIVE.ConfigurationError, "newer routing-state pathname was preserved"
-            ):
-                NATIVE._write_state(
-                    state_path, self.valid_state(), identity_guard, None
-                )
-
-        self.assertEqual(state_path.read_bytes(), second_bytes)
-        self.assertEqual(state_path.lstat().st_nlink, 1)
-        detached = list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.cas-detach"))
-        self.assertEqual(len(detached), 1)
-        self.assertEqual(detached[0].read_bytes(), first_bytes)
-        self.assertEqual(detached[0].lstat().st_nlink, 1)
-        retained = list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.tmp"))
-        self.assertEqual(len(retained), 1)
-        self.assertEqual(retained[0].lstat().st_nlink, 1)
-
-    def test_restore_cleanup_failure_detaches_invalid_canonical_link(self) -> None:
-        state_path = self.home / NATIVE.STATE_FILENAME
-        captured = self.home / ".routing-state.cas-backup"
-        captured.write_bytes(json.dumps(self.valid_state()).encode("utf-8"))
-        original_unlink = Path.unlink
-
-        def fail_capture_unlink(
-            candidate: Path, missing_ok: bool = False
-        ) -> None:
-            if candidate == captured:
-                raise PermissionError("forced captured cleanup failure")
-            original_unlink(candidate, missing_ok=missing_ok)
-
-        with mock.patch.object(Path, "unlink", new=fail_capture_unlink):
-            with self.assertRaisesRegex(
-                NATIVE.ConfigurationError, "canonical pathname was detached"
-            ):
-                NATIVE._restore_captured_state(
-                    state_path,
-                    captured,
-                    "forced restoration",
-                    RuntimeError("forced cause"),
-                )
-
-        self.assertFalse(state_path.exists())
-        self.assertTrue(captured.exists())
-        self.assertEqual(captured.lstat().st_nlink, 1)
-
-    def test_detach_placeholder_never_requires_pre_capture_unlink(self) -> None:
-        state_path = self.home / NATIVE.STATE_FILENAME
-        identity_guard = mock.Mock(spec=["assert_unchanged"])
-        original_unlink = Path.unlink
-        temp_unlinks = 0
-
-        def fault_if_placeholder_unlinked(
-            candidate: Path, missing_ok: bool = False
-        ) -> None:
-            nonlocal temp_unlinks
-            if candidate.parent == self.home and candidate.name.endswith(".tmp"):
-                temp_unlinks += 1
-                if temp_unlinks == 1:
-                    raise PermissionError("forced state temp cleanup failure")
-            if (
-                candidate.parent == self.home
-                and candidate.name.endswith(".cas-detach")
-                and candidate.exists()
-                and candidate.stat().st_size == 0
-            ):
-                raise AssertionError("detach placeholder unlink was attempted")
-            original_unlink(candidate, missing_ok=missing_ok)
-
-        with mock.patch.object(Path, "unlink", new=fault_if_placeholder_unlinked):
-            with self.assertRaisesRegex(
-                NATIVE.ConfigurationError, "canonical pathname was removed"
-            ):
-                NATIVE._write_state(
-                    state_path, self.valid_state(), identity_guard, None
-                )
-
-        self.assertFalse(state_path.exists())
-        retained = list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.tmp"))
-        self.assertEqual(len(retained), 1)
-        self.assertEqual(retained[0].lstat().st_nlink, 1)
-
-    def test_post_capture_detach_cleanup_failure_rolls_back_fail_closed(
-        self,
-    ) -> None:
-        state_path = self.home / NATIVE.STATE_FILENAME
-        prior_config = {
-            "features": {
-                "multi_agent_v2": {"max_concurrent_threads_per_session": 5}
-            },
-            "unrelated": {"keep": True},
-        }
-        original_unlink = Path.unlink
-        temp_unlinks = 0
-
-        def fail_post_capture_detach(
-            candidate: Path, missing_ok: bool = False
-        ) -> None:
-            nonlocal temp_unlinks
-            if candidate.parent == self.home and candidate.name.endswith(".tmp"):
-                temp_unlinks += 1
-                if temp_unlinks == 1:
-                    raise PermissionError("forced state temp cleanup failure")
-            if candidate.parent == self.home and candidate.name.endswith(
-                ".cas-detach"
-            ):
-                raise PermissionError("forced detached cleanup failure")
-            original_unlink(candidate, missing_ok=missing_ok)
-
-        argv = [
-            str(self.installed_script),
-            "--codex-bin",
-            str(self.codex),
-            "--codex-home",
-            str(self.home),
-            "--allow-incompatible-client",
-            "--executor-model",
-            "gpt-5.6-luna",
-            "--executor-effort",
-            "high",
-            "--apply",
-        ]
-        stderr = io.StringIO()
-        with (
-            mock.patch.object(sys, "argv", argv),
-            mock.patch.object(Path, "unlink", new=fail_post_capture_detach),
-            mock.patch.object(sys, "stderr", stderr),
-            mock.patch.dict(os.environ, self.fake_env()),
-        ):
-            result = NATIVE.main()
-
-        self.assertEqual(result, 2)
-        self.assertIn("other private link was removed", stderr.getvalue())
-        self.assertEqual(self.read_fake_config(), prior_config)
-        self.assertFalse(state_path.exists())
-        self.assertEqual(list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.tmp")), [])
-        detached = list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.cas-detach"))
-        self.assertEqual(len(detached), 1)
-        self.assertEqual(detached[0].lstat().st_nlink, 1)
-
-    def test_complete_private_unlink_refusal_retains_recoverable_prior_bytes(
-        self,
-    ) -> None:
-        self.run_script(
-            "--executor-model",
-            "gpt-5.6-luna",
-            "--executor-effort",
-            "high",
-            "--apply",
-        )
-        state_path = self.home / NATIVE.STATE_FILENAME
-        prior_state = state_path.read_bytes()
-        prior_config = self.read_fake_config()
-        original_unlink = Path.unlink
-
-        def refuse_private_unlinks(
-            candidate: Path, missing_ok: bool = False
-        ) -> None:
-            if candidate.parent == self.home and (
-                candidate.name.endswith(".tmp")
-                or candidate.name.endswith(".cas-detach")
-            ):
-                raise PermissionError("forced complete private unlink refusal")
-            original_unlink(candidate, missing_ok=missing_ok)
-
-        argv = [
-            str(self.installed_script),
-            "--codex-bin",
-            str(self.codex),
-            "--codex-home",
-            str(self.home),
-            "--allow-incompatible-client",
-            "--executor-model",
-            "gpt-5.6-terra",
-            "--executor-effort",
-            "high",
-            "--apply",
-        ]
-        stderr = io.StringIO()
-        with (
-            mock.patch.object(sys, "argv", argv),
-            mock.patch.object(Path, "unlink", new=refuse_private_unlinks),
-            mock.patch.object(sys, "stderr", stderr),
-            mock.patch.dict(os.environ, self.fake_env()),
-        ):
-            result = NATIVE.main()
-
-        self.assertEqual(result, 2)
-        self.assertIn("both recovery paths remain", stderr.getvalue())
-        self.assertEqual(self.read_fake_config(), prior_config)
-        self.assertFalse(state_path.exists())
-        retained = list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.tmp"))
-        detached = list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.cas-detach"))
-        captured = list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.cas-backup"))
-        self.assertEqual(len(retained), 1)
-        self.assertEqual(len(detached), 1)
-        self.assertEqual(retained[0].lstat().st_nlink, 2)
-        self.assertEqual(detached[0].lstat().st_nlink, 2)
-        self.assertEqual(len(captured), 1)
-        self.assertEqual(captured[0].read_bytes(), prior_state)
-        self.assertEqual(captured[0].lstat().st_nlink, 1)
 
     def test_state_cas_preserves_write_after_captured_validation(self) -> None:
         state_path = self.home / NATIVE.STATE_FILENAME

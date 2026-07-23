@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ctypes
+import errno
 import hashlib
 import io
 import json
@@ -795,6 +797,91 @@ def _assert_state_digest(path: Path, expected_digest: str | None) -> None:
         )
 
 
+def _rename_noreplace(src: Path, dst: Path) -> None:
+    """Atomically consume *src* only when *dst* does not exist.
+
+    State transactions use same-directory paths, which keeps the operation on
+    one filesystem.  POSIX ``rename`` is deliberately not a fallback because
+    it replaces an existing destination.
+    """
+
+    src = Path(src)
+    dst = Path(dst)
+    if os.path.abspath(src.parent) != os.path.abspath(dst.parent):
+        raise OSError(
+            errno.EXDEV,
+            "atomic no-replace rename requires paths in the same directory",
+            str(src),
+            None,
+            str(dst),
+        )
+
+    if sys.platform == "win32":
+        try:
+            # On Windows Python's os.rename maps to a native rename that fails
+            # when the destination exists; unlike os.replace, it never opts in
+            # to replacement.
+            os.rename(src, dst)
+        except OSError as exc:
+            if exc.errno == errno.EEXIST or getattr(exc, "winerror", None) in {
+                80,  # ERROR_FILE_EXISTS
+                183,  # ERROR_ALREADY_EXISTS
+            }:
+                raise FileExistsError(
+                    errno.EEXIST, os.strerror(errno.EEXIST), str(dst)
+                ) from exc
+            raise
+        return
+
+    if sys.platform.startswith("linux"):
+        symbol_name = "renameat2"
+        flags = 1  # RENAME_NOREPLACE
+        arguments = (-100, os.fsencode(src), -100, os.fsencode(dst), flags)
+    elif sys.platform == "darwin":
+        symbol_name = "renamex_np"
+        flags = 0x00000004  # RENAME_EXCL
+        arguments = (os.fsencode(src), os.fsencode(dst), flags)
+    else:
+        raise ConfigurationError(
+            f"Atomic no-replace rename is unsupported on {sys.platform}."
+        )
+
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        rename = getattr(libc, symbol_name)
+    except (OSError, AttributeError) as exc:
+        raise ConfigurationError(
+            f"Atomic no-replace rename is unavailable on {sys.platform}."
+        ) from exc
+    rename.restype = ctypes.c_int
+    if symbol_name == "renameat2":
+        rename.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+    else:
+        rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+
+    ctypes.set_errno(0)
+    if rename(*arguments) == 0:
+        return
+    error = ctypes.get_errno()
+    if error == errno.EEXIST:
+        raise FileExistsError(error, os.strerror(error), str(dst))
+    unsupported = {errno.ENOSYS, errno.EINVAL}
+    if hasattr(errno, "EOPNOTSUPP"):
+        unsupported.add(errno.EOPNOTSUPP)
+    if error in unsupported:
+        raise ConfigurationError(
+            f"Atomic no-replace rename is unsupported by this {sys.platform} "
+            f"filesystem or kernel: {os.strerror(error)}."
+        )
+    raise OSError(error, os.strerror(error), str(src), None, str(dst))
+
+
 def _private_state_capture_path(path: Path) -> Path:
     descriptor, temporary = tempfile.mkstemp(
         prefix=f".{path.name}.", suffix=".cas-backup", dir=path.parent
@@ -811,148 +898,18 @@ def _restore_captured_state(
     """Restore by no-overwrite creation or retain a diagnosed recovery artifact."""
 
     try:
-        os.link(captured, path)
+        _rename_noreplace(captured, path)
     except FileExistsError:
         raise ConfigurationError(
             f"{message} A newer routing-state pathname was preserved; captured "
             f"bytes remain at {captured}."
         ) from cause
-    except OSError as exc:
+    except (OSError, ConfigurationError) as exc:
         raise ConfigurationError(
             f"{message} Automatic no-overwrite restoration failed; captured bytes "
             f"remain at {captured}: {exc}"
         ) from cause
-    try:
-        captured.unlink()
-    except OSError as exc:
-        # The no-overwrite publication above temporarily gives the restored
-        # object two names.  If private-link cleanup fails, do not leave the
-        # canonical state in the multi-link form rejected by readers.  Only
-        # detach it when it still names the object we published; a concurrent
-        # replacement must be preserved.
-        detached = _detach_canonical_link_if_same(path, captured, message, cause)
-        if not detached:
-            raise ConfigurationError(
-                f"{message} Private-link cleanup failed and the canonical "
-                f"pathname is absent; recovery bytes remain at {captured}: {exc}"
-            ) from cause
-        raise ConfigurationError(
-            f"{message} Private-link cleanup failed, so the canonical pathname "
-            f"was detached when it still named the restored object; recovery "
-            f"bytes remain at {captured}: {exc}"
-        ) from cause
     raise ConfigurationError(message) from cause
-
-
-def _detach_canonical_link_if_same(
-    path: Path, owned_path: Path, message: str, cause: BaseException
-) -> bool:
-    """Atomically capture the canonical name, then detach only an owned object."""
-
-    descriptor, temporary = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".cas-detach", dir=path.parent
-    )
-    os.close(descriptor)
-    detached = Path(temporary)
-    preserve_detached = False
-    try:
-        try:
-            # Replacing the same-directory placeholder is atomic and avoids a
-            # pre-capture unlink failure that could leave the invalid canonical
-            # hard link live.
-            os.replace(path, detached)
-        except FileNotFoundError:
-            return False
-        except OSError as exc:
-            raise ConfigurationError(
-                f"{message} The canonical pathname could not be captured safely; "
-                f"recovery bytes remain at {owned_path}: {exc}"
-            ) from cause
-
-        try:
-            captured_info = detached.lstat()
-            owned_info = owned_path.lstat()
-        except OSError as exc:
-            preserve_detached = True
-            _restore_captured_state(
-                path,
-                detached,
-                f"{message} Canonical identity inspection failed after capture.",
-                exc,
-            )
-        if not os.path.samestat(captured_info, owned_info):
-            preserve_detached = True
-            _restore_captured_state(
-                path,
-                detached,
-                f"{message} A concurrent canonical replacement was preserved.",
-                cause,
-            )
-        try:
-            detached.unlink()
-        except OSError as exc:
-            preserve_detached = True
-            try:
-                owned_path.unlink()
-            except OSError as owned_exc:
-                raise ConfigurationError(
-                    f"{message} The owned canonical pathname was captured and is "
-                    "no longer live, but all private-link cleanup failed; both "
-                    f"recovery paths remain at {owned_path} and {detached}: "
-                    f"{exc}; {owned_exc}"
-                ) from cause
-            raise ConfigurationError(
-                f"{message} The owned canonical pathname was captured, but its "
-                "detached-link cleanup failed. Its other private link was "
-                f"removed and recovery bytes remain at {detached}: {exc}"
-            ) from cause
-        return True
-    finally:
-        if not preserve_detached:
-            try:
-                detached.unlink(missing_ok=True)
-            except OSError:
-                pass
-
-
-def _recover_published_state_cleanup_failure(
-    path: Path,
-    temp_path: Path,
-    captured: Path | None,
-    cause: OSError,
-) -> None:
-    """Remove only our invalid canonical hard link and retain recovery bytes."""
-
-    detached = _detach_canonical_link_if_same(
-        path,
-        temp_path,
-        "Routing-state private-link cleanup failed after publication.",
-        cause,
-    )
-    if not detached:
-        captured_note = (
-            f" Prior-state recovery bytes remain at {captured}." if captured else ""
-        )
-        raise ConfigurationError(
-            "Routing-state private-link cleanup failed after publication. The "
-            "canonical pathname is absent; new recovery bytes remain at "
-            f"{temp_path}.{captured_note}"
-        ) from cause
-
-    if captured is not None:
-        _restore_captured_state(
-            path,
-            captured,
-            "Routing-state private-link cleanup failed after publication; the "
-            "prior state was restored and new bytes were retained at "
-            f"{temp_path}.",
-            cause,
-        )
-    raise ConfigurationError(
-        "Routing-state private-link cleanup failed after publication; the "
-        "canonical pathname was removed and new recovery bytes remain at "
-        f"{temp_path}."
-    ) from cause
 
 
 def _capture_expected_state(path: Path, expected_digest: str) -> Path:
@@ -1004,7 +961,6 @@ def _write_state(
         prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
     )
     temp_path = Path(temporary)
-    preserve_temp = False
     try:
         fchmod = getattr(os, "fchmod", None)
         if callable(fchmod):
@@ -1015,37 +971,23 @@ def _write_state(
             os.fsync(handle.fileno())
         if expected_digest is None:
             try:
-                os.link(temp_path, path)
+                _rename_noreplace(temp_path, path)
             except FileExistsError as exc:
                 raise ConfigurationError(
                     "Saved routing state changed concurrently; refusing state "
                     "publication."
                 ) from exc
-            try:
-                temp_path.unlink()
-            except OSError as exc:
-                preserve_temp = True
-                _recover_published_state_cleanup_failure(
-                    path, temp_path, None, exc
-                )
         else:
             captured = _capture_expected_state(path, expected_digest)
             try:
-                os.link(temp_path, path)
-            except OSError as exc:
+                _rename_noreplace(temp_path, path)
+            except (OSError, ConfigurationError) as exc:
                 _restore_captured_state(
                     path,
                     captured,
                     "A newer routing-state pathname appeared during publication; "
                     "it was not overwritten.",
                     exc,
-                )
-            try:
-                temp_path.unlink()
-            except OSError as exc:
-                preserve_temp = True
-                _recover_published_state_cleanup_failure(
-                    path, temp_path, captured, exc
                 )
             try:
                 captured.unlink()
@@ -1072,12 +1014,12 @@ def _write_state(
             os.close(fd)
         except OSError:
             pass
-        if not preserve_temp:
-            try:
-                temp_path.unlink(missing_ok=True)
-            except OSError:
-                # Never mask the publication result or its primary failure.
-                pass
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            # Never mask the publication result or its primary failure. A
+            # successful rename already consumed this path.
+            pass
     return hashlib.sha256(payload_bytes).hexdigest()
 
 

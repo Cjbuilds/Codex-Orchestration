@@ -126,9 +126,11 @@ One nonblocking transaction lock per effective `CODEX_HOME` serializes status,
 setup, repair, disable, rollback, and publication across cooperating configurators.
 State replacement/removal additionally captures the prior pathname into a private
 same-directory recovery object, validates its exact originally observed bytes, and
-publishes only with atomic no-overwrite creation. A concurrently recreated pathname
-is preserved; a failed recovery leaves the captured bytes at a diagnosed private
-path rather than overwriting newer state. Each new digest is carried through rollback.
+publishes through a platform-native atomic no-overwrite rename on Windows, Linux, or
+macOS. POSIX overwrite-style `rename` is never a fallback, and hard links are never
+used for state publication or restoration. A concurrently recreated pathname is
+preserved; a failed recovery leaves captured bytes at a diagnosed private path rather
+than overwriting newer state. Each new digest is carried through rollback.
 Disable retains restore state until user and effective config readback prove the
 intended restoration and rejects `okOverridden`. Setup and repair require the enabled
 executing installation;

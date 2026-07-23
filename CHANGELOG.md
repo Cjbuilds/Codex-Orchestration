@@ -19,8 +19,10 @@
   rather than weaker path reopens.
 - Serialize native routing operations with one nonblocking per-`CODEX_HOME`
   transaction lock. State replacement/removal atomically captures the prior pathname,
-  validates its exact originally observed bytes, and publishes only by no-overwrite
-  creation so a non-cooperating newer writer is preserved rather than clobbered.
+  validates its exact originally observed bytes, and publishes with a platform-native
+  atomic no-overwrite rename on Windows, Linux, and macOS. No hard-link cleanup is
+  required, so a successful publication is always a single-link state; a
+  non-cooperating newer writer is preserved rather than clobbered.
   Disable now retains recovery state unless both user and effective config readback
   prove the intended restore, including explicit refusal of `okOverridden` writes.
 - Clear Git's repository-local environment before versioned pre-commit and pre-push
