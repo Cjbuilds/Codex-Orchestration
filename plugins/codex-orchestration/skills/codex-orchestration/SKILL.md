@@ -380,9 +380,9 @@ Do not add `enabled = true` for a Sol or Terra root. Their current model metadat
 - `features.multi_agent_v2.multi_agent_mode_hint_text`;
 - `features.multi_agent_v2.usage_hint_text`.
 
-When Claude Fable 5, Qwen Advisor, or Kimi K3 Designer is selected, setup additionally manages only the plugin-scoped `enabled` override for each chosen bundled MCP launcher and any launcher variant already overridden by the user. All bundled variants are disabled by default. The original override values are stored and restored by `disable`. Codex's TOML editor may retain an inert empty table header after deleting the last override; never rewrite the file merely to remove that cosmetic header.
+When Claude Fable 5, Qwen Advisor, or Kimi K3 Designer is selected, setup additionally manages only the plugin-scoped `enabled` override for each chosen bundled MCP launcher and any launcher variant already overridden by the user. Resolve exactly one enabled installed entry whose validated marketplace/name/version coordinates match this executing package's documented Codex cache path; retain and validate the inventory source independently, and never derive the namespace from a hard-coded marketplace name. Missing, disabled, malformed, ambiguous, cache-mismatched, or changed identity fails closed. All bundled variants are disabled by default. The original override values and exact plugin identity are stored and restored by `disable`. Codex's TOML editor may retain an inert empty table header after deleting the last override; never rewrite the file merely to remove that cosmetic header.
 
-It uses Codex App Server's `config/read` and `config/batchWrite` APIs, not a home-grown TOML rewrite. It preserves unrelated settings and comments, validates the whole effective config, and uses the user-layer version to detect races. Restore snapshots cover the four routing fields plus narrowly scoped bundled MCP overrides only when Fable, Qwen, or Kimi is selected; the namespaced state also records schema/version markers, config path, selected seats, and scalar-conversion metadata when needed. If the user explicitly replaces existing hint text, the exact prior text is stored for restoration; warn them never to place credentials in routing hints.
+It uses Codex App Server's `config/read` and `config/batchWrite` APIs, not a home-grown TOML rewrite. It preserves unrelated settings and comments, validates the whole effective config, and uses the user-layer version to detect config races. A separate retained identity guard detects Codex client, installed-inventory, executing-package, and payload drift before writes, rollbacks, state replacement/removal, and success publication. Restore snapshots cover the four routing fields plus narrowly scoped bundled MCP overrides only when Fable, Qwen, or Kimi is selected; schema 7 also records the exact `plugin_id`, alongside schema/version markers, config path, selected seats, and scalar-conversion metadata. Schemas 1–6 remain historical and their MCP snapshots are never reinterpreted across marketplace IDs. If the user explicitly replaces existing hint text, the exact prior text is stored for restoration; warn them never to place credentials in routing hints.
 
 If a user-authored mode or usage hint already exists, do not replace it automatically. Show the conflict. Use `--replace-existing-policy` only after the user explicitly approves replacing and later restoring those exact values.
 
@@ -443,6 +443,10 @@ python3 <skill-dir>/scripts/configure_native_routing.py \
 ```
 
 Disable must remain available even if an older client is incompatible with the active policy. Refuse to erase managed fields that the user edited after setup; explain the conflict instead.
+Schema-7 disable targets the exact saved plugin identity from the full installed
+inventory, even when that installation is disabled. Schemas 1–6 target only the
+historical `codex-orchestration@codex-orchestration` namespace. Never move an MCP
+restore snapshot to the currently executing marketplace identity.
 
 For personal v0.4 custom roles, preview and apply removal with `configure_orchestration.py --scope personal --personal-route-names --remove-saved-roles`. For older fixed-name personal roles, run a separate preview without `--personal-route-names`. Project removal uses `--scope project --root <trusted-project> --remove-saved-roles`. Delete only files that the configurator fully validates as managed; edited or user-owned files require manual review.
 

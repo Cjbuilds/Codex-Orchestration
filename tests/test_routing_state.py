@@ -88,8 +88,10 @@ def genuine_state(schema: int) -> dict[str, object]:
             "effort": "max",
             "server": "kimi-designer-python3",
         }
-    if schema == 6:
+    if schema >= 6:
         state["advisor"] = qwen_route()
+    if schema >= 7:
+        state["plugin_id"] = "codex-orchestration@orion-codex-orchestration"
     if schema >= 2:
         managed["mcp"] = {
             "fable-advisor-python3": True,
@@ -102,18 +104,60 @@ def genuine_state(schema: int) -> dict[str, object]:
         if schema >= 5:
             managed["mcp"]["kimi-designer-python3"] = True
             previous["mcp"]["kimi-designer-python3"] = snapshot()
-        if schema == 6:
+        if schema >= 6:
             managed["mcp"]["qwen-advisor-python3"] = True
             previous["mcp"]["qwen-advisor-python3"] = snapshot()
     return state
 
 
 class RoutingStateTests(unittest.TestCase):
-    def test_genuine_schemas_one_through_six_are_accepted(self) -> None:
-        for schema in (1, 2, 3, 4, 5, 6):
+    def test_genuine_schemas_one_through_seven_are_accepted(self) -> None:
+        for schema in (1, 2, 3, 4, 5, 6, 7):
             with self.subTest(schema=schema):
                 state = genuine_state(schema)
                 self.assertIs(STATE.validate_routing_state(state), state)
+
+    def test_schema_seven_plugin_identity_is_exact_and_bounded(self) -> None:
+        valid = genuine_state(7)
+        self.assertEqual(
+            STATE.validate_plugin_id(valid["plugin_id"]), valid["plugin_id"]
+        )
+
+        invalid = (
+            None,
+            True,
+            7,
+            "",
+            "codex-orchestration@",
+            "@marketplace",
+            "other-plugin@marketplace",
+            "codex-orchestration@one@two",
+            "codex-orchestration@bad marketplace",
+            "codex-orchestration@bad/control",
+            "codex-orchestration@bad\ncontrol",
+            "codex-orchestration@bad\x00control",
+            "codex-orchestration@bad\x7fcontrol",
+            "codex-orchestration@" + ("m" * 129),
+        )
+        for plugin_id in invalid:
+            with self.subTest(plugin_id=plugin_id):
+                state = genuine_state(7)
+                state["plugin_id"] = plugin_id
+                with self.assertRaises(STATE.RoutingStateError):
+                    STATE.validate_routing_state(state)
+
+        missing = genuine_state(7)
+        missing.pop("plugin_id")
+        with self.assertRaises(STATE.RoutingStateError):
+            STATE.validate_routing_state(missing)
+
+    def test_legacy_schemas_reject_plugin_identity_extension(self) -> None:
+        for schema in range(1, 7):
+            with self.subTest(schema=schema):
+                state = genuine_state(schema)
+                state["plugin_id"] = "codex-orchestration@codex-orchestration"
+                with self.assertRaises(STATE.RoutingStateError):
+                    STATE.validate_routing_state(state)
 
     def test_scalar_conversion_and_retained_disabled_mcp_are_accepted(self) -> None:
         state = genuine_state(3)

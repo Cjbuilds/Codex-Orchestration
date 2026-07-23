@@ -1,2 +1,3 @@
 #!/bin/sh
+unset $(git rev-parse --local-env-vars)
 exec python3 scripts/preflight.py quick

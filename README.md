@@ -312,7 +312,10 @@ uses concise per-role activation confirmation; version **0.8.0 or newer** routes
 version **0.9.0 or newer** adds the sealed Qwen 3.8 Max Preview Advisor. Version
 **0.9.1 or newer** clarifies that root-owned planning may use a direct Advisor
 matching the root model, while two configured Planner/Advisor routes must still
-remain distinct.
+remain distinct. Version **0.9.2 or newer** binds plugin-scoped MCP setup, status,
+repair, rollback, and disable to the exact executing Codex cache coordinate or saved
+marketplace identity and fails closed instead of guessing when installed identities
+are ambiguous or change during the transaction.
 Confirm with
 `codex plugin list --json`, then restart Codex Desktop and start a new task.
 

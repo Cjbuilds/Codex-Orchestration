@@ -19,10 +19,12 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 from threading import Thread
+import time
 from typing import Any, Iterator
 
 
@@ -30,14 +32,46 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_ROOT = REPO_ROOT / "plugins" / "codex-orchestration"
 PLUGIN_ID = "codex-orchestration@codex-orchestration"
 MARKETPLACE_NAME = "codex-orchestration"
+ALTERNATE_MARKETPLACE_NAME = "alternate-orchestration"
+ALTERNATE_PLUGIN_ID = f"codex-orchestration@{ALTERNATE_MARKETPLACE_NAME}"
 OLD_RELEASE = "a1d9c546665c3253cdcaa8fe5c0c060199a6126c"
 OLD_VERSION = "0.5.0"
-NEW_VERSION = "0.9.1"
+NEW_VERSION = "0.9.2"
 COMMAND_TIMEOUT_SECONDS = 60
 
 
 class SmokeFailure(RuntimeError):
     """A lifecycle assertion or external command failed."""
+
+
+@contextmanager
+def temporary_lifecycle_root() -> Iterator[Path]:
+    """Remove the disposable tree despite brief post-command Windows Git locks."""
+
+    root = Path(tempfile.mkdtemp(prefix="codex-orchestration-lifecycle-"))
+
+    def clear_readonly(
+        function: Any, path: str, error_info: tuple[type[BaseException], BaseException, Any]
+    ) -> None:
+        error = error_info[1]
+        if not isinstance(error, PermissionError):
+            raise error
+        os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+        function(path)
+
+    try:
+        yield root
+    finally:
+        for attempt in range(7):
+            try:
+                shutil.rmtree(root, onerror=clear_readonly)
+                break
+            except FileNotFoundError:
+                break
+            except PermissionError:
+                if attempt == 6:
+                    raise
+                time.sleep(0.1 * (2**attempt))
 
 
 def run(
@@ -175,7 +209,7 @@ def ignored(path: Path) -> bool:
 def file_tree(root: Path) -> dict[str, tuple[bytes, int]]:
     return {
         path.relative_to(root).as_posix(): (
-            path.read_bytes(),
+            path.read_bytes().replace(b"\r\n", b"\n"),
             path.stat().st_mode & 0o777,
         )
         for path in sorted(root.rglob("*"))
@@ -262,14 +296,16 @@ raise SystemExit(2)
     return path
 
 
-def installed_entry(payload: dict[str, Any]) -> dict[str, Any]:
+def installed_entry(
+    payload: dict[str, Any], plugin_id: str = PLUGIN_ID
+) -> dict[str, Any]:
     matches = [
         entry
         for entry in payload.get("installed", [])
-        if isinstance(entry, dict) and entry.get("pluginId") == PLUGIN_ID
+        if isinstance(entry, dict) and entry.get("pluginId") == plugin_id
     ]
     if len(matches) != 1:
-        raise SmokeFailure(f"Expected one discovered {PLUGIN_ID!r}, got {matches!r}")
+        raise SmokeFailure(f"Expected one discovered {plugin_id!r}, got {matches!r}")
     return matches[0]
 
 
@@ -301,8 +337,7 @@ def main() -> int:
         current_version.split("+", 1)[0], NEW_VERSION, "checkout release base version"
     )
 
-    with tempfile.TemporaryDirectory(prefix="codex-orchestration-lifecycle-") as raw:
-        temp = Path(raw)
+    with temporary_lifecycle_root() as temp:
         publisher = temp / "publisher"
         web_root = temp / "www"
         remote = web_root / "marketplace.git"
@@ -753,6 +788,254 @@ def main() -> int:
                     str(codex_home),
                     "--disable",
                     "--apply",
+                ],
+                cwd=project,
+                env=env,
+            )
+
+            alternate_publisher = temp / "alternate-publisher"
+            alternate_remote = web_root / "alternate.git"
+            run(
+                [
+                    git,
+                    "clone",
+                    "--no-local",
+                    "--quiet",
+                    str(publisher),
+                    str(alternate_publisher),
+                ],
+                cwd=temp,
+                env=env,
+            )
+            run(
+                [git, "config", "user.name", "Lifecycle Smoke"],
+                cwd=alternate_publisher,
+                env=env,
+            )
+            run(
+                [git, "config", "user.email", "smoke@example.invalid"],
+                cwd=alternate_publisher,
+                env=env,
+            )
+            alternate_manifest_path = (
+                alternate_publisher / ".agents" / "plugins" / "marketplace.json"
+            )
+            alternate_manifest = json.loads(
+                alternate_manifest_path.read_text(encoding="utf-8")
+            )
+            alternate_manifest["name"] = ALTERNATE_MARKETPLACE_NAME
+            alternate_manifest_path.write_text(
+                json.dumps(alternate_manifest, indent=2) + "\n", encoding="utf-8"
+            )
+            run(
+                [git, "add", ".agents/plugins/marketplace.json"],
+                cwd=alternate_publisher,
+                env=env,
+            )
+            run(
+                [
+                    git,
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "Publish alternate lifecycle marketplace",
+                ],
+                cwd=alternate_publisher,
+                env=env,
+            )
+            run(
+                [
+                    git,
+                    "clone",
+                    "--bare",
+                    "--no-local",
+                    str(alternate_publisher),
+                    str(alternate_remote),
+                ],
+                cwd=temp,
+                env=env,
+            )
+            run(
+                [
+                    git,
+                    f"--git-dir={alternate_remote}",
+                    "symbolic-ref",
+                    "HEAD",
+                    "refs/heads/main",
+                ],
+                cwd=temp,
+                env=env,
+            )
+            run(
+                [git, f"--git-dir={alternate_remote}", "update-server-info"],
+                cwd=temp,
+                env=env,
+            )
+            alternate_url = marketplace_url.rsplit("/", 1)[0] + "/alternate.git"
+            alternate_marketplace = run_json(
+                [
+                    codex,
+                    "plugin",
+                    "marketplace",
+                    "add",
+                    alternate_url,
+                    "--ref",
+                    "main",
+                    "--json",
+                ],
+                cwd=project,
+                env=env,
+            )
+            alternate_snapshot = Path(
+                alternate_marketplace["installedRoot"]
+            ).resolve()
+            assert_equal(
+                json.loads(
+                    (
+                        alternate_snapshot
+                        / ".agents"
+                        / "plugins"
+                        / "marketplace.json"
+                    ).read_text(encoding="utf-8")
+                ).get("name"),
+                ALTERNATE_MARKETPLACE_NAME,
+                "alternate marketplace identity",
+            )
+            alternate_install = run_json(
+                [codex, "plugin", "add", ALTERNATE_PLUGIN_ID, "--json"],
+                cwd=project,
+                env=env,
+            )
+            assert_equal(
+                alternate_install.get("version"),
+                current_version,
+                "alternate installation version",
+            )
+            alternate_installed_root = Path(
+                alternate_install["installedPath"]
+            ).resolve()
+            alternate_inventory = run_json(
+                [codex, "plugin", "list", "--json"], cwd=project, env=env
+            )
+            for sibling_id in (PLUGIN_ID, ALTERNATE_PLUGIN_ID):
+                sibling = installed_entry(alternate_inventory, sibling_id)
+                assert_equal(
+                    sibling.get("version"),
+                    current_version,
+                    f"{sibling_id} sibling version",
+                )
+                assert_equal(
+                    sibling.get("enabled"), True, f"{sibling_id} sibling enabled state"
+                )
+
+            alternate_configurator = (
+                alternate_installed_root
+                / "skills"
+                / "codex-orchestration"
+                / "scripts"
+                / "configure_native_routing.py"
+            )
+            alternate_native_command = [
+                sys.executable,
+                str(alternate_configurator),
+                "--codex-bin",
+                codex,
+                "--codex-home",
+                str(codex_home),
+                "--allow-incompatible-client",
+                "--executor-model",
+                "gpt-5.6-luna",
+                "--executor-effort",
+                "xhigh",
+            ]
+            alternate_preview = run(
+                alternate_native_command, cwd=project, env=env
+            )
+            if "Dry run only" not in alternate_preview.stdout:
+                raise SmokeFailure("Alternate native setup did not report a dry run")
+            alternate_apply = run(
+                [*alternate_native_command, "--apply"], cwd=project, env=env
+            )
+            if "Native routing policy installed" not in alternate_apply.stdout:
+                raise SmokeFailure("Alternate native setup did not install its policy")
+            alternate_state_path = codex_home / ".codex-orchestration-routing.json"
+            alternate_state = json.loads(
+                alternate_state_path.read_text(encoding="utf-8")
+            )
+            assert_equal(alternate_state.get("schema"), 7, "alternate state schema")
+            assert_equal(
+                alternate_state.get("plugin_id"),
+                ALTERNATE_PLUGIN_ID,
+                "alternate saved plugin identity",
+            )
+            alternate_status = run(
+                [
+                    sys.executable,
+                    str(alternate_configurator),
+                    "--codex-bin",
+                    codex,
+                    "--codex-home",
+                    str(codex_home),
+                    "--status",
+                    "--require-effective",
+                ],
+                cwd=project,
+                env=env,
+            )
+            if f"Plugin identity: {ALTERNATE_PLUGIN_ID}" not in alternate_status.stdout:
+                raise SmokeFailure("Alternate native status selected the wrong identity")
+            if "Native policy: installed and effective" not in alternate_status.stdout:
+                raise SmokeFailure("Alternate native status did not report effectiveness")
+            alternate_disable = run(
+                [
+                    sys.executable,
+                    str(alternate_configurator),
+                    "--codex-bin",
+                    codex,
+                    "--codex-home",
+                    str(codex_home),
+                    "--disable",
+                    "--apply",
+                ],
+                cwd=project,
+                env=env,
+            )
+            if "Native routing disabled" not in alternate_disable.stdout:
+                raise SmokeFailure("Alternate native disable did not report success")
+            if alternate_state_path.exists():
+                raise SmokeFailure("Alternate native disable retained routing state")
+            sibling_inventory = run_json(
+                [codex, "plugin", "list", "--json"], cwd=project, env=env
+            )
+            canonical_sibling = installed_entry(sibling_inventory)
+            assert_equal(
+                canonical_sibling.get("enabled"),
+                True,
+                "canonical sibling preserved after alternate disable",
+            )
+            run_json(
+                [codex, "plugin", "remove", ALTERNATE_PLUGIN_ID, "--json"],
+                cwd=project,
+                env=env,
+            )
+            after_alternate_remove = run_json(
+                [codex, "plugin", "list", "--json"], cwd=project, env=env
+            )
+            installed_entry(after_alternate_remove)
+            if any(
+                item.get("pluginId") == ALTERNATE_PLUGIN_ID
+                for item in after_alternate_remove.get("installed", [])
+                if isinstance(item, dict)
+            ):
+                raise SmokeFailure("Alternate plugin remained after exact removal")
+            run_json(
+                [
+                    codex,
+                    "plugin",
+                    "marketplace",
+                    "remove",
+                    ALTERNATE_MARKETPLACE_NAME,
+                    "--json",
                 ],
                 cwd=project,
                 env=env,

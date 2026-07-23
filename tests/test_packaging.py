@@ -54,11 +54,13 @@ class PackagingTests(unittest.TestCase):
 
         self.assertEqual(
             pre_commit.read_text(encoding="utf-8"),
-            "#!/bin/sh\nexec python3 scripts/preflight.py quick\n",
+            "#!/bin/sh\nunset $(git rev-parse --local-env-vars)\n"
+            "exec python3 scripts/preflight.py quick\n",
         )
         self.assertEqual(
             pre_push.read_text(encoding="utf-8"),
-            "#!/bin/sh\nexec python3 scripts/preflight.py full\n",
+            "#!/bin/sh\nunset $(git rev-parse --local-env-vars)\n"
+            "exec python3 scripts/preflight.py full\n",
         )
         for hook in (pre_commit, pre_push):
             index = subprocess.run(
@@ -205,7 +207,7 @@ class PackagingTests(unittest.TestCase):
 
         self.assertEqual(manifest["name"], "codex-orchestration")
         self.assertEqual(manifest["skills"], "./skills/")
-        self.assertEqual(manifest["version"], "0.9.1")
+        self.assertEqual(manifest["version"], "0.9.2")
         self.assertEqual(manifest["mcpServers"], "./.mcp.json")
         self.assertRegex(
             manifest["version"],
@@ -221,14 +223,17 @@ class PackagingTests(unittest.TestCase):
     def test_native_and_custom_configurators_are_packaged(self) -> None:
         native = SKILL_ROOT / "scripts" / "configure_native_routing.py"
         custom = SKILL_ROOT / "scripts" / "configure_orchestration.py"
+        plugin_identity = SKILL_ROOT / "scripts" / "plugin_identity.py"
         routing_state = SKILL_ROOT / "scripts" / "routing_state.py"
         self.assertTrue(native.is_file())
         self.assertTrue(custom.is_file())
+        self.assertTrue(plugin_identity.is_file())
         self.assertTrue(routing_state.is_file())
         self.assertFalse((SKILL_ROOT / "scripts" / "update_plugin.py").exists())
         self.assertIn("config/batchWrite", native.read_text(encoding="utf-8"))
         self.assertIn('"--repair"', native.read_text(encoding="utf-8"))
-        self.assertIn('"version": "0.9.1"', native.read_text(encoding="utf-8"))
+        self.assertIn('"version": "0.9.2"', native.read_text(encoding="utf-8"))
+        self.assertIn("guard_plugin_identity", plugin_identity.read_text(encoding="utf-8"))
         self.assertIn("validate_routing_state", routing_state.read_text(encoding="utf-8"))
         self.assertIn("Standalone custom agent", custom.read_text(encoding="utf-8"))
 
@@ -345,7 +350,7 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("@openai/codex@0.144.1", workflow)
         smoke_text = smoke.read_text(encoding="utf-8")
         self.assertIn('OLD_VERSION = "0.5.0"', smoke_text)
-        self.assertIn('NEW_VERSION = "0.9.1"', smoke_text)
+        self.assertIn('NEW_VERSION = "0.9.2"', smoke_text)
         self.assertIn("old Advisor-only cache unexpectedly supports Planner", smoke_text)
         self.assertIn("Upgraded installed skill is missing Planner contract", smoke_text)
         self.assertIn("reused the Advisor-only 0.5.0 cache directory", smoke_text)

@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.9.2 — Unreleased
+
+- Resolve the enabled executing Codex Orchestration installation from the native
+  plugin inventory instead of writing MCP overrides beneath a hard-coded marketplace
+  ID. The guard binds the executing package to Codex's documented marketplace/name/
+  version cache coordinates while independently retaining the inventory source.
+  Missing, disabled, malformed, ambiguous, cache-mismatched, or concurrently changed
+  identity now fails closed before publication.
+- Add routing schema/policy version 7 with an exact persisted `plugin_id`. Schemas
+  1–6 remain historical and are never reinterpreted across marketplace namespaces;
+  disable restores the saved historical namespace even when that installation is
+  currently disabled.
+- Guard setup, status, repair, rollback, disable, and state publication with separate
+  full-inventory and operation-identity digests. Windows source and executing-cache
+  identity, stat, and payload hashes are rechecked through retained strict handles
+  rather than weaker path reopens.
+- Clear Git's repository-local environment before versioned pre-commit and pre-push
+  preflight so linked-worktree hooks cannot redirect nested Git fixture tests into
+  the parent repository metadata.
+
 ## 0.9.1 — Unreleased
 
 - Clarify that omitted Planner means root-owned planning, so a fresh direct Sol

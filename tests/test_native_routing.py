@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -49,6 +50,33 @@ if "features" in sys.argv and "list" in sys.argv:
         print("unknown multi_agent_mode_hint_text", file=sys.stderr)
         raise SystemExit(1)
     print("multi_agent_v2 under-development false")
+    raise SystemExit(0)
+
+if sys.argv[1:] == ["plugin", "list", "--json"]:
+    home = Path(os.environ["CODEX_HOME"]).resolve()
+    inventory_file = home / ".fake-plugin-inventory.json"
+    if inventory_file.exists():
+        print(inventory_file.read_text(encoding="utf-8"))
+    else:
+        plugin_id = os.environ["FAKE_PLUGIN_ID"]
+        marketplace = plugin_id.split("@", 1)[1]
+        source_root = os.environ["FAKE_PLUGIN_ROOT"]
+        print(json.dumps({
+            "installed": [{
+                "pluginId": plugin_id,
+                "name": "codex-orchestration",
+                "marketplaceName": marketplace,
+                "version": "0.9.2",
+                "installed": True,
+                "enabled": True,
+                "source": {"source": "local", "path": source_root},
+                "marketplaceSource": {
+                    "sourceType": "local",
+                    "source": str(Path(source_root).parent.parent),
+                },
+            }],
+            "available": [],
+        }))
     raise SystemExit(0)
 
 if "app-server" not in sys.argv:
@@ -336,9 +364,41 @@ class NativeRoutingTests(unittest.TestCase):
             encoding="utf-8",
         )
         self.acpx.chmod(0o755)
+        self.source_plugin_root = SCRIPT.resolve().parents[3]
+        self.plugin_id = "codex-orchestration@test-marketplace"
+        self._original_executing_plugin_root = NATIVE.EXECUTING_PLUGIN_ROOT
+        self.activate_plugin_cache(self.plugin_id)
 
     def tearDown(self) -> None:
+        NATIVE.EXECUTING_PLUGIN_ROOT = self._original_executing_plugin_root
         self.temp.cleanup()
+
+    def activate_plugin_cache(self, plugin_id: str) -> None:
+        marketplace = plugin_id.split("@", 1)[1]
+        plugin_root = (
+            self.home
+            / "plugins"
+            / "cache"
+            / marketplace
+            / "codex-orchestration"
+            / "0.9.2"
+        )
+        if not plugin_root.exists():
+            shutil.copytree(
+                self.source_plugin_root,
+                plugin_root,
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+            )
+        self.plugin_id = plugin_id
+        self.plugin_root = plugin_root
+        self.installed_script = (
+            plugin_root
+            / "skills"
+            / "codex-orchestration"
+            / "scripts"
+            / "configure_native_routing.py"
+        )
+        NATIVE.EXECUTING_PLUGIN_ROOT = plugin_root
 
     def run_script(
         self,
@@ -347,12 +407,11 @@ class NativeRoutingTests(unittest.TestCase):
         allow_incompatible: bool = True,
     ) -> subprocess.CompletedProcess[str]:
         compatibility = ["--allow-incompatible-client"] if allow_incompatible else []
-        env = os.environ.copy()
-        env["PATH"] = f"{self.bin}{os.pathsep}{env.get('PATH', '')}"
+        env = self.fake_env()
         result = subprocess.run(
             [
                 sys.executable,
-                str(SCRIPT),
+                str(self.installed_script),
                 "--codex-bin",
                 str(self.codex),
                 "--codex-home",
@@ -370,6 +429,41 @@ class NativeRoutingTests(unittest.TestCase):
         if check and result.returncode != 0:
             self.fail(f"command failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}")
         return result
+
+    def fake_env(self) -> dict[str, str]:
+        env = os.environ.copy()
+        env["PATH"] = f"{self.bin}{os.pathsep}{env.get('PATH', '')}"
+        env["FAKE_PLUGIN_ROOT"] = str(self.source_plugin_root)
+        env["FAKE_PLUGIN_ID"] = self.plugin_id
+        return env
+
+    @staticmethod
+    def plugin_inventory_record(
+        plugin_id: str,
+        source_root: Path,
+        *,
+        enabled: bool,
+    ) -> dict[str, object]:
+        marketplace = plugin_id.split("@", 1)[1]
+        return {
+            "pluginId": plugin_id,
+            "name": "codex-orchestration",
+            "marketplaceName": marketplace,
+            "version": "0.9.2",
+            "installed": True,
+            "enabled": enabled,
+            "source": {"source": "local", "path": str(source_root)},
+            "marketplaceSource": {
+                "sourceType": "local",
+                "source": str(source_root.parent),
+            },
+        }
+
+    def write_plugin_inventory(self, *records: dict[str, object]) -> None:
+        (self.home / ".fake-plugin-inventory.json").write_text(
+            json.dumps({"installed": list(records), "available": []}),
+            encoding="utf-8",
+        )
 
     def read_fake_config(self) -> dict[str, object]:
         return json.loads(
@@ -671,8 +765,9 @@ class NativeRoutingTests(unittest.TestCase):
         state = json.loads(
             (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
         )
-        self.assertEqual(state["schema"], 6)
-        self.assertEqual(state["policy_version"], 6)
+        self.assertEqual(state["schema"], 7)
+        self.assertEqual(state["policy_version"], 7)
+        self.assertEqual(state["plugin_id"], self.plugin_id)
         self.assertEqual(state["planner"]["effort"], "xhigh")
         self.assertEqual(state["designer"]["effort"], "medium")
 
@@ -698,7 +793,8 @@ class NativeRoutingTests(unittest.TestCase):
         state = json.loads(
             (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
         )
-        self.assertEqual(state["schema"], 6)
+        self.assertEqual(state["schema"], 7)
+        self.assertEqual(state["plugin_id"], self.plugin_id)
         self.assertEqual(state["designer"]["kind"], "kimi_cli")
         self.assertEqual(state["designer"]["model"], "kimi-code/k3")
         self.assertEqual(state["designer"]["effort"], "max")
@@ -707,7 +803,7 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertTrue(state["managed"]["mcp"][selected])
         self.assertTrue(state["managed"]["mcp"][planner_selected])
         config = self.read_fake_config()
-        servers = config["plugins"][NATIVE.PLUGIN_ID]["mcp_servers"]
+        servers = config["plugins"][self.plugin_id]["mcp_servers"]
         self.assertTrue(servers[selected]["enabled"])
         self.assertTrue(servers[planner_selected]["enabled"])
 
@@ -717,10 +813,135 @@ class NativeRoutingTests(unittest.TestCase):
 
         self.run_script("--disable", "--apply")
         restored = self.read_fake_config()
-        restored_servers = restored["plugins"][NATIVE.PLUGIN_ID]["mcp_servers"]
+        restored_servers = restored["plugins"][self.plugin_id]["mcp_servers"]
         self.assertNotIn("enabled", restored_servers[selected])
         self.assertNotIn("enabled", restored_servers[planner_selected])
         self.assertFalse((self.home / NATIVE.STATE_FILENAME).exists())
+
+    def test_disabled_canonical_sibling_never_receives_alternate_identity_writes(self) -> None:
+        canonical_id = NATIVE.LEGACY_PLUGIN_ID
+        canonical_root = self.root / "disabled-canonical-plugin"
+        canonical_root.mkdir()
+        (canonical_root / "payload.txt").write_text("canonical", encoding="utf-8")
+        canonical_config = {
+            "mcp_servers": {
+                "fable-advisor-python3": {"enabled": False},
+                "fable-advisor-python": {"enabled": True},
+            }
+        }
+        initial = {
+            "features": {"multi_agent_v2": {}},
+            "plugins": {canonical_id: canonical_config},
+        }
+        (self.home / ".fake-user-config.json").write_text(
+            json.dumps(initial), encoding="utf-8"
+        )
+        self.write_plugin_inventory(
+            self.plugin_inventory_record(
+                canonical_id, canonical_root, enabled=False
+            ),
+            self.plugin_inventory_record(
+                self.plugin_id, self.source_plugin_root, enabled=True
+            ),
+        )
+
+        self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--advisor-fable",
+            "--apply",
+        )
+        configured = self.read_fake_config()
+        self.assertEqual(configured["plugins"][canonical_id], canonical_config)
+        self.assertTrue(
+            configured["plugins"][self.plugin_id]["mcp_servers"]
+            ["fable-advisor-python3"]["enabled"]
+        )
+        state = json.loads(
+            (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
+        )
+        self.assertEqual(state["plugin_id"], self.plugin_id)
+
+        self.write_plugin_inventory(
+            self.plugin_inventory_record(
+                canonical_id, canonical_root, enabled=False
+            ),
+            self.plugin_inventory_record(
+                self.plugin_id, self.source_plugin_root, enabled=False
+            ),
+        )
+        self.run_script("--disable", "--apply")
+        restored = self.read_fake_config()
+        self.assertEqual(restored["plugins"][canonical_id], canonical_config)
+        alternate_servers = restored["plugins"][self.plugin_id]["mcp_servers"]
+        self.assertNotIn("enabled", alternate_servers["fable-advisor-python3"])
+
+    def test_legacy_mcp_state_refuses_alternate_setup_and_disables_canonical_only(self) -> None:
+        canonical_id = NATIVE.LEGACY_PLUGIN_ID
+        alternate_id = self.plugin_id
+        initial = {
+            "features": {"multi_agent_v2": {}},
+            "plugins": {
+                canonical_id: {
+                    "mcp_servers": {"fable-advisor-python3": {}}
+                },
+                alternate_id: {
+                    "mcp_servers": {
+                        "fable-advisor-python3": {"enabled": False}
+                    }
+                }
+            },
+        }
+        (self.home / ".fake-user-config.json").write_text(
+            json.dumps(initial), encoding="utf-8"
+        )
+        self.activate_plugin_cache(canonical_id)
+        self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--advisor-fable",
+            "--apply",
+        )
+        state_path = self.home / NATIVE.STATE_FILENAME
+        legacy = json.loads(state_path.read_text(encoding="utf-8"))
+        legacy["schema"] = 6
+        legacy["policy_version"] = 6
+        legacy.pop("plugin_id")
+        state_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+        self.activate_plugin_cache(alternate_id)
+        self.write_plugin_inventory(
+            self.plugin_inventory_record(
+                canonical_id, self.source_plugin_root, enabled=False
+            ),
+            self.plugin_inventory_record(
+                alternate_id, self.source_plugin_root, enabled=True
+            ),
+        )
+        status = self.run_script("--status", "--require-effective", check=False)
+        self.assertEqual(status.returncode, 1)
+        self.assertIn("Plugin identity:", status.stdout)
+
+        before_refused_setup = self.read_fake_config()
+        refused_setup = self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--advisor-fable",
+            "--apply",
+            check=False,
+        )
+        self.assertEqual(refused_setup.returncode, 2)
+        self.assertIn("Legacy MCP restore state", refused_setup.stderr)
+        self.assertEqual(self.read_fake_config(), before_refused_setup)
+
+        refused_repair = self.run_script("--repair", "--apply", check=False)
+        self.assertEqual(refused_repair.returncode, 2)
+        self.assertIn("Saved plugin identity", refused_repair.stderr)
+        self.assertEqual(self.read_fake_config(), before_refused_setup)
+
+        self.run_script("--disable", "--apply")
+        self.assertEqual(self.read_fake_config(), initial)
+        self.assertFalse(state_path.exists())
 
     def test_prepare_qwen_installs_only_stable_helper_and_prints_hidden_prompt_lane(self) -> None:
         target = (
@@ -755,12 +976,10 @@ class NativeRoutingTests(unittest.TestCase):
             or "secret prompt is hidden" in applied.stdout
         )
 
-    def test_legacy_state_schemas_upgrade_to_six_without_losing_restore(self) -> None:
-        for legacy_schema in (1, 2, 3, 4, 5):
+    def test_legacy_non_mcp_state_schemas_upgrade_to_seven_without_losing_restore(self) -> None:
+        for legacy_schema in (1, 3, 4, 5, 6):
             with self.subTest(schema=legacy_schema):
                 setup_arguments = ["--executor-model", "gpt-5.6-luna"]
-                if legacy_schema == 2:
-                    setup_arguments.append("--advisor-fable")
                 self.run_script(*setup_arguments, "--apply")
 
                 state_path = self.home / NATIVE.STATE_FILENAME
@@ -768,6 +987,7 @@ class NativeRoutingTests(unittest.TestCase):
                 original_previous = legacy["previous"]
                 legacy["schema"] = legacy_schema
                 legacy["policy_version"] = legacy_schema
+                legacy.pop("plugin_id")
                 if legacy_schema < 3:
                     legacy.pop("planner", None)
                 if legacy_schema < 4:
@@ -798,14 +1018,12 @@ class NativeRoutingTests(unittest.TestCase):
                     "--apply",
                 )
                 upgraded = json.loads(state_path.read_text(encoding="utf-8"))
-                self.assertEqual(upgraded["schema"], 6)
-                self.assertEqual(upgraded["policy_version"], 6)
+                self.assertEqual(upgraded["schema"], 7)
+                self.assertEqual(upgraded["policy_version"], 7)
+                self.assertEqual(upgraded["plugin_id"], self.plugin_id)
                 self.assertEqual(upgraded["previous"], original_previous)
                 self.assertEqual(upgraded["planner"]["model"], "gpt-5.6-sol")
                 self.assertEqual(upgraded["designer"]["model"], "gpt-5.6-luna")
-                if legacy_schema == 2:
-                    self.assertIn("mcp", upgraded["managed"])
-
                 self.run_script("--disable", "--apply")
                 self.assertEqual(
                     self.read_fake_config()["features"]["multi_agent_v2"],
@@ -826,11 +1044,14 @@ class NativeRoutingTests(unittest.TestCase):
             (5, 6),
             (6, 1),
             (6, True),
+            (7, 6),
         ):
             with self.subTest(schema=schema, policy=wrong_policy):
                 state = json.loads(json.dumps(current))
                 state["schema"] = schema
                 state["policy_version"] = wrong_policy
+                if schema < 7:
+                    state.pop("plugin_id")
                 if schema < 3:
                     state.pop("planner")
                 if schema < 4:
@@ -852,6 +1073,7 @@ class NativeRoutingTests(unittest.TestCase):
                 state = json.loads(json.dumps(current))
                 state["schema"] = schema
                 state["policy_version"] = schema
+                state.pop("plugin_id")
                 state["planner"] = None
                 state_path.write_text(json.dumps(state), encoding="utf-8")
 
@@ -869,6 +1091,7 @@ class NativeRoutingTests(unittest.TestCase):
                 state = json.loads(json.dumps(current))
                 state["schema"] = schema
                 state["policy_version"] = schema
+                state.pop("plugin_id")
                 if schema < 3:
                     state.pop("planner")
                 state["designer"] = None
@@ -884,6 +1107,7 @@ class NativeRoutingTests(unittest.TestCase):
         current = json.loads(state_path.read_text(encoding="utf-8"))
         current["schema"] = 1
         current["policy_version"] = 1
+        current.pop("plugin_id")
         current.pop("planner")
         mutations = {
             "fable advisor": lambda state: state.__setitem__(
@@ -1314,7 +1538,7 @@ class NativeRoutingTests(unittest.TestCase):
         feature["usage_hint_text"] = (
             f"{NATIVE.MANAGED_MARKER}\ndifferent usage"
         )
-        config["plugins"][NATIVE.PLUGIN_ID]["mcp_servers"][
+        config["plugins"][self.plugin_id]["mcp_servers"][
             "fable-advisor-python3"
         ]["enabled"] = False
         (self.home / ".fake-user-config.json").write_text(
@@ -1339,7 +1563,7 @@ class NativeRoutingTests(unittest.TestCase):
         feature["usage_hint_text"] = (
             f"{NATIVE.MANAGED_MARKER}\ndifferent usage"
         )
-        config["plugins"][NATIVE.PLUGIN_ID]["mcp_servers"][
+        config["plugins"][self.plugin_id]["mcp_servers"][
             "fable-advisor-python3"
         ]["enabled"] = 1
         (self.home / ".fake-user-config.json").write_text(
@@ -1669,8 +1893,12 @@ class NativeRoutingTests(unittest.TestCase):
             "managed_by": "codex-orchestration",
             "config_file": str(self.home / "config.toml"),
         }
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
         with mock.patch.object(NATIVE.os, "fchmod", None):
-            NATIVE._write_state(state_path, state)
+            NATIVE._write_state(state_path, state, identity_guard)
+        identity_guard.assert_unchanged.assert_called_once_with(
+            "routing-state publication"
+        )
         self.assertEqual(json.loads(state_path.read_text(encoding="utf-8")), state)
 
     def test_effective_project_override_is_reported_and_blocks_setup(self) -> None:
@@ -1728,7 +1956,7 @@ class NativeRoutingTests(unittest.TestCase):
             return {"status": "unexpected", "version": "sha256:unknown"}
 
         argv = [
-            str(SCRIPT),
+            str(self.installed_script),
             "--codex-bin",
             str(self.codex),
             "--codex-home",
@@ -1745,6 +1973,7 @@ class NativeRoutingTests(unittest.TestCase):
             mock.patch.object(sys, "argv", argv),
             mock.patch.object(NATIVE, "_batch_write", side_effect=batch_write),
             mock.patch.object(sys, "stderr", stderr),
+            mock.patch.dict(os.environ, self.fake_env()),
         ):
             result = NATIVE.main()
 
@@ -1808,7 +2037,7 @@ class NativeRoutingTests(unittest.TestCase):
             return {"status": "unexpected", "version": "sha256:unknown"}
 
         argv = [
-            str(SCRIPT),
+            str(self.installed_script),
             "--codex-bin",
             str(self.codex),
             "--codex-home",
@@ -1830,6 +2059,7 @@ class NativeRoutingTests(unittest.TestCase):
             ),
             mock.patch.object(NATIVE, "_batch_write", side_effect=batch_write),
             mock.patch.object(sys, "stderr", stderr),
+            mock.patch.dict(os.environ, self.fake_env()),
         ):
             result = NATIVE.main()
 
@@ -1900,7 +2130,7 @@ class NativeRoutingTests(unittest.TestCase):
         shadowed = subprocess.run(
             [
                 sys.executable,
-                str(SCRIPT),
+                str(self.installed_script),
                 "--codex-bin",
                 str(self.codex),
                 "--codex-home",
@@ -1918,6 +2148,7 @@ class NativeRoutingTests(unittest.TestCase):
             stderr=subprocess.PIPE,
             timeout=20,
             check=False,
+            env=self.fake_env(),
         )
         self.assertEqual(shadowed.returncode, 2)
         self.assertIn("Planner personal agent", shadowed.stderr)
@@ -2002,7 +2233,7 @@ class NativeRoutingTests(unittest.TestCase):
         initial = {
             "features": {"multi_agent_v2": {}},
             "plugins": {
-                NATIVE.PLUGIN_ID: {
+                self.plugin_id: {
                     "mcp_servers": {
                         "fable-advisor-python3": {"enabled": False},
                         "fable-advisor-python": {"enabled": True},
@@ -2033,7 +2264,7 @@ class NativeRoutingTests(unittest.TestCase):
         managed_mcp = state["managed"]["mcp"]
         self.assertEqual(sum(value is True for value in managed_mcp.values()), 1)
         self.assertTrue(managed_mcp["fable-advisor-python3"])
-        servers = self.read_fake_config()["plugins"][NATIVE.PLUGIN_ID]["mcp_servers"]
+        servers = self.read_fake_config()["plugins"][self.plugin_id]["mcp_servers"]
         self.assertEqual(
             sum(entry["enabled"] is True for entry in servers.values()), 1
         )
@@ -2049,7 +2280,7 @@ class NativeRoutingTests(unittest.TestCase):
             "--apply",
         )
         self.assertIn("Advisor: Claude Fable 5 high", moved.stdout)
-        moved_servers = self.read_fake_config()["plugins"][NATIVE.PLUGIN_ID][
+        moved_servers = self.read_fake_config()["plugins"][self.plugin_id][
             "mcp_servers"
         ]
         self.assertTrue(moved_servers["fable-advisor-python3"]["enabled"])
@@ -2085,7 +2316,7 @@ class NativeRoutingTests(unittest.TestCase):
                 "multi_agent_v2": {"max_concurrent_threads_per_session": 5}
             },
             "plugins": {
-                NATIVE.PLUGIN_ID: {
+                self.plugin_id: {
                     "mcp_servers": {
                         "fable-advisor-python3": {"enabled": False},
                         "fable-advisor-python": {"enabled": True},
@@ -2109,7 +2340,7 @@ class NativeRoutingTests(unittest.TestCase):
         )
         self.assertIn("Claude Fable 5 max", setup.stdout)
         config = self.read_fake_config()
-        servers = config["plugins"][NATIVE.PLUGIN_ID]["mcp_servers"]
+        servers = config["plugins"][self.plugin_id]["mcp_servers"]
         self.assertTrue(servers["fable-advisor-python3"]["enabled"])
         self.assertFalse(servers["fable-advisor-python"]["enabled"])
         self.assertNotIn("fable-advisor-py", servers)
@@ -2132,7 +2363,7 @@ class NativeRoutingTests(unittest.TestCase):
             "--apply",
         )
         self.assertIn("Advisor: none", update.stdout)
-        servers = self.read_fake_config()["plugins"][NATIVE.PLUGIN_ID]["mcp_servers"]
+        servers = self.read_fake_config()["plugins"][self.plugin_id]["mcp_servers"]
         self.assertTrue(all(not entry["enabled"] for entry in servers.values()))
 
         self.run_script("--disable", "--apply")
@@ -2305,7 +2536,7 @@ class NativeRoutingTests(unittest.TestCase):
         shadowed = subprocess.run(
             [
                 sys.executable,
-                str(SCRIPT),
+                str(self.installed_script),
                 "--codex-bin",
                 str(self.codex),
                 "--codex-home",
@@ -2321,6 +2552,7 @@ class NativeRoutingTests(unittest.TestCase):
             stderr=subprocess.PIPE,
             timeout=20,
             check=False,
+            env=self.fake_env(),
         )
         self.assertEqual(shadowed.returncode, 2)
         self.assertIn("shadowed by a project role", shadowed.stderr)

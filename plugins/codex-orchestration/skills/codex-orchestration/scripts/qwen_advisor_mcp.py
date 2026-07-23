@@ -212,7 +212,7 @@ def _post_json(endpoint: str, payload: dict[str, Any], credential: str) -> str:
             "Accept-Encoding": "identity",
             "Authorization": f"Bearer {credential}",
             "Content-Type": "application/json",
-            "User-Agent": "codex-orchestration-qwen-advisor/0.9.1",
+            "User-Agent": "codex-orchestration-qwen-advisor/0.9.2",
             "x-dashscope-session-cache": "disable",
         },
         method="POST",

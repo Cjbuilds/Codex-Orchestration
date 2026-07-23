@@ -116,10 +116,22 @@ wire effort itself, and never represents that as runtime effort telemetry. The O
 credential remains owned by Kimi Code CLI and is never read, copied, logged, or
 returned by the plugin.
 
-Routing schema/policy version 6 adds the sealed `qwen_cli` Advisor route (a stable
-saved-state tag for the Token Plan transport) while
-retaining strict validation for schemas 1–5; schema 5 introduced only the sealed
-`kimi_cli` Designer route. Legacy schemas cannot smuggle newer fields. Persistent
+Routing schema/policy version 7 binds every new restore state to one exact validated
+Codex plugin identity. Native plugin inventory, executable identity, marketplace
+source identity, the executing package's documented cache coordinate, and
+deterministic payload hashes are guarded independently from App Server's config
+version. On Windows, identity sources are held through strict non-write/non-delete
+shared handles and every identity, stat, and hash recheck uses those retained handles.
+Setup and repair require the enabled executing installation;
+disable resolves the saved namespace from the full installed inventory even when it
+is disabled. Schemas 1–6 remain bound only to the historical canonical marketplace
+identity, and their MCP restore snapshots are never transplanted to another
+namespace. Missing, malformed, duplicate, disabled-executing, or drifted identity
+fails closed.
+
+Schema 6 introduced the sealed `qwen_cli` Advisor route (a stable saved-state tag
+for the Token Plan transport), while schema 5 introduced only the sealed `kimi_cli`
+Designer route. Legacy schemas cannot smuggle newer fields. Persistent
 Designer accepts only a direct same-provider model or the exact bundled Kimi route,
 never a privileged planning bridge or project-shadowable unqualified agent name.
 Planner and Advisor must remain independent, including rejecting a direct Qwen

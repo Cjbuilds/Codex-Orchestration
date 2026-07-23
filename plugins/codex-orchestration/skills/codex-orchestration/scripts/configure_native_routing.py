@@ -10,6 +10,7 @@ readback verification.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -26,6 +27,7 @@ import time
 from typing import Any
 
 import external_credentials
+import plugin_identity
 from routing_state import (
     BUNDLED_MCP_SERVERS,
     FABLE_EFFORTS,
@@ -46,11 +48,11 @@ except ModuleNotFoundError as exc:  # pragma: no cover - Python < 3.11
     raise SystemExit("Python 3.11 or newer is required (missing tomllib).") from exc
 
 
-POLICY_VERSION = 6
-STATE_SCHEMA = 6
+POLICY_VERSION = 7
+STATE_SCHEMA = 7
 STATE_FILENAME = ".codex-orchestration-routing.json"
 PROBE_VALUE = "CODEX_ORCHESTRATION_CAPABILITY_PROBE"
-PLUGIN_ID = "codex-orchestration@codex-orchestration"
+LEGACY_PLUGIN_ID = plugin_identity.LEGACY_PLUGIN_ID
 FABLE_DEFAULT_EFFORT = "high"
 FABLE_EFFORT_CHOICES = ("low", "medium", "high", "xhigh", "max")
 FABLE_EFFORT_ALIASES = {"ultra": "max"}
@@ -81,6 +83,7 @@ CUSTOM_AGENT_MANAGED_MARKER = (
     "# Managed by codex-orchestration. Standalone custom agent v2."
 )
 MISSING = object()
+EXECUTING_PLUGIN_ROOT = Path(__file__).resolve().parents[3]
 
 
 class ConfigurationError(RuntimeError):
@@ -467,7 +470,7 @@ class AppServer:
                     "clientInfo": {
                         "name": "codex_orchestration_installer",
                         "title": "Codex Orchestration Installer",
-                        "version": "0.9.1",
+                        "version": "0.9.2",
                     },
                     "capabilities": {"experimentalApi": True},
                 },
@@ -637,11 +640,17 @@ def snapshot_edit(key_path: str, saved: dict[str, Any]) -> dict[str, Any] | None
     }
 
 
-def mcp_key_path(server: str) -> str:
+def mcp_key_path(plugin_id: str, server: str) -> str:
     return (
-        f"plugins.{json.dumps(PLUGIN_ID)}.mcp_servers."
+        f"plugins.{json.dumps(plugin_id)}.mcp_servers."
         f"{json.dumps(server)}.enabled"
     )
+
+
+def _state_plugin_id(state: dict[str, Any]) -> str:
+    if state["schema"] >= 7:
+        return state["plugin_id"]
+    return LEGACY_PLUGIN_ID
 
 
 def validate_planning_routes(
@@ -706,7 +715,12 @@ def _validate_state_config(state: dict[str, Any] | None, config_path: Path) -> N
         )
 
 
-def _write_state(path: Path, state: dict[str, Any]) -> None:
+def _write_state(
+    path: Path,
+    state: dict[str, Any],
+    identity_guard: plugin_identity.PluginIdentityGuard,
+) -> None:
+    identity_guard.assert_unchanged("routing-state publication")
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists() or path.is_symlink():
         _read_state(path)
@@ -741,10 +755,13 @@ def _write_state(path: Path, state: dict[str, Any]) -> None:
         temp_path.unlink(missing_ok=True)
 
 
-def _remove_state(path: Path) -> None:
+def _remove_state(
+    path: Path, identity_guard: plugin_identity.PluginIdentityGuard
+) -> None:
     if not path.exists():
         return
     _read_state(path)
+    identity_guard.assert_unchanged("routing-state removal")
     path.unlink()
     try:
         directory_fd = os.open(path.parent, os.O_RDONLY)
@@ -1336,7 +1353,7 @@ def _compatibility_report(
     return results
 
 
-def _current_values(config: dict[str, Any]) -> dict[str, Any]:
+def _current_values(config: dict[str, Any], plugin_id: str) -> dict[str, Any]:
     return {
         "feature": nested_get(config, "features", "multi_agent_v2"),
         "mode": nested_get(
@@ -1355,7 +1372,7 @@ def _current_values(config: dict[str, Any]) -> dict[str, Any]:
             server: nested_get(
                 config,
                 "plugins",
-                PLUGIN_ID,
+                plugin_id,
                 "mcp_servers",
                 server,
                 "enabled",
@@ -1414,8 +1431,11 @@ def _batch_write(
     edits: list[dict[str, Any]],
     version: str | None,
     *,
+    identity_guard: plugin_identity.PluginIdentityGuard,
+    identity_phase: str,
     reload_user_config: bool,
 ) -> dict[str, Any]:
+    identity_guard.assert_unchanged(identity_phase)
     return app.request(
         "config/batchWrite",
         {
@@ -1438,25 +1458,38 @@ def _status(
         label = "compatible" if supported else f"incompatible ({detail})"
         print(f"Client: {binary} ({binary_version(binary)}) — {label}")
         clients_compatible = clients_compatible and supported
-    with AppServer(target, codex_home) as app:
+    with contextlib.ExitStack() as stack:
+        app = stack.enter_context(AppServer(target, codex_home))
+        identity_guard = stack.enter_context(
+            plugin_identity.guard_plugin_identity(
+                target,
+                EXECUTING_PLUGIN_ROOT,
+                "setup",
+                codex_home=app.codex_home,
+            )
+        )
+        plugin_id = identity_guard.selected_plugin_id
         workspace = Path.cwd().resolve()
         read_result = app.request(
             "config/read",
             {"includeLayers": True, "cwd": str(workspace)},
         )
         config, _ = _user_layer(read_result)
-        current = _current_values(config)
+        current = _current_values(config, plugin_id)
         effective_config = read_result.get("config")
         effective = _current_values(
-            effective_config if isinstance(effective_config, dict) else {}
+            effective_config if isinstance(effective_config, dict) else {}, plugin_id
         )
         state_path = app.codex_home / STATE_FILENAME
         state = _read_state(state_path)
         _validate_state_config(state, app.config_path)
+        identity_matches = state is None or _state_plugin_id(state) == plugin_id
         managed_pair = _is_managed(current["mode"]) and _is_managed(
             current["usage"]
         )
-        state_matches = state is not None and _managed_matches(state, current)
+        state_matches = (
+            state is not None and identity_matches and _managed_matches(state, current)
+        )
         if state is not None and managed_pair and not state_matches:
             routing_state = "managed fields conflict with local restore state"
         elif managed_pair:
@@ -1480,6 +1513,7 @@ def _status(
         else:
             routing_state = "partial or user-authored"
         print(f"Native policy: {routing_state}")
+        print(f"Plugin identity: {plugin_id}")
         if routing_state == "managed fields conflict with local restore state":
             print(
                 "Recovery: run --repair as a dry run only when the saved plugin "
@@ -1599,6 +1633,7 @@ def _status(
             clients_compatible
             and routing_state.startswith("installed and effective")
             and state_matches
+            and identity_matches
             and agent_routes_available
             and fable_available
             and kimi_available
@@ -1606,12 +1641,14 @@ def _status(
             and not role_issues
             and not orphaned_roles
         )
+        identity_guard.assert_unchanged("status publication")
     return 1 if require_effective and not healthy else 0
 
 
 def _prepare_setup_state(
     config: dict[str, Any],
     existing_state: dict[str, Any] | None,
+    plugin_id: str,
     mode: str,
     usage: str,
     executor: dict[str, Any],
@@ -1621,11 +1658,28 @@ def _prepare_setup_state(
     config_path: Path,
     replace_existing: bool,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
-    current = _current_values(config)
+    current = _current_values(config, plugin_id)
     feature = current["feature"]
     scalar_feature = isinstance(feature, bool)
 
     if existing_state is not None:
+        existing_plugin_id = _state_plugin_id(existing_state)
+        existing_managed = existing_state.get("managed")
+        legacy_mcp = (
+            existing_state["schema"] < 7
+            and isinstance(existing_managed, dict)
+            and isinstance(existing_managed.get("mcp"), dict)
+        )
+        if existing_state["schema"] >= 7 and existing_plugin_id != plugin_id:
+            raise ConfigurationError(
+                "Saved routing state belongs to a different plugin identity; "
+                "refusing to move restore data between marketplace namespaces."
+            )
+        if legacy_mcp and plugin_id != LEGACY_PLUGIN_ID:
+            raise ConfigurationError(
+                "Legacy MCP restore state belongs to the historical canonical plugin "
+                "identity. Disable it before setting up a different marketplace identity."
+            )
         if not _managed_matches(existing_state, current):
             raise ConfigurationError(
                 "The managed routing fields changed outside this plugin. Refusing "
@@ -1816,13 +1870,13 @@ def _prepare_setup_state(
         for server, enabled in managed_mcp.items():
             edits.append(
                 {
-                    "keyPath": mcp_key_path(server),
+                    "keyPath": mcp_key_path(plugin_id, server),
                     "value": enabled,
                     "mergeStrategy": "replace",
                 }
             )
             rollback_edit = snapshot_edit(
-                mcp_key_path(server), snapshot(current["mcp"][server])
+                mcp_key_path(plugin_id, server), snapshot(current["mcp"][server])
             )
             if rollback_edit is not None:
                 rollback.append(rollback_edit)
@@ -1841,6 +1895,7 @@ def _prepare_setup_state(
         "policy_version": POLICY_VERSION,
         "managed_by": "codex-orchestration",
         "config_file": str(config_path),
+        "plugin_id": plugin_id,
         "executor": executor,
         "planner": planner,
         "advisor": advisor,
@@ -1859,8 +1914,17 @@ def _restore_pre_repair_hints(
     expected: dict[str, Any],
     version: str | None,
     workspace: Path,
+    identity_guard: plugin_identity.PluginIdentityGuard,
+    plugin_id: str,
 ) -> None:
-    result = _batch_write(app, rollback, version, reload_user_config=True)
+    result = _batch_write(
+        app,
+        rollback,
+        version,
+        identity_guard=identity_guard,
+        identity_phase="repair rollback",
+        reload_user_config=True,
+    )
     if result.get("status") not in {"ok", "okOverridden"}:
         raise ConfigurationError(
             f"unexpected rollback status {result.get('status')!r}"
@@ -1870,7 +1934,7 @@ def _restore_pre_repair_hints(
         {"includeLayers": True, "cwd": str(workspace)},
     )
     user_config, _ = _user_layer(read_result)
-    current = _current_values(user_config)
+    current = _current_values(user_config, plugin_id)
     if any(current[field] != value for field, value in expected.items()):
         raise ConfigurationError("pre-repair hint restoration could not be verified")
 
@@ -1881,6 +1945,8 @@ def _repair(
     version: str | None,
     state: dict[str, Any] | None,
     workspace: Path,
+    identity_guard: plugin_identity.PluginIdentityGuard,
+    plugin_id: str,
     apply: bool,
 ) -> int:
     """Restore only saved managed hint bytes after exact drift validation."""
@@ -1889,10 +1955,15 @@ def _repair(
         raise ConfigurationError(
             "Routing repair requires valid saved plugin state; run status first."
         )
+    if _state_plugin_id(state) != plugin_id:
+        raise ConfigurationError(
+            "Routing repair state belongs to a different plugin identity; refusing "
+            "to repair across marketplace namespaces."
+        )
     managed = state.get("managed")
     if not isinstance(managed, dict):
         raise ConfigurationError("Routing repair state has no managed values.")
-    current = _current_values(config)
+    current = _current_values(config, plugin_id)
     drifted = [
         field for field in ("mode", "usage") if current[field] != managed[field]
     ]
@@ -1982,7 +2053,14 @@ def _repair(
         print("Dry run only. Re-run with --repair --apply after reviewing this preview.")
         return 0
 
-    result = _batch_write(app, edits, version, reload_user_config=True)
+    result = _batch_write(
+        app,
+        edits,
+        version,
+        identity_guard=identity_guard,
+        identity_phase="repair write",
+        reload_user_config=True,
+    )
     if result.get("status") == "okOverridden":
         try:
             _restore_pre_repair_hints(
@@ -1991,6 +2069,8 @@ def _repair(
                 {field: current[field] for field in drifted},
                 result.get("version"),
                 workspace,
+                identity_guard,
+                plugin_id,
             )
         except ConfigurationError as rollback_exc:
             raise ConfigurationError(
@@ -2011,10 +2091,10 @@ def _repair(
         {"includeLayers": True, "cwd": str(workspace)},
     )
     verify_config, verify_version = _user_layer(verify_result)
-    verify_current = _current_values(verify_config)
+    verify_current = _current_values(verify_config, plugin_id)
     effective_config = verify_result.get("config")
     effective_current = _current_values(
-        effective_config if isinstance(effective_config, dict) else {}
+        effective_config if isinstance(effective_config, dict) else {}, plugin_id
     )
     if not _managed_matches(state, verify_current):
         raise ConfigurationError(
@@ -2029,6 +2109,8 @@ def _repair(
                 {field: current[field] for field in drifted},
                 verify_version,
                 workspace,
+                identity_guard,
+                plugin_id,
             )
         except ConfigurationError as rollback_exc:
             raise ConfigurationError(
@@ -2047,6 +2129,7 @@ def _repair(
             "overwritten; run status before any further routing change."
         )
 
+    identity_guard.assert_unchanged("repair success publication")
     print(
         "Native routing policy repaired; fully quit and reopen Codex, then start a "
         "new task so the current policy and MCP bridge are loaded together."
@@ -2059,9 +2142,11 @@ def _disable(
     config: dict[str, Any],
     version: str | None,
     state: dict[str, Any] | None,
+    identity_guard: plugin_identity.PluginIdentityGuard,
+    plugin_id: str,
     apply: bool,
 ) -> int:
-    current = _current_values(config)
+    current = _current_values(config, plugin_id)
     state_path = app.codex_home / STATE_FILENAME
     if state is None:
         managed_mode = _is_managed(current["mode"])
@@ -2143,7 +2228,9 @@ def _disable(
             edits.extend(
                 edit
                 for edit in (
-                    snapshot_edit(mcp_key_path(server), previous_mcp[server])
+                    snapshot_edit(
+                        mcp_key_path(plugin_id, server), previous_mcp[server]
+                    )
                     for server in previous_mcp
                 )
                 if edit is not None
@@ -2152,10 +2239,18 @@ def _disable(
     if not apply:
         print("Dry run only. Re-run with --disable --apply after reviewing this preview.")
         return 0
-    result = _batch_write(app, edits, version, reload_user_config=True)
+    result = _batch_write(
+        app,
+        edits,
+        version,
+        identity_guard=identity_guard,
+        identity_phase="disable write",
+        reload_user_config=True,
+    )
     if result.get("status") not in {"ok", "okOverridden"}:
         raise ConfigurationError(f"Unexpected config write status: {result.get('status')!r}")
-    _remove_state(state_path)
+    _remove_state(state_path, identity_guard)
+    identity_guard.assert_unchanged("disable success publication")
     print("Native routing disabled. Start a new Codex task to clear the loaded policy.")
     return 0
 
@@ -2186,7 +2281,8 @@ def main() -> int:
             args.allow_incompatible_client or args.disable,
         )
 
-        with AppServer(target, args.codex_home) as app:
+        with contextlib.ExitStack() as stack:
+            app = stack.enter_context(AppServer(target, args.codex_home))
             workspace = Path.cwd().resolve()
             read_result = app.request(
                 "config/read",
@@ -2200,8 +2296,39 @@ def main() -> int:
             state_path = app.codex_home / STATE_FILENAME
             state = _read_state(state_path)
             _validate_state_config(state, app.config_path)
+            if args.disable and state is not None:
+                if state["schema"] >= 7:
+                    identity_selector = "disable-schema7"
+                    saved_plugin_id = state["plugin_id"]
+                else:
+                    identity_selector = "disable-legacy"
+                    saved_plugin_id = None
+            elif args.repair:
+                identity_selector = "repair" if state is not None else "setup"
+                saved_plugin_id = _state_plugin_id(state) if state is not None else None
+            else:
+                identity_selector = "setup"
+                saved_plugin_id = None
+            identity_guard = stack.enter_context(
+                plugin_identity.guard_plugin_identity(
+                    target,
+                    EXECUTING_PLUGIN_ROOT,
+                    identity_selector,
+                    saved_plugin_id=saved_plugin_id,
+                    codex_home=app.codex_home,
+                )
+            )
+            plugin_id = identity_guard.selected_plugin_id
             if args.disable:
-                return _disable(app, config, version, state, args.apply)
+                return _disable(
+                    app,
+                    config,
+                    version,
+                    state,
+                    identity_guard,
+                    plugin_id,
+                    args.apply,
+                )
             if args.repair:
                 return _repair(
                     app,
@@ -2209,6 +2336,8 @@ def main() -> int:
                     version,
                     state,
                     workspace,
+                    identity_guard,
+                    plugin_id,
                     args.apply,
                 )
 
@@ -2352,6 +2481,7 @@ def main() -> int:
             new_state, edits, rollback = _prepare_setup_state(
                 config,
                 state,
+                plugin_id,
                 mode,
                 usage,
                 executor,
@@ -2409,13 +2539,22 @@ def main() -> int:
                 print("Dry run only. Re-run with --apply after reviewing this preview.")
                 return 0
 
-            result = _batch_write(app, edits, version, reload_user_config=True)
+            result = _batch_write(
+                app,
+                edits,
+                version,
+                identity_guard=identity_guard,
+                identity_phase="setup write",
+                reload_user_config=True,
+            )
             if result.get("status") == "okOverridden":
                 try:
                     rollback_result = _batch_write(
                         app,
                         rollback,
                         result.get("version"),
+                        identity_guard=identity_guard,
+                        identity_phase="setup override rollback",
                         reload_user_config=True,
                     )
                     if rollback_result.get("status") not in {"ok", "okOverridden"}:
@@ -2438,13 +2577,15 @@ def main() -> int:
                     f"Unexpected config write status: {result.get('status')!r}"
                 )
             try:
-                _write_state(state_path, new_state)
+                _write_state(state_path, new_state, identity_guard)
             except (ConfigurationError, OSError) as state_exc:
                 try:
                     rollback_result = _batch_write(
                         app,
                         rollback,
                         result.get("version"),
+                        identity_guard=identity_guard,
+                        identity_phase="setup state-failure rollback",
                         reload_user_config=True,
                     )
                     if rollback_result.get("status") not in {"ok", "okOverridden"}:
@@ -2467,10 +2608,11 @@ def main() -> int:
                 {"includeLayers": True, "cwd": str(workspace)},
             )
             verify_config, verify_version = _user_layer(verify_result)
-            verify_current = _current_values(verify_config)
+            verify_current = _current_values(verify_config, plugin_id)
             effective_config = verify_result.get("config")
             effective_current = _current_values(
-                effective_config if isinstance(effective_config, dict) else {}
+                effective_config if isinstance(effective_config, dict) else {},
+                plugin_id,
             )
             user_matches = _managed_matches(new_state, verify_current)
             effective_matches = _managed_matches(new_state, effective_current)
@@ -2487,6 +2629,8 @@ def main() -> int:
                         app,
                         rollback,
                         verify_version,
+                        identity_guard=identity_guard,
+                        identity_phase="setup readback rollback",
                         reload_user_config=True,
                     )
                     if rollback_result.get("status") not in {"ok", "okOverridden"}:
@@ -2495,9 +2639,9 @@ def main() -> int:
                             f"{rollback_result.get('status')!r}"
                         )
                     if state is None:
-                        _remove_state(state_path)
+                        _remove_state(state_path, identity_guard)
                     else:
-                        _write_state(state_path, state)
+                        _write_state(state_path, state, identity_guard)
                 except (ConfigurationError, OSError) as rollback_exc:
                     raise ConfigurationError(
                         "Codex accepted the write but current-workspace effective "
@@ -2509,13 +2653,20 @@ def main() -> int:
                     "effective readback did not match; the prior config and restore "
                     "state were reinstated."
                 )
+            identity_guard.assert_unchanged("setup success publication")
             print(
                 "Native routing policy installed. Start a new Codex task, select a "
                 "v2 model such as current Sol or Terra as orchestrator, and use "
                 "Codex normally."
             )
             return 0
-    except (ConfigurationError, OSError, KeyError, TypeError) as exc:
+    except (
+        ConfigurationError,
+        plugin_identity.PluginIdentityError,
+        OSError,
+        KeyError,
+        TypeError,
+    ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
