@@ -3039,6 +3039,12 @@ def _disable(
                             "forward-compensated config did not match saved managed "
                             "state"
                         )
+                    _, compensated_state_digest = _read_state_snapshot(state_path)
+                    if compensated_state_digest != state_digest:
+                        raise ConfigurationError(
+                            "canonical routing state changed during managed-config "
+                            "compensation"
+                        )
                 except BaseException as compensation_exc:
                     raise ConfigurationError(
                         "Disable config restoration completed, but state removal did "
@@ -3544,6 +3550,14 @@ def main() -> int:
                                 raise ConfigurationError(
                                     "forward-compensated user config did not match the "
                                     "newly published restore state"
+                                )
+                            _, compensated_state_digest = _read_state_snapshot(
+                                state_path
+                            )
+                            if compensated_state_digest != published_state_digest:
+                                raise ConfigurationError(
+                                    "canonical routing state changed during forward "
+                                    "config compensation"
                                 )
                         except BaseException as compensation_exc:
                             raise ConfigurationError(

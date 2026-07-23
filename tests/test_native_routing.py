@@ -1044,6 +1044,48 @@ class NativeRoutingTests(unittest.TestCase):
         )
 
     @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
+    def test_disable_compensation_rechecks_state_after_config_write(self) -> None:
+        self.run_script("--executor-model", "gpt-5.6-luna", "--apply")
+        state_path = self.home / NATIVE.STATE_FILENAME
+        external_state = self.valid_state("gpt-5.6-sol")
+        external_bytes = (
+            json.dumps(external_state, indent=2, sort_keys=True) + "\n"
+        ).encode("utf-8")
+        real_batch_write = NATIVE._batch_write
+        calls = 0
+
+        def batch_write(*args: object, **kwargs: object) -> dict[str, object]:
+            nonlocal calls
+            calls += 1
+            result = real_batch_write(*args, **kwargs)
+            if calls == 2:
+                state_path.write_bytes(external_bytes)
+            return result
+
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", self.disable_main_argv()),
+            mock.patch.object(NATIVE, "_batch_write", side_effect=batch_write),
+            mock.patch.object(
+                NATIVE,
+                "_remove_state",
+                side_effect=KeyboardInterrupt("before removal work"),
+            ),
+            mock.patch.object(sys, "stdout", io.StringIO()),
+            mock.patch.object(sys, "stderr", stderr),
+            mock.patch.dict(os.environ, self.fake_env()),
+        ):
+            result = NATIVE.main()
+
+        self.assertEqual(result, 2)
+        self.assertEqual(calls, 2)
+        self.assertIn("forward managed-config compensation failed", stderr.getvalue())
+        self.assertIn("may be inconsistent", stderr.getvalue())
+        self.assertIn("Run status", stderr.getvalue())
+        self.assertNotIn("re-paired", stderr.getvalue())
+        self.assertEqual(state_path.read_bytes(), external_bytes)
+
+    @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
     def test_disable_unknown_state_digest_is_actionable(self) -> None:
         self.run_script("--executor-model", "gpt-5.6-luna", "--apply")
         state_path = self.home / NATIVE.STATE_FILENAME
@@ -3892,6 +3934,69 @@ class NativeRoutingTests(unittest.TestCase):
             NATIVE._read_state(self.home / NATIVE.STATE_FILENAME)["executor"]["model"],
             "gpt-5.6-luna",
         )
+
+    @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
+    def test_effective_compensation_rechecks_state_after_config_write(self) -> None:
+        base_config = {
+            "features": {
+                "multi_agent_v2": {"max_concurrent_threads_per_session": 5}
+            },
+            "unrelated": {"keep": True},
+        }
+        (self.home / ".fake-effective-config.json").write_text(
+            json.dumps(base_config), encoding="utf-8"
+        )
+        state_path = self.home / NATIVE.STATE_FILENAME
+        external_state = self.valid_state("gpt-5.6-sol")
+        external_bytes = (
+            json.dumps(external_state, indent=2, sort_keys=True) + "\n"
+        ).encode("utf-8")
+        real_batch_write = NATIVE._batch_write
+        calls = 0
+
+        def batch_write(*args: object, **kwargs: object) -> dict[str, object]:
+            nonlocal calls
+            calls += 1
+            result = real_batch_write(*args, **kwargs)
+            if calls == 3:
+                state_path.write_bytes(external_bytes)
+            return result
+
+        argv = [
+            str(self.installed_script),
+            "--codex-bin",
+            str(self.codex),
+            "--codex-home",
+            str(self.home),
+            "--allow-incompatible-client",
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "high",
+            "--apply",
+        ]
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(NATIVE, "_batch_write", side_effect=batch_write),
+            mock.patch.object(
+                NATIVE,
+                "_remove_state",
+                side_effect=KeyboardInterrupt("before state rollback"),
+            ),
+            mock.patch.object(sys, "stdout", io.StringIO()),
+            mock.patch.object(sys, "stderr", stderr),
+            mock.patch.dict(os.environ, self.fake_env()),
+        ):
+            result = NATIVE.main()
+
+        self.assertEqual(result, 2)
+        self.assertEqual(calls, 3)
+        self.assertIn("forward config compensation failed", stderr.getvalue())
+        self.assertIn("may be inconsistent", stderr.getvalue())
+        self.assertIn("Run status", stderr.getvalue())
+        self.assertNotIn("re-paired", stderr.getvalue())
+        self.assertEqual(state_path.read_bytes(), external_bytes)
 
     @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
     def test_effective_state_rollback_unknown_digest_is_actionable(self) -> None:
