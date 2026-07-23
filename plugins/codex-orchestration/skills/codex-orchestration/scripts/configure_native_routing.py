@@ -1959,6 +1959,54 @@ def _disable_values_match(
     )
 
 
+def _managed_compensation_edits(
+    state: dict[str, Any], current: dict[str, Any], plugin_id: str
+) -> list[dict[str, Any]]:
+    """Recreate exactly the validated managed config without crossing namespaces."""
+
+    if isinstance(state.get("scalar_origin"), bool):
+        edits = [
+            {
+                "keyPath": "features.multi_agent_v2",
+                "value": current["feature"],
+                "mergeStrategy": "replace",
+            }
+        ]
+    else:
+        paths = {
+            "metadata": "features.multi_agent_v2.hide_spawn_agent_metadata",
+            "namespace": "features.multi_agent_v2.tool_namespace",
+            "mode": "features.multi_agent_v2.multi_agent_mode_hint_text",
+            "usage": "features.multi_agent_v2.usage_hint_text",
+        }
+        edits = [
+            {
+                "keyPath": path,
+                "value": current[field],
+                "mergeStrategy": "replace",
+            }
+            for field, path in paths.items()
+        ]
+
+    managed = state.get("managed")
+    managed_mcp = managed.get("mcp") if isinstance(managed, dict) else None
+    if isinstance(managed_mcp, dict):
+        for server in managed_mcp:
+            if server not in BUNDLED_MCP_SERVERS:
+                raise ConfigurationError(
+                    f"Saved routing state names an unmanaged MCP server: {server}"
+                )
+            value = current["mcp"].get(server, MISSING)
+            edits.append(
+                {
+                    "keyPath": mcp_key_path(plugin_id, server),
+                    "value": None if value is MISSING else value,
+                    "mergeStrategy": "replace",
+                }
+            )
+    return edits
+
+
 def _managed_matches(state: dict[str, Any], current: dict[str, Any]) -> bool:
     managed = state.get("managed")
     base_matches = (
@@ -2749,6 +2797,7 @@ def _disable(
 ) -> int:
     current = _current_values(config, plugin_id)
     state_path = app.codex_home / STATE_FILENAME
+    managed_compensation: list[dict[str, Any]] | None = None
     if state is None:
         managed_mode = _is_managed(current["mode"])
         managed_usage = _is_managed(current["usage"])
@@ -2785,6 +2834,9 @@ def _disable(
                 "Managed routing fields were edited after setup. Refusing to erase "
                 "those changes; restore the managed values or remove them manually."
             )
+        managed_compensation = _managed_compensation_edits(
+            state, current, plugin_id
+        )
         previous = state.get("previous")
         if not isinstance(previous, dict):
             raise ConfigurationError("Routing state has no restore data.")
@@ -2861,7 +2913,7 @@ def _disable(
     read_result = app.request(
         "config/read", {"includeLayers": True, "cwd": str(workspace)}
     )
-    user_config, _ = _user_layer(read_result)
+    user_config, post_disable_version = _user_layer(read_result)
     user_current = _current_values(user_config, plugin_id)
     if not _disable_values_match(expected, user_current, compare_feature):
         raise ConfigurationError(
@@ -2877,7 +2929,84 @@ def _disable(
             "The restored routing values are overridden in this workspace; saved "
             "restore state remains available."
         )
-    _remove_state(state_path, identity_guard, state_digest)
+    if state is None:
+        _remove_state(state_path, identity_guard, state_digest)
+    else:
+        try:
+            _remove_state(state_path, identity_guard, state_digest)
+        except BaseException as removal_exc:
+            try:
+                _, observed_state_digest = _read_state_snapshot(state_path)
+            except BaseException as state_read_exc:
+                raise ConfigurationError(
+                    "Disable config restoration completed, but routing-state removal "
+                    "and canonical-state readback failed. Config and state may be "
+                    "inconsistent. Run status before continuing."
+                ) from state_read_exc
+
+            if observed_state_digest is None:
+                if not isinstance(removal_exc, Exception):
+                    raise
+                raise ConfigurationError(
+                    "Native routing config was disabled and canonical restore state "
+                    "was removed despite a removal diagnostic; config and state are "
+                    "paired."
+                ) from removal_exc
+
+            if observed_state_digest == state_digest:
+                try:
+                    if managed_compensation is None:
+                        raise ConfigurationError(
+                            "managed compensation edits were unavailable"
+                        )
+                    compensation_result = _batch_write(
+                        app,
+                        managed_compensation,
+                        post_disable_version,
+                        identity_guard=identity_guard,
+                        identity_phase="disable state-failure compensation",
+                        reload_user_config=True,
+                    )
+                    if compensation_result.get("status") not in {
+                        "ok",
+                        "okOverridden",
+                    }:
+                        raise ConfigurationError(
+                            "unexpected compensation status "
+                            f"{compensation_result.get('status')!r}"
+                        )
+                    compensation_read = app.request(
+                        "config/read",
+                        {"includeLayers": True, "cwd": str(workspace)},
+                    )
+                    compensation_config, _ = _user_layer(compensation_read)
+                    compensation_current = _current_values(
+                        compensation_config, plugin_id
+                    )
+                    if not _managed_matches(state, compensation_current):
+                        raise ConfigurationError(
+                            "forward-compensated config did not match saved managed "
+                            "state"
+                        )
+                except BaseException as compensation_exc:
+                    raise ConfigurationError(
+                        "Disable config restoration completed, but state removal did "
+                        "not commit and forward managed-config compensation failed. "
+                        "Config and state may be inconsistent. Run status before "
+                        "continuing."
+                    ) from compensation_exc
+                if not isinstance(removal_exc, Exception):
+                    raise
+                raise ConfigurationError(
+                    "Routing-state removal failed before commit; the exact managed "
+                    "config and saved state were re-paired."
+                ) from removal_exc
+
+            raise ConfigurationError(
+                "Disable config restoration completed, but canonical routing state "
+                "matched neither the exact saved state nor committed removal. Config "
+                "and state may be inconsistent. Run status before continuing."
+            ) from removal_exc
     identity_guard.assert_unchanged("disable success publication")
     print("Native routing disabled. Start a new Codex task to clear the loaded policy.")
     return 0

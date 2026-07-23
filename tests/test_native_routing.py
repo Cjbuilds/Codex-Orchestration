@@ -436,6 +436,18 @@ class NativeRoutingTests(unittest.TestCase):
             self.fail(f"command failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}")
         return result
 
+    def disable_main_argv(self) -> list[str]:
+        return [
+            str(self.installed_script),
+            "--codex-bin",
+            str(self.codex),
+            "--codex-home",
+            str(self.home),
+            "--allow-incompatible-client",
+            "--disable",
+            "--apply",
+        ]
+
     def fake_env(self) -> dict[str, str]:
         env = os.environ.copy()
         env["PATH"] = f"{self.bin}{os.pathsep}{env.get('PATH', '')}"
@@ -893,6 +905,261 @@ class NativeRoutingTests(unittest.TestCase):
         feature = self.read_fake_config()["features"]["multi_agent_v2"]
         self.assertEqual(feature, {"max_concurrent_threads_per_session": 5})
         self.assertFalse((self.home / NATIVE.STATE_FILENAME).exists())
+
+    @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
+    def test_disable_capture_failure_recompensates_first_install_pair(self) -> None:
+        self.run_script("--executor-model", "gpt-5.6-luna", "--apply")
+        state_path = self.home / NATIVE.STATE_FILENAME
+        managed_config = self.read_fake_config()
+        managed_state = state_path.read_bytes()
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", self.disable_main_argv()),
+            mock.patch.object(
+                NATIVE,
+                "_rename_noreplace",
+                side_effect=PermissionError("capture blocked"),
+            ),
+            mock.patch.object(sys, "stdout", io.StringIO()),
+            mock.patch.object(sys, "stderr", stderr),
+            mock.patch.dict(os.environ, self.fake_env()),
+        ):
+            result = NATIVE.main()
+        self.assertEqual(result, 2)
+        self.assertIn("exact managed config and saved state were re-paired", stderr.getvalue())
+        self.assertEqual(self.read_fake_config(), managed_config)
+        self.assertEqual(state_path.read_bytes(), managed_state)
+
+    @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
+    def test_update_disable_interrupt_before_removal_recompensates_pair(self) -> None:
+        self.run_script("--executor-model", "gpt-5.6-luna", "--apply")
+        self.run_script("--executor-model", "gpt-5.6-terra", "--apply")
+        state_path = self.home / NATIVE.STATE_FILENAME
+        managed_config = self.read_fake_config()
+        managed_config.setdefault("plugins", {})["sibling@elsewhere"] = {
+            "sentinel": "preserve"
+        }
+        (self.home / ".fake-user-config.json").write_text(
+            json.dumps(managed_config), encoding="utf-8"
+        )
+        managed_state = state_path.read_bytes()
+        with (
+            mock.patch.object(sys, "argv", self.disable_main_argv()),
+            mock.patch.object(
+                NATIVE,
+                "_remove_state",
+                side_effect=KeyboardInterrupt("before removal work"),
+            ),
+            mock.patch.object(sys, "stdout", io.StringIO()),
+            mock.patch.object(sys, "stderr", io.StringIO()),
+            mock.patch.dict(os.environ, self.fake_env()),
+        ):
+            with self.assertRaisesRegex(KeyboardInterrupt, "before removal work"):
+                NATIVE.main()
+        self.assertEqual(self.read_fake_config(), managed_config)
+        self.assertEqual(state_path.read_bytes(), managed_state)
+        self.assertEqual(
+            self.read_fake_config()["plugins"]["sibling@elsewhere"],
+            {"sentinel": "preserve"},
+        )
+
+    @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
+    def test_update_disable_interrupt_after_real_removal_keeps_disabled_pair(
+        self,
+    ) -> None:
+        self.run_script("--executor-model", "gpt-5.6-luna", "--apply")
+        self.run_script("--executor-model", "gpt-5.6-terra", "--apply")
+        config = self.read_fake_config()
+        config.setdefault("plugins", {})["sibling@elsewhere"] = {
+            "sentinel": "preserve"
+        }
+        (self.home / ".fake-user-config.json").write_text(
+            json.dumps(config), encoding="utf-8"
+        )
+        state_path = self.home / NATIVE.STATE_FILENAME
+        real_remove = NATIVE._remove_state
+
+        def interrupt_after_removal(*args: object, **kwargs: object) -> None:
+            real_remove(*args, **kwargs)
+            raise KeyboardInterrupt("after removal commit")
+
+        with (
+            mock.patch.object(sys, "argv", self.disable_main_argv()),
+            mock.patch.object(
+                NATIVE, "_remove_state", side_effect=interrupt_after_removal
+            ),
+            mock.patch.object(sys, "stdout", io.StringIO()),
+            mock.patch.object(sys, "stderr", io.StringIO()),
+            mock.patch.dict(os.environ, self.fake_env()),
+        ):
+            with self.assertRaisesRegex(KeyboardInterrupt, "after removal commit"):
+                NATIVE.main()
+        self.assertFalse(state_path.exists())
+        disabled = self.read_fake_config()
+        self.assertEqual(
+            disabled["features"]["multi_agent_v2"],
+            {"max_concurrent_threads_per_session": 5},
+        )
+        self.assertEqual(
+            disabled["plugins"]["sibling@elsewhere"], {"sentinel": "preserve"}
+        )
+
+    @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
+    def test_disable_compensation_failure_is_actionable(self) -> None:
+        self.run_script("--executor-model", "gpt-5.6-luna", "--apply")
+        state_path = self.home / NATIVE.STATE_FILENAME
+        managed_state = state_path.read_bytes()
+        real_batch_write = NATIVE._batch_write
+        calls = 0
+
+        def batch_write(*args: object, **kwargs: object) -> dict[str, object]:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return real_batch_write(*args, **kwargs)
+            raise KeyboardInterrupt("compensation interrupted")
+
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", self.disable_main_argv()),
+            mock.patch.object(NATIVE, "_batch_write", side_effect=batch_write),
+            mock.patch.object(
+                NATIVE,
+                "_remove_state",
+                side_effect=KeyboardInterrupt("before removal work"),
+            ),
+            mock.patch.object(sys, "stdout", io.StringIO()),
+            mock.patch.object(sys, "stderr", stderr),
+            mock.patch.dict(os.environ, self.fake_env()),
+        ):
+            result = NATIVE.main()
+        self.assertEqual(result, 2)
+        self.assertEqual(calls, 2)
+        self.assertIn("forward managed-config compensation failed", stderr.getvalue())
+        self.assertIn("Run status", stderr.getvalue())
+        self.assertEqual(state_path.read_bytes(), managed_state)
+        self.assertEqual(
+            self.read_fake_config()["features"]["multi_agent_v2"],
+            {"max_concurrent_threads_per_session": 5},
+        )
+
+    @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
+    def test_disable_unknown_state_digest_is_actionable(self) -> None:
+        self.run_script("--executor-model", "gpt-5.6-luna", "--apply")
+        state_path = self.home / NATIVE.STATE_FILENAME
+        unknown_state = self.valid_state("gpt-5.6-sol")
+
+        def publish_unknown(*_args: object, **_kwargs: object) -> None:
+            state_path.write_text(
+                json.dumps(unknown_state, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            raise KeyboardInterrupt("unknown removal outcome")
+
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", self.disable_main_argv()),
+            mock.patch.object(NATIVE, "_remove_state", side_effect=publish_unknown),
+            mock.patch.object(sys, "stdout", io.StringIO()),
+            mock.patch.object(sys, "stderr", stderr),
+            mock.patch.dict(os.environ, self.fake_env()),
+        ):
+            result = NATIVE.main()
+        self.assertEqual(result, 2)
+        self.assertIn("matched neither the exact saved state", stderr.getvalue())
+        self.assertIn("Run status", stderr.getvalue())
+        self.assertEqual(NATIVE._read_state(state_path), unknown_state)
+        self.assertEqual(
+            self.read_fake_config()["features"]["multi_agent_v2"],
+            {"max_concurrent_threads_per_session": 5},
+        )
+
+    @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
+    def test_disable_scalar_mcp_compensation_stays_in_plugin_namespace(self) -> None:
+        initial = {
+            "features": {"multi_agent_v2": True},
+            "plugins": {
+                self.plugin_id: {
+                    "mcp_servers": {
+                        "fable-advisor-python3": {"enabled": False}
+                    }
+                },
+                "sibling@elsewhere": {
+                    "mcp_servers": {
+                        "fable-advisor-python3": {"enabled": "sentinel"}
+                    }
+                },
+            },
+            "unrelated": {"keep": True},
+        }
+        (self.home / ".fake-user-config.json").write_text(
+            json.dumps(initial), encoding="utf-8"
+        )
+        self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--advisor-fable",
+            "--apply",
+        )
+        state_path = self.home / NATIVE.STATE_FILENAME
+        managed_config = self.read_fake_config()
+        managed_state = state_path.read_bytes()
+        with (
+            mock.patch.object(sys, "argv", self.disable_main_argv()),
+            mock.patch.object(
+                NATIVE,
+                "_remove_state",
+                side_effect=KeyboardInterrupt("before scalar removal"),
+            ),
+            mock.patch.object(sys, "stdout", io.StringIO()),
+            mock.patch.object(sys, "stderr", io.StringIO()),
+            mock.patch.dict(os.environ, self.fake_env()),
+        ):
+            with self.assertRaisesRegex(KeyboardInterrupt, "before scalar removal"):
+                NATIVE.main()
+        self.assertEqual(self.read_fake_config(), managed_config)
+        self.assertEqual(state_path.read_bytes(), managed_state)
+        restored = self.read_fake_config()
+        self.assertIsInstance(restored["features"]["multi_agent_v2"], dict)
+        self.assertTrue(
+            restored["plugins"][self.plugin_id]["mcp_servers"]
+            ["fable-advisor-python3"]["enabled"]
+        )
+        self.assertEqual(
+            restored["plugins"]["sibling@elsewhere"],
+            initial["plugins"]["sibling@elsewhere"],
+        )
+
+    def test_scalar_mcp_compensation_edit_paths_are_exactly_owned(self) -> None:
+        state = self.valid_state()
+        managed_feature = {
+            "hide_spawn_agent_metadata": False,
+            "tool_namespace": "agents",
+            "multi_agent_mode_hint_text": state["managed"]["mode"],
+            "usage_hint_text": state["managed"]["usage"],
+        }
+        state["scalar_origin"] = True
+        state["managed_feature"] = managed_feature
+        state["managed"]["mcp"] = {"fable-advisor-python3": True}
+        current = {
+            "feature": managed_feature,
+            "mode": state["managed"]["mode"],
+            "usage": state["managed"]["usage"],
+            "metadata": False,
+            "namespace": "agents",
+            "mcp": {"fable-advisor-python3": True},
+        }
+
+        edits = NATIVE._managed_compensation_edits(state, current, self.plugin_id)
+
+        self.assertEqual(
+            [edit["keyPath"] for edit in edits],
+            [
+                "features.multi_agent_v2",
+                NATIVE.mcp_key_path(self.plugin_id, "fable-advisor-python3"),
+            ],
+        )
+        self.assertNotIn("sibling@elsewhere", json.dumps(edits))
 
     def test_status_uses_saved_namespace_when_an_alternate_identity_executes(self) -> None:
         saved_id = self.plugin_id
