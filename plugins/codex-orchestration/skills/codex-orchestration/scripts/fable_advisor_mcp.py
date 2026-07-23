@@ -27,11 +27,13 @@ MANAGED_MARKER = routing_state.MANAGED_MARKER
 FABLE_MODEL = routing_state.FABLE_MODEL
 FABLE_SERVERS = routing_state.FABLE_SERVERS
 SUPPORTED_EFFORTS = routing_state.FABLE_EFFORTS
-# Claude Code currently reports this exact internal helper alongside Fable for
-# some calls. Keep the runtime policy explicit and fail closed if that identity
-# rotates or any other model appears.
-FABLE_HELPER_MODEL = "claude-haiku-4-5-20251001"
-ALLOWED_RUNTIME_MODELS = frozenset({FABLE_MODEL, FABLE_HELPER_MODEL})
+# Claude Code has reported these exact internal helpers alongside Fable across
+# supported releases. Keep the runtime policy explicit and fail closed if that
+# identity rotates or any other model appears.
+FABLE_HELPER_MODELS = frozenset(
+    {"claude-haiku-4-5-20251001", "claude-sonnet-4-6"}
+)
+ALLOWED_RUNTIME_MODELS = frozenset({FABLE_MODEL, *FABLE_HELPER_MODELS})
 CLAUDE_TIMEOUT_SECONDS = 600
 AUTH_TIMEOUT_SECONDS = 20
 # Applies to the combined user-controlled text sent by one model operation.
@@ -248,6 +250,42 @@ def _validate_runtime_models(usage: Any) -> list[str]:
     return used_models
 
 
+def _normalize_model_payload(payload: Any, *, operation: str) -> dict[str, Any]:
+    """Accept Claude's legacy object or one unambiguous result event."""
+
+    if isinstance(payload, dict) and payload.get("type") in (None, "result"):
+        return payload
+    if isinstance(payload, dict):
+        raise AdvisorError(
+            f"Claude Fable 5 {operation} returned an unexpected response."
+        )
+    if not isinstance(payload, list) or not payload:
+        raise AdvisorError(
+            f"Claude Fable 5 {operation} returned an unexpected response."
+        )
+    if not all(
+        isinstance(event, dict) and isinstance(event.get("type"), str)
+        for event in payload
+    ):
+        raise AdvisorError(
+            f"Claude Fable 5 {operation} returned an unexpected response."
+        )
+    result_events = [event for event in payload if event.get("type") == "result"]
+    if len(result_events) != 1:
+        raise AdvisorError(
+            f"Claude Fable 5 {operation} returned an unexpected response."
+        )
+    result_event = result_events[0]
+    if any(
+        event is not result_event and ("result" in event or "modelUsage" in event)
+        for event in payload
+    ):
+        raise AdvisorError(
+            f"Claude Fable 5 {operation} returned an unexpected response."
+        )
+    return result_event
+
+
 def _invoke_fable(
     *,
     operation: str,
@@ -301,10 +339,11 @@ def _invoke_fable(
             f"Claude Fable 5 {operation} exited with {result.returncode}; output withheld."
         )
     try:
-        payload = json.loads(result.stdout)
+        decoded = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
         raise AdvisorError(f"Claude Fable 5 {operation} returned malformed JSON.") from exc
-    if not isinstance(payload, dict) or not isinstance(payload.get("result"), str):
+    payload = _normalize_model_payload(decoded, operation=operation)
+    if not isinstance(payload.get("result"), str):
         raise AdvisorError(f"Claude Fable 5 {operation} returned an unexpected response.")
     # Authorize the complete runtime identity set before interpreting or
     # returning any model-authored plan/review content.
