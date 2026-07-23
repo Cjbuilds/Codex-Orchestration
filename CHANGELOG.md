@@ -1,6 +1,14 @@
 # Changelog
 
-## 0.8.0 — Unreleased
+## 0.8.1 — Unreleased
+
+- Accept Claude Code's JSON event-array output only when it contains one
+  unambiguous result event, while retaining legacy object support and rejecting
+  malformed or conflicting envelopes.
+- Permit the exact reviewed `claude-sonnet-4-6` helper reported alongside
+  `claude-fable-5`, without weakening the fail-closed runtime-model allowlist.
+
+## 0.8.0 — 2026-07-21
 
 - Replace READY External Model execution through Desktop native agents with a
   sealed direct `codex exec` transport. Packets travel only on bounded stdin;

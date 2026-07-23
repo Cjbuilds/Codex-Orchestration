@@ -132,6 +132,26 @@ class FableAdvisorMcpTests(unittest.TestCase):
             ),
         )
 
+    def model_event_result(
+        self, response: str, *, model_usage: dict[str, object] | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        return self.completed(
+            ["claude"],
+            json.dumps(
+                [
+                    {"type": "system", "subtype": "init"},
+                    {"type": "assistant", "message": {"role": "assistant"}},
+                    {
+                        "type": "result",
+                        "result": response,
+                        "modelUsage": model_usage
+                        if model_usage is not None
+                        else {"claude-fable-5": {"outputTokens": 12}},
+                    },
+                ]
+            ),
+        )
+
     def invoke_with_results(
         self,
         function: object,
@@ -228,15 +248,18 @@ class FableAdvisorMcpTests(unittest.TestCase):
     def test_runtime_model_policy_accepts_only_fable_and_exact_allowed_helper(
         self,
     ) -> None:
-        allowed_scenarios = (
-            ({FABLE.FABLE_MODEL: {"outputTokens": 12}}, [FABLE.FABLE_MODEL]),
+        allowed_scenarios = [
+            ({FABLE.FABLE_MODEL: {"outputTokens": 12}}, [FABLE.FABLE_MODEL])
+        ]
+        allowed_scenarios.extend(
             (
                 {
                     FABLE.FABLE_MODEL: {"outputTokens": 12},
-                    FABLE.FABLE_HELPER_MODEL: {"outputTokens": 1},
+                    helper: {"outputTokens": 1},
                 },
-                sorted((FABLE.FABLE_MODEL, FABLE.FABLE_HELPER_MODEL)),
-            ),
+                sorted((FABLE.FABLE_MODEL, helper)),
+            )
+            for helper in FABLE.FABLE_HELPER_MODELS
         )
         for model_usage, expected_models in allowed_scenarios:
             with self.subTest(model_usage=model_usage):
@@ -260,7 +283,7 @@ class FableAdvisorMcpTests(unittest.TestCase):
                 "outside the allowed Fable runtime policy",
             ),
             (
-                {FABLE.FABLE_HELPER_MODEL: {"outputTokens": 1}},
+                {"claude-sonnet-4-6": {"outputTokens": 1}},
                 "did not confirm the pinned Claude Fable 5 primary model",
             ),
         )
@@ -414,6 +437,73 @@ class FableAdvisorMcpTests(unittest.TestCase):
                 "complete packet",
                 model_response="Here is a draft.",
             )
+
+    def test_json_event_array_accepts_one_unambiguous_result_event(self) -> None:
+        self.write_state(planner=self.route())
+        calls: list[list[str]] = []
+
+        def fake_run(
+            command: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            if command[-2:] == ["auth", "status"]:
+                return self.auth_result()
+            return self.model_event_result(
+                "PLAN_DRAFT\n1. Verify inputs.",
+                model_usage={
+                    FABLE.FABLE_MODEL: {"outputTokens": 12},
+                    "claude-sonnet-4-6": {"outputTokens": 1},
+                },
+            )
+
+        with (
+            mock.patch.dict(os.environ, {"CODEX_HOME": str(self.home)}),
+            mock.patch.object(
+                FABLE, "resolve_claude", return_value=Path("/fake/claude")
+            ),
+            mock.patch.object(FABLE.subprocess, "run", side_effect=fake_run),
+        ):
+            result = FABLE.create_plan("complete packet")
+
+        self.assertEqual(result["signal"], "PLAN_DRAFT")
+        self.assertEqual(
+            result["used_models"], ["claude-fable-5", "claude-sonnet-4-6"]
+        )
+        self.assertEqual(len(calls), 2)
+
+    def test_json_event_array_ambiguity_and_malformed_events_fail_closed(self) -> None:
+        valid_result = {
+            "type": "result",
+            "result": "PLAN_DRAFT\nDraft",
+            "modelUsage": {FABLE.FABLE_MODEL: {"outputTokens": 12}},
+        }
+        malformed_payloads = (
+            [],
+            [{"type": "system"}, "not-an-event"],
+            [{"type": "system"}],
+            [valid_result, dict(valid_result)],
+            [
+                {"type": "assistant", "modelUsage": {}},
+                valid_result,
+            ],
+            [
+                {"type": "assistant", "result": "hidden"},
+                valid_result,
+            ],
+        )
+        for payload in malformed_payloads:
+            with self.subTest(payload=payload):
+                with self.assertRaisesRegex(FABLE.AdvisorError, "unexpected response"):
+                    FABLE._normalize_model_payload(payload, operation="plan creation")
+
+    def test_legacy_object_with_explicit_non_result_type_fails_closed(self) -> None:
+        payload = {
+            "type": "assistant",
+            "result": "PLAN_DRAFT\nDraft",
+            "modelUsage": {FABLE.FABLE_MODEL: {"outputTokens": 12}},
+        }
+        with self.assertRaisesRegex(FABLE.AdvisorError, "unexpected response"):
+            FABLE._normalize_model_payload(payload, operation="plan creation")
 
     def test_revise_requires_all_inputs_and_structured_non_empty_sections(self) -> None:
         self.write_state(planner=self.route())
