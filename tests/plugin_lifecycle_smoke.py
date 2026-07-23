@@ -12,6 +12,7 @@ isolation.
 from __future__ import annotations
 
 from contextlib import contextmanager
+import errno
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import hashlib
@@ -69,8 +70,15 @@ def temporary_lifecycle_root() -> Iterator[Path]:
                 break
             except FileNotFoundError:
                 break
-            except PermissionError:
-                if attempt == 45:
+            except OSError as exc:
+                transient = isinstance(exc, PermissionError) or (
+                    os.name == "nt"
+                    and (
+                        getattr(exc, "winerror", None) == 145
+                        or exc.errno == errno.ENOTEMPTY
+                    )
+                )
+                if not transient or attempt == 45:
                     raise
                 time.sleep(1)
 
