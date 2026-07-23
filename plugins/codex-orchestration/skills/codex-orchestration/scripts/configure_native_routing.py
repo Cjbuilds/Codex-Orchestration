@@ -825,11 +825,122 @@ def _restore_captured_state(
     try:
         captured.unlink()
     except OSError as exc:
+        # The no-overwrite publication above temporarily gives the restored
+        # object two names.  If private-link cleanup fails, do not leave the
+        # canonical state in the multi-link form rejected by readers.  Only
+        # detach it when it still names the object we published; a concurrent
+        # replacement must be preserved.
+        detached = _detach_canonical_link_if_same(path, captured, message, cause)
+        if not detached:
+            raise ConfigurationError(
+                f"{message} Private-link cleanup failed and the canonical "
+                f"pathname is absent; recovery bytes remain at {captured}: {exc}"
+            ) from cause
         raise ConfigurationError(
-            f"{message} The pathname was restored, but its extra recovery link "
-            f"remains at {captured}: {exc}"
+            f"{message} Private-link cleanup failed, so the canonical pathname "
+            f"was detached when it still named the restored object; recovery "
+            f"bytes remain at {captured}: {exc}"
         ) from cause
     raise ConfigurationError(message) from cause
+
+
+def _detach_canonical_link_if_same(
+    path: Path, owned_path: Path, message: str, cause: BaseException
+) -> bool:
+    """Atomically capture the canonical name, then detach only an owned object."""
+
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".cas-detach", dir=path.parent
+    )
+    os.close(descriptor)
+    detached = Path(temporary)
+    preserve_detached = False
+    try:
+        detached.unlink()
+        try:
+            os.replace(path, detached)
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise ConfigurationError(
+                f"{message} The canonical pathname could not be captured safely; "
+                f"recovery bytes remain at {owned_path}: {exc}"
+            ) from cause
+
+        try:
+            captured_info = detached.lstat()
+            owned_info = owned_path.lstat()
+        except OSError as exc:
+            preserve_detached = True
+            _restore_captured_state(
+                path,
+                detached,
+                f"{message} Canonical identity inspection failed after capture.",
+                exc,
+            )
+        if not os.path.samestat(captured_info, owned_info):
+            preserve_detached = True
+            _restore_captured_state(
+                path,
+                detached,
+                f"{message} A concurrent canonical replacement was preserved.",
+                cause,
+            )
+        try:
+            detached.unlink()
+        except OSError as exc:
+            preserve_detached = True
+            raise ConfigurationError(
+                f"{message} The owned canonical pathname was captured, but its "
+                f"private detached link remains at {detached}: {exc}"
+            ) from cause
+        return True
+    finally:
+        if not preserve_detached:
+            try:
+                detached.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _recover_published_state_cleanup_failure(
+    path: Path,
+    temp_path: Path,
+    captured: Path | None,
+    cause: OSError,
+) -> None:
+    """Remove only our invalid canonical hard link and retain recovery bytes."""
+
+    detached = _detach_canonical_link_if_same(
+        path,
+        temp_path,
+        "Routing-state private-link cleanup failed after publication.",
+        cause,
+    )
+    if not detached:
+        captured_note = (
+            f" Prior-state recovery bytes remain at {captured}." if captured else ""
+        )
+        raise ConfigurationError(
+            "Routing-state private-link cleanup failed after publication. The "
+            "canonical pathname is absent; new recovery bytes remain at "
+            f"{temp_path}.{captured_note}"
+        ) from cause
+
+    if captured is not None:
+        _restore_captured_state(
+            path,
+            captured,
+            "Routing-state private-link cleanup failed after publication; the "
+            "prior state was restored and new bytes were retained at "
+            f"{temp_path}.",
+            cause,
+        )
+    raise ConfigurationError(
+        "Routing-state private-link cleanup failed after publication; the "
+        "canonical pathname was removed and new recovery bytes remain at "
+        f"{temp_path}."
+    ) from cause
 
 
 def _capture_expected_state(path: Path, expected_digest: str) -> Path:
@@ -881,6 +992,7 @@ def _write_state(
         prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
     )
     temp_path = Path(temporary)
+    preserve_temp = False
     try:
         fchmod = getattr(os, "fchmod", None)
         if callable(fchmod):
@@ -897,7 +1009,13 @@ def _write_state(
                     "Saved routing state changed concurrently; refusing state "
                     "publication."
                 ) from exc
-            temp_path.unlink()
+            try:
+                temp_path.unlink()
+            except OSError as exc:
+                preserve_temp = True
+                _recover_published_state_cleanup_failure(
+                    path, temp_path, None, exc
+                )
         else:
             captured = _capture_expected_state(path, expected_digest)
             try:
@@ -910,7 +1028,13 @@ def _write_state(
                     "it was not overwritten.",
                     exc,
                 )
-            temp_path.unlink()
+            try:
+                temp_path.unlink()
+            except OSError as exc:
+                preserve_temp = True
+                _recover_published_state_cleanup_failure(
+                    path, temp_path, captured, exc
+                )
             try:
                 captured.unlink()
             except OSError as exc:
@@ -936,7 +1060,12 @@ def _write_state(
             os.close(fd)
         except OSError:
             pass
-        temp_path.unlink(missing_ok=True)
+        if not preserve_temp:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                # Never mask the publication result or its primary failure.
+                pass
     return hashlib.sha256(payload_bytes).hexdigest()
 
 
