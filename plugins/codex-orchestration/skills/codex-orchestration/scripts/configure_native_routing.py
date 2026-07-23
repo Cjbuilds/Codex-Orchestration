@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -1446,7 +1447,7 @@ def _batch_write(
     )
 
 
-def _status(
+def _status_unbuffered(
     target: Path,
     codex_home: Path | None,
     binaries: list[Path],
@@ -1643,6 +1644,26 @@ def _status(
         )
         identity_guard.assert_unchanged("status publication")
     return 1 if require_effective and not healthy else 0
+
+
+def _status(
+    target: Path,
+    codex_home: Path | None,
+    binaries: list[Path],
+    require_effective: bool,
+) -> int:
+    """Publish status only after the identity guard's final recheck succeeds."""
+
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        result = _status_unbuffered(
+            target,
+            codex_home,
+            binaries,
+            require_effective,
+        )
+    print(output.getvalue(), end="")
+    return result
 
 
 def _prepare_setup_state(
@@ -1969,6 +1990,7 @@ def _repair(
     ]
     if not drifted:
         if _managed_matches(state, current):
+            identity_guard.assert_unchanged("repair no-op publication")
             print("Native routing policy already matches its saved managed state.")
             return 0
         raise ConfigurationError(
@@ -2050,6 +2072,7 @@ def _repair(
             "re-authentication."
         )
     if not apply:
+        identity_guard.assert_unchanged("repair dry-run publication")
         print("Dry run only. Re-run with --repair --apply after reviewing this preview.")
         return 0
 
@@ -2152,6 +2175,7 @@ def _disable(
         managed_mode = _is_managed(current["mode"])
         managed_usage = _is_managed(current["usage"])
         if not (managed_mode or managed_usage):
+            identity_guard.assert_unchanged("disable inactive publication")
             print("Native routing is already inactive.")
             return 0
         edits = []
@@ -2237,6 +2261,7 @@ def _disable(
             )
         print("Will restore the pre-setup values of every owned routing field.")
     if not apply:
+        identity_guard.assert_unchanged("disable dry-run publication")
         print("Dry run only. Re-run with --disable --apply after reviewing this preview.")
         return 0
     result = _batch_write(
@@ -2536,6 +2561,7 @@ def main() -> int:
                 "(required for routed spawn metadata on current v2 clients)"
             )
             if not args.apply:
+                identity_guard.assert_unchanged("setup dry-run publication")
                 print("Dry run only. Re-run with --apply after reviewing this preview.")
                 return 0
 

@@ -470,6 +470,45 @@ class NativeRoutingTests(unittest.TestCase):
             (self.home / ".fake-user-config.json").read_text(encoding="utf-8")
         )
 
+    def run_main_with_identity_failure(
+        self, phase: str, *arguments: str
+    ) -> tuple[int, str, str]:
+        real_assert = NATIVE.plugin_identity.PluginIdentityGuard.assert_unchanged
+
+        def assert_unchanged(
+            guard: NATIVE.plugin_identity.PluginIdentityGuard, current_phase: str
+        ) -> None:
+            if current_phase == phase:
+                raise NATIVE.plugin_identity.IdentityDriftError(
+                    f"forced drift before {phase}"
+                )
+            real_assert(guard, current_phase)
+
+        argv = [
+            str(self.installed_script),
+            "--codex-bin",
+            str(self.codex),
+            "--codex-home",
+            str(self.home),
+            "--allow-incompatible-client",
+            *arguments,
+        ]
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(sys, "stdout", stdout),
+            mock.patch.object(sys, "stderr", stderr),
+            mock.patch.dict(os.environ, self.fake_env()),
+            mock.patch.object(
+                NATIVE.plugin_identity.PluginIdentityGuard,
+                "assert_unchanged",
+                new=assert_unchanged,
+            ),
+        ):
+            result = NATIVE.main()
+        return result, stdout.getvalue(), stderr.getvalue()
+
     def write_personal_agent(self, name: str, *, managed: bool = False) -> Path:
         agents = self.home / "agents"
         agents.mkdir(exist_ok=True)
@@ -775,6 +814,47 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertIn("Planner: gpt-5.6-sol@xhigh", status.stdout)
         self.assertIn("Designer: gpt-5.6-luna@medium", status.stdout)
         self.assertEqual(status.returncode, 0)
+
+    def test_success_dry_runs_and_noop_repair_require_final_identity_recheck(self) -> None:
+        setup_result, setup_stdout, setup_stderr = self.run_main_with_identity_failure(
+            "setup dry-run publication",
+            "--executor-model",
+            "gpt-5.6-luna",
+        )
+        self.assertEqual(setup_result, 2)
+        self.assertNotIn("Dry run only", setup_stdout)
+        self.assertIn("forced drift", setup_stderr)
+
+        self.run_script("--executor-model", "gpt-5.6-luna", "--apply")
+        repair_result, repair_stdout, repair_stderr = self.run_main_with_identity_failure(
+            "repair no-op publication", "--repair"
+        )
+        self.assertEqual(repair_result, 2)
+        self.assertNotIn("already matches", repair_stdout)
+        self.assertIn("forced drift", repair_stderr)
+
+        disable_result, disable_stdout, disable_stderr = (
+            self.run_main_with_identity_failure(
+                "disable dry-run publication", "--disable"
+            )
+        )
+        self.assertEqual(disable_result, 2)
+        self.assertNotIn("Dry run only", disable_stdout)
+        self.assertIn("forced drift", disable_stderr)
+
+    def test_status_discards_buffered_output_when_final_recheck_fails(self) -> None:
+        def stale_status(*_args: object, **_kwargs: object) -> int:
+            print("stale identity result")
+            raise NATIVE.plugin_identity.IdentityDriftError("forced status drift")
+
+        stdout = io.StringIO()
+        with (
+            mock.patch.object(NATIVE, "_status_unbuffered", side_effect=stale_status),
+            mock.patch.object(sys, "stdout", stdout),
+            self.assertRaises(NATIVE.plugin_identity.IdentityDriftError),
+        ):
+            NATIVE._status(self.codex, self.home, [self.codex], True)
+        self.assertEqual(stdout.getvalue(), "")
 
     def test_kimi_subscription_designer_setup_status_and_disable(self) -> None:
         setup = self.run_script(

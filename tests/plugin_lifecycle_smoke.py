@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -62,16 +63,16 @@ def temporary_lifecycle_root() -> Iterator[Path]:
     try:
         yield root
     finally:
-        for attempt in range(7):
+        for attempt in range(46):
             try:
                 shutil.rmtree(root, onerror=clear_readonly)
                 break
             except FileNotFoundError:
                 break
             except PermissionError:
-                if attempt == 6:
+                if attempt == 45:
                     raise
-                time.sleep(0.1 * (2**attempt))
+                time.sleep(1)
 
 
 def run(
@@ -113,6 +114,54 @@ def run_json(
         raise SmokeFailure(
             f"Command did not return JSON: {command!r}\n{completed.stdout}"
         ) from exc
+
+
+def set_plugin_enabled(
+    configurator: Path,
+    *,
+    codex: str,
+    codex_home: Path,
+    plugin_id: str,
+    enabled: bool,
+    cwd: Path,
+) -> None:
+    """Use the same supported App Server write path as native routing setup."""
+
+    module_name = f"lifecycle_native_{plugin_id.replace('@', '_at_')}"
+    spec = importlib.util.spec_from_file_location(module_name, configurator)
+    if spec is None or spec.loader is None:
+        raise SmokeFailure("Could not load the installed native configurator")
+    module = importlib.util.module_from_spec(spec)
+    sys.path.insert(0, str(configurator.parent))
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+        with module.AppServer(Path(codex), codex_home) as app:
+            read_result = app.request(
+                "config/read", {"includeLayers": True, "cwd": str(cwd)}
+            )
+            _, version = module._user_layer(read_result)
+            result = app.request(
+                "config/batchWrite",
+                {
+                    "edits": [
+                        {
+                            "keyPath": f"plugins.{json.dumps(plugin_id)}.enabled",
+                            "value": enabled,
+                            "mergeStrategy": "replace",
+                        }
+                    ],
+                    "expectedVersion": version,
+                    "reloadUserConfig": True,
+                },
+            )
+    finally:
+        sys.modules.pop(module_name, None)
+        sys.path.remove(str(configurator.parent))
+    if result.get("status") != "ok":
+        raise SmokeFailure(
+            f"App Server did not persist {plugin_id!r} enabled={enabled}: {result!r}"
+        )
 
 
 def probe_mcp_subprocess(
@@ -935,6 +984,29 @@ def main() -> int:
                 / "scripts"
                 / "configure_native_routing.py"
             )
+            set_plugin_enabled(
+                alternate_configurator,
+                codex=codex,
+                codex_home=codex_home,
+                plugin_id=PLUGIN_ID,
+                enabled=False,
+                cwd=project,
+            )
+            disabled_sibling_inventory = run_json(
+                [codex, "plugin", "list", "--json"], cwd=project, env=env
+            )
+            assert_equal(
+                installed_entry(disabled_sibling_inventory, PLUGIN_ID).get("enabled"),
+                False,
+                "canonical sibling disabled before alternate setup",
+            )
+            assert_equal(
+                installed_entry(
+                    disabled_sibling_inventory, ALTERNATE_PLUGIN_ID
+                ).get("enabled"),
+                True,
+                "alternate identity enabled before setup",
+            )
             alternate_native_command = [
                 sys.executable,
                 str(alternate_configurator),
@@ -986,6 +1058,25 @@ def main() -> int:
                 raise SmokeFailure("Alternate native status selected the wrong identity")
             if "Native policy: installed and effective" not in alternate_status.stdout:
                 raise SmokeFailure("Alternate native status did not report effectiveness")
+            set_plugin_enabled(
+                alternate_configurator,
+                codex=codex,
+                codex_home=codex_home,
+                plugin_id=ALTERNATE_PLUGIN_ID,
+                enabled=False,
+                cwd=project,
+            )
+            disabled_saved_inventory = run_json(
+                [codex, "plugin", "list", "--json"], cwd=project, env=env
+            )
+            for sibling_id in (PLUGIN_ID, ALTERNATE_PLUGIN_ID):
+                assert_equal(
+                    installed_entry(disabled_saved_inventory, sibling_id).get(
+                        "enabled"
+                    ),
+                    False,
+                    f"{sibling_id} disabled before saved-identity restore",
+                )
             alternate_disable = run(
                 [
                     sys.executable,
@@ -1010,7 +1101,7 @@ def main() -> int:
             canonical_sibling = installed_entry(sibling_inventory)
             assert_equal(
                 canonical_sibling.get("enabled"),
-                True,
+                False,
                 "canonical sibling preserved after alternate disable",
             )
             run_json(
@@ -1039,6 +1130,23 @@ def main() -> int:
                 ],
                 cwd=project,
                 env=env,
+            )
+            set_plugin_enabled(
+                native_configurator,
+                codex=codex,
+                codex_home=codex_home,
+                plugin_id=PLUGIN_ID,
+                enabled=True,
+                cwd=project,
+            )
+            assert_equal(
+                installed_entry(
+                    run_json(
+                        [codex, "plugin", "list", "--json"], cwd=project, env=env
+                    )
+                ).get("enabled"),
+                True,
+                "canonical identity re-enabled for remaining lifecycle lanes",
             )
 
             fake_codex = write_fake_codex(temp / "fake-codex", project)
