@@ -531,6 +531,93 @@ class NativeRoutingTests(unittest.TestCase):
             result = NATIVE.main()
         return result, stdout.getvalue(), stderr.getvalue()
 
+    def assert_effective_state_rollback_interrupt_pairing(
+        self, *, update: bool, after_state_commit: bool
+    ) -> None:
+        base_config = {
+            "features": {
+                "multi_agent_v2": {"max_concurrent_threads_per_session": 5}
+            },
+            "unrelated": {"keep": True},
+        }
+        if update:
+            self.run_script(
+                "--executor-model",
+                "gpt-5.6-luna",
+                "--executor-effort",
+                "high",
+                "--apply",
+            )
+            prior_config = self.read_fake_config()
+            prior_state_bytes = (self.home / NATIVE.STATE_FILENAME).read_bytes()
+            target_model = "gpt-5.6-terra"
+            primitive_name = "_write_state"
+        else:
+            prior_config = base_config
+            prior_state_bytes = None
+            target_model = "gpt-5.6-luna"
+            primitive_name = "_remove_state"
+        (self.home / ".fake-effective-config.json").write_text(
+            json.dumps(prior_config), encoding="utf-8"
+        )
+
+        real_primitive = getattr(NATIVE, primitive_name)
+        calls = 0
+
+        def interrupt_state_rollback(*args: object, **kwargs: object) -> object:
+            nonlocal calls
+            calls += 1
+            if update and calls == 1:
+                return real_primitive(*args, **kwargs)
+            if after_state_commit:
+                real_primitive(*args, **kwargs)
+            raise KeyboardInterrupt("forced effective rollback interrupt")
+
+        argv = [
+            str(self.installed_script),
+            "--codex-bin",
+            str(self.codex),
+            "--codex-home",
+            str(self.home),
+            "--allow-incompatible-client",
+            "--executor-model",
+            target_model,
+            "--executor-effort",
+            "high",
+            "--apply",
+        ]
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(
+                NATIVE, primitive_name, side_effect=interrupt_state_rollback
+            ),
+            mock.patch.object(sys, "stdout", io.StringIO()),
+            mock.patch.object(sys, "stderr", io.StringIO()),
+            mock.patch.dict(os.environ, self.fake_env()),
+        ):
+            with self.assertRaisesRegex(
+                KeyboardInterrupt, "forced effective rollback interrupt"
+            ):
+                NATIVE.main()
+
+        state_path = self.home / NATIVE.STATE_FILENAME
+        if after_state_commit:
+            self.assertEqual(self.read_fake_config(), prior_config)
+            if prior_state_bytes is None:
+                self.assertFalse(state_path.exists())
+            else:
+                self.assertEqual(state_path.read_bytes(), prior_state_bytes)
+        else:
+            state = NATIVE._read_state(state_path)
+            self.assertIsNotNone(state)
+            self.assertEqual(state["executor"]["model"], target_model)
+            self.assertTrue(
+                NATIVE._managed_matches(
+                    state,
+                    NATIVE._current_values(self.read_fake_config(), self.plugin_id),
+                )
+            )
+
     def write_personal_agent(self, name: str, *, managed: bool = False) -> Path:
         agents = self.home / "agents"
         agents.mkdir(exist_ok=True)
@@ -2267,6 +2354,321 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertEqual(state_path.read_bytes(), prior_bytes)
         self.assertEqual(raced_path.read_bytes(), concurrent_bytes)
 
+    def test_capture_real_rename_then_interrupt_continues_transaction(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        prior_digest = NATIVE._write_state(
+            state_path, self.valid_state(), identity_guard, None
+        )
+        replacement = self.valid_state("gpt-5.6-terra")
+        real_rename = NATIVE._rename_noreplace
+        calls = 0
+
+        def interrupt_after_capture(source: Path, destination: Path) -> None:
+            nonlocal calls
+            calls += 1
+            real_rename(source, destination)
+            if calls == 1:
+                raise KeyboardInterrupt("after capture rename")
+
+        with mock.patch.object(
+            NATIVE, "_rename_noreplace", side_effect=interrupt_after_capture
+        ):
+            digest = NATIVE._write_state(
+                state_path, replacement, identity_guard, prior_digest
+            )
+
+        self.assertEqual(calls, 2)
+        self.assertEqual(NATIVE._read_state_snapshot(state_path)[1], digest)
+        self.assertEqual(NATIVE._read_state(state_path), replacement)
+
+    def test_write_capture_helper_return_interrupt_keeps_owned_path(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        prior_digest = NATIVE._write_state(
+            state_path, self.valid_state(), identity_guard, None
+        )
+        replacement = self.valid_state("gpt-5.6-terra")
+        real_capture = NATIVE._capture_expected_state
+        owned_capture: Path | None = None
+
+        def interrupt_after_capture(
+            path: Path, captured: Path, expected_digest: str
+        ) -> None:
+            nonlocal owned_capture
+            owned_capture = captured
+            real_capture(path, captured, expected_digest)
+            raise KeyboardInterrupt("after capture helper return")
+
+        with mock.patch.object(
+            NATIVE, "_capture_expected_state", side_effect=interrupt_after_capture
+        ):
+            digest = NATIVE._write_state(
+                state_path, replacement, identity_guard, prior_digest
+            )
+
+        self.assertIsNotNone(owned_capture)
+        self.assertEqual(NATIVE._read_state_snapshot(state_path)[1], digest)
+        self.assertEqual(NATIVE._read_state(state_path), replacement)
+        self.assertFalse(owned_capture.exists())
+
+    def test_remove_capture_helper_return_interrupt_keeps_owned_path(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        prior_digest = NATIVE._write_state(
+            state_path, self.valid_state(), identity_guard, None
+        )
+        real_capture = NATIVE._capture_expected_state
+        owned_capture: Path | None = None
+
+        def interrupt_after_capture(
+            path: Path, captured: Path, expected_digest: str
+        ) -> None:
+            nonlocal owned_capture
+            owned_capture = captured
+            real_capture(path, captured, expected_digest)
+            raise KeyboardInterrupt("after capture helper return")
+
+        with mock.patch.object(
+            NATIVE, "_capture_expected_state", side_effect=interrupt_after_capture
+        ):
+            NATIVE._remove_state(state_path, identity_guard, prior_digest)
+
+        self.assertIsNotNone(owned_capture)
+        self.assertFalse(state_path.exists())
+        self.assertFalse(owned_capture.exists())
+
+    def test_capture_validation_interrupt_continues_with_known_artifact(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        prior_digest = NATIVE._write_state(
+            state_path, self.valid_state(), identity_guard, None
+        )
+        replacement = self.valid_state("gpt-5.6-terra")
+        real_assert = NATIVE._assert_state_digest
+
+        def interrupt_after_validation(path: Path, digest: str | None) -> None:
+            real_assert(path, digest)
+            if path.name.endswith(".cas-backup"):
+                raise KeyboardInterrupt("after capture validation")
+
+        with mock.patch.object(
+            NATIVE, "_assert_state_digest", side_effect=interrupt_after_validation
+        ):
+            digest = NATIVE._write_state(
+                state_path, replacement, identity_guard, prior_digest
+            )
+
+        self.assertEqual(NATIVE._read_state_snapshot(state_path)[1], digest)
+        self.assertEqual(NATIVE._read_state(state_path), replacement)
+        self.assertEqual(
+            list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.cas-backup")), []
+        )
+
+    def test_absent_publication_real_rename_then_interrupt_is_committed(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        state = self.valid_state()
+        real_rename = NATIVE._rename_noreplace
+
+        def interrupt_after_publish(source: Path, destination: Path) -> None:
+            real_rename(source, destination)
+            raise KeyboardInterrupt("after publication rename")
+
+        with (
+            mock.patch.object(
+                NATIVE, "_rename_noreplace", side_effect=interrupt_after_publish
+            ),
+            mock.patch.object(sys, "stderr", io.StringIO()),
+        ):
+            digest = NATIVE._write_state(state_path, state, identity_guard, None)
+
+        self.assertEqual(NATIVE._read_state_snapshot(state_path)[1], digest)
+        self.assertEqual(NATIVE._read_state(state_path), state)
+
+    def test_replacement_real_rename_then_interrupt_is_committed(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        prior_digest = NATIVE._write_state(
+            state_path, self.valid_state(), identity_guard, None
+        )
+        replacement = self.valid_state("gpt-5.6-terra")
+        real_rename = NATIVE._rename_noreplace
+        calls = 0
+
+        def interrupt_after_publication(source: Path, destination: Path) -> None:
+            nonlocal calls
+            calls += 1
+            real_rename(source, destination)
+            if calls == 2:
+                raise KeyboardInterrupt("after replacement rename")
+
+        with (
+            mock.patch.object(
+                NATIVE,
+                "_rename_noreplace",
+                side_effect=interrupt_after_publication,
+            ),
+            mock.patch.object(sys, "stderr", io.StringIO()),
+        ):
+            digest = NATIVE._write_state(
+                state_path, replacement, identity_guard, prior_digest
+            )
+
+        self.assertEqual(calls, 2)
+        self.assertEqual(NATIVE._read_state_snapshot(state_path)[1], digest)
+        self.assertEqual(NATIVE._read_state(state_path), replacement)
+
+    def test_indeterminate_replacement_preserves_staged_and_recovery_evidence(
+        self,
+    ) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        prior_digest = NATIVE._write_state(
+            state_path, self.valid_state(), identity_guard, None
+        )
+        prior_bytes = state_path.read_bytes()
+        replacement = self.valid_state("gpt-5.6-terra")
+        replacement_bytes = (
+            json.dumps(replacement, indent=2, sort_keys=True) + "\n"
+        ).encode("utf-8")
+        ambiguous = self.valid_state("gpt-5.6-sol")
+        ambiguous_bytes = (
+            json.dumps(ambiguous, indent=2, sort_keys=True) + "\n"
+        ).encode("utf-8")
+        real_rename = NATIVE._rename_noreplace
+        calls = 0
+
+        def create_ambiguous_publication(source: Path, destination: Path) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                real_rename(source, destination)
+                return
+            state_path.write_bytes(ambiguous_bytes)
+            raise KeyboardInterrupt("ambiguous publication outcome")
+
+        with mock.patch.object(
+            NATIVE,
+            "_rename_noreplace",
+            side_effect=create_ambiguous_publication,
+        ):
+            with self.assertRaisesRegex(
+                NATIVE.StateTransactionIndeterminateError,
+                "all paths were preserved",
+            ) as raised:
+                NATIVE._write_state(
+                    state_path, replacement, identity_guard, prior_digest
+                )
+
+        self.assertNotIn("prior state was restored", str(raised.exception))
+        self.assertEqual(state_path.read_bytes(), ambiguous_bytes)
+        captures = list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.cas-backup"))
+        self.assertEqual(len(captures), 1)
+        self.assertEqual(captures[0].read_bytes(), prior_bytes)
+        staged = list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.tmp"))
+        self.assertEqual(len(staged), 1)
+        self.assertEqual(staged[0].read_bytes(), replacement_bytes)
+
+    @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
+    def test_first_install_publish_rename_interrupt_keeps_config_state_paired(
+        self,
+    ) -> None:
+        real_rename = NATIVE._rename_noreplace
+
+        def interrupt_after_publish(source: Path, destination: Path) -> None:
+            real_rename(source, destination)
+            raise KeyboardInterrupt("after first publication rename")
+
+        argv = [
+            str(self.installed_script),
+            "--codex-bin",
+            str(self.codex),
+            "--codex-home",
+            str(self.home),
+            "--allow-incompatible-client",
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "high",
+            "--apply",
+        ]
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(
+                NATIVE, "_rename_noreplace", side_effect=interrupt_after_publish
+            ),
+            mock.patch.object(sys, "stdout", io.StringIO()),
+            mock.patch.object(sys, "stderr", io.StringIO()),
+            mock.patch.dict(os.environ, self.fake_env()),
+        ):
+            result = NATIVE.main()
+
+        self.assertEqual(result, 0)
+        state = NATIVE._read_state(self.home / NATIVE.STATE_FILENAME)
+        self.assertIsNotNone(state)
+        self.assertTrue(
+            NATIVE._managed_matches(
+                state,
+                NATIVE._current_values(self.read_fake_config(), self.plugin_id),
+            )
+        )
+
+    @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
+    def test_update_publish_rename_interrupt_keeps_config_state_paired(self) -> None:
+        self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "high",
+            "--apply",
+        )
+        real_rename = NATIVE._rename_noreplace
+        calls = 0
+
+        def interrupt_after_replacement(source: Path, destination: Path) -> None:
+            nonlocal calls
+            calls += 1
+            real_rename(source, destination)
+            if calls == 2:
+                raise KeyboardInterrupt("after replacement publication rename")
+
+        argv = [
+            str(self.installed_script),
+            "--codex-bin",
+            str(self.codex),
+            "--codex-home",
+            str(self.home),
+            "--allow-incompatible-client",
+            "--executor-model",
+            "gpt-5.6-terra",
+            "--executor-effort",
+            "high",
+            "--apply",
+        ]
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(
+                NATIVE, "_rename_noreplace", side_effect=interrupt_after_replacement
+            ),
+            mock.patch.object(sys, "stdout", io.StringIO()),
+            mock.patch.object(sys, "stderr", io.StringIO()),
+            mock.patch.dict(os.environ, self.fake_env()),
+        ):
+            result = NATIVE.main()
+
+        self.assertEqual(result, 0)
+        self.assertEqual(calls, 2)
+        state = NATIVE._read_state(self.home / NATIVE.STATE_FILENAME)
+        self.assertIsNotNone(state)
+        self.assertEqual(state["executor"]["model"], "gpt-5.6-terra")
+        self.assertTrue(
+            NATIVE._managed_matches(
+                state,
+                NATIVE._current_values(self.read_fake_config(), self.plugin_id),
+            )
+        )
+
     def test_existing_state_publication_failure_restores_prior_bytes(self) -> None:
         state_path = self.home / NATIVE.STATE_FILENAME
         identity_guard = mock.Mock(spec=["assert_unchanged"])
@@ -2954,6 +3356,143 @@ class NativeRoutingTests(unittest.TestCase):
             (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
         )
         self.assertEqual(state["executor"]["model"], "gpt-5.6-luna")
+
+    @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
+    def test_first_install_interrupt_before_state_rollback_compensates_forward(
+        self,
+    ) -> None:
+        self.assert_effective_state_rollback_interrupt_pairing(
+            update=False, after_state_commit=False
+        )
+
+    @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
+    def test_first_install_interrupt_after_state_rollback_keeps_prior_pair(self) -> None:
+        self.assert_effective_state_rollback_interrupt_pairing(
+            update=False, after_state_commit=True
+        )
+
+    @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
+    def test_update_interrupt_before_state_rollback_compensates_forward(self) -> None:
+        self.assert_effective_state_rollback_interrupt_pairing(
+            update=True, after_state_commit=False
+        )
+
+    @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
+    def test_update_interrupt_after_state_rollback_keeps_prior_pair(self) -> None:
+        self.assert_effective_state_rollback_interrupt_pairing(
+            update=True, after_state_commit=True
+        )
+
+    @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
+    def test_effective_state_rollback_compensation_failure_is_actionable(self) -> None:
+        base_config = {
+            "features": {
+                "multi_agent_v2": {"max_concurrent_threads_per_session": 5}
+            },
+            "unrelated": {"keep": True},
+        }
+        (self.home / ".fake-effective-config.json").write_text(
+            json.dumps(base_config), encoding="utf-8"
+        )
+        real_batch_write = NATIVE._batch_write
+        calls = 0
+
+        def batch_write(*args: object, **kwargs: object) -> dict[str, object]:
+            nonlocal calls
+            calls += 1
+            if calls < 3:
+                return real_batch_write(*args, **kwargs)
+            raise KeyboardInterrupt("forced compensation failure")
+
+        argv = [
+            str(self.installed_script),
+            "--codex-bin",
+            str(self.codex),
+            "--codex-home",
+            str(self.home),
+            "--allow-incompatible-client",
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "high",
+            "--apply",
+        ]
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(NATIVE, "_batch_write", side_effect=batch_write),
+            mock.patch.object(
+                NATIVE,
+                "_remove_state",
+                side_effect=KeyboardInterrupt("before state rollback"),
+            ),
+            mock.patch.object(sys, "stdout", io.StringIO()),
+            mock.patch.object(sys, "stderr", stderr),
+            mock.patch.dict(os.environ, self.fake_env()),
+        ):
+            result = NATIVE.main()
+
+        self.assertEqual(result, 2)
+        self.assertEqual(calls, 3)
+        self.assertIn("forward config compensation failed", stderr.getvalue())
+        self.assertIn("may be inconsistent", stderr.getvalue())
+        self.assertIn("Run status", stderr.getvalue())
+        self.assertEqual(self.read_fake_config(), base_config)
+        self.assertEqual(
+            NATIVE._read_state(self.home / NATIVE.STATE_FILENAME)["executor"]["model"],
+            "gpt-5.6-luna",
+        )
+
+    @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
+    def test_effective_state_rollback_unknown_digest_is_actionable(self) -> None:
+        base_config = {
+            "features": {
+                "multi_agent_v2": {"max_concurrent_threads_per_session": 5}
+            },
+            "unrelated": {"keep": True},
+        }
+        (self.home / ".fake-effective-config.json").write_text(
+            json.dumps(base_config), encoding="utf-8"
+        )
+        state_path = self.home / NATIVE.STATE_FILENAME
+        unknown_state = self.valid_state("gpt-5.6-sol")
+
+        def publish_unknown_state(*_args: object, **_kwargs: object) -> None:
+            state_path.write_text(
+                json.dumps(unknown_state, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            raise KeyboardInterrupt("unknown rollback outcome")
+
+        argv = [
+            str(self.installed_script),
+            "--codex-bin",
+            str(self.codex),
+            "--codex-home",
+            str(self.home),
+            "--allow-incompatible-client",
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "high",
+            "--apply",
+        ]
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(NATIVE, "_remove_state", side_effect=publish_unknown_state),
+            mock.patch.object(sys, "stdout", io.StringIO()),
+            mock.patch.object(sys, "stderr", stderr),
+            mock.patch.dict(os.environ, self.fake_env()),
+        ):
+            result = NATIVE.main()
+
+        self.assertEqual(result, 2)
+        self.assertIn("matched neither the exact prior", stderr.getvalue())
+        self.assertIn("may be inconsistent", stderr.getvalue())
+        self.assertIn("Run status", stderr.getvalue())
+        self.assertEqual(self.read_fake_config(), base_config)
+        self.assertEqual(NATIVE._read_state(state_path), unknown_state)
 
     def test_effective_readback_rejects_unexpected_rollback_status(self) -> None:
         effective = {

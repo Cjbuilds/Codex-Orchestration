@@ -94,6 +94,10 @@ class ConfigurationError(RuntimeError):
     pass
 
 
+class StateTransactionIndeterminateError(ConfigurationError):
+    pass
+
+
 @contextlib.contextmanager
 def _transaction_directory_lock(root: Path):
     """Serialize one native-routing transaction per effective CODEX_HOME."""
@@ -898,13 +902,33 @@ def _restore_captured_state(
     """Restore by no-overwrite creation or retain a diagnosed recovery artifact."""
 
     try:
+        _, captured_digest = _read_state_snapshot(captured)
+    except BaseException as exc:
+        raise StateTransactionIndeterminateError(
+            f"{message} Could not establish the captured recovery digest; state "
+            "is indeterminate. Run status before continuing."
+        ) from exc
+    try:
         _rename_noreplace(captured, path)
     except FileExistsError:
         raise ConfigurationError(
             f"{message} A newer routing-state pathname was preserved; captured "
             f"bytes remain at {captured}."
         ) from cause
-    except (OSError, ConfigurationError) as exc:
+    except BaseException as exc:
+        try:
+            _, canonical_digest = _read_state_snapshot(path)
+            _, remaining_capture_digest = _read_state_snapshot(captured)
+        except BaseException as read_exc:
+            raise StateTransactionIndeterminateError(
+                f"{message} Restoration outcome is indeterminate; recovery artifacts "
+                "were preserved. Run status before continuing."
+            ) from read_exc
+        if (
+            canonical_digest == captured_digest
+            and remaining_capture_digest is None
+        ):
+            raise ConfigurationError(message) from cause
         raise ConfigurationError(
             f"{message} Automatic no-overwrite restoration failed; captured bytes "
             f"remain at {captured}: {exc}"
@@ -912,16 +936,48 @@ def _restore_captured_state(
     raise ConfigurationError(message) from cause
 
 
-def _capture_expected_state(path: Path, expected_digest: str) -> Path:
-    """Atomically remove the current pathname, then validate the captured object."""
+def _reconcile_state_capture(
+    path: Path,
+    captured: Path,
+    expected_digest: str,
+    cause: BaseException,
+) -> None:
+    try:
+        _, canonical_digest = _read_state_snapshot(path)
+        _, captured_digest = _read_state_snapshot(captured)
+    except BaseException as read_exc:
+        raise StateTransactionIndeterminateError(
+            "Routing-state capture outcome is indeterminate; canonical and recovery "
+            "paths were preserved. Run status before continuing."
+        ) from read_exc
+    if canonical_digest is None and captured_digest == expected_digest:
+        return
+    if canonical_digest == expected_digest and captured_digest is None:
+        if not isinstance(cause, Exception):
+            raise cause
+        raise ConfigurationError(
+            "Saved routing state changed concurrently; refusing state publication."
+        ) from cause
+    raise StateTransactionIndeterminateError(
+        "Saved routing state changed concurrently; capture matched neither a "
+        "completed nor a precommit move. All paths were preserved. Run status "
+        "before continuing."
+    ) from cause
 
-    captured = _private_state_capture_path(path)
+
+def _capture_expected_state(
+    path: Path, captured: Path, expected_digest: str
+) -> None:
+    """Move into a caller-owned capture pathname and validate exact captured bytes."""
+
     try:
         _rename_noreplace(path, captured)
-    except (OSError, ConfigurationError) as exc:
+    except FileExistsError as exc:
         raise ConfigurationError(
             "Saved routing state changed concurrently; refusing state publication."
         ) from exc
+    except BaseException as exc:
+        _reconcile_state_capture(path, captured, expected_digest, exc)
     try:
         _assert_state_digest(captured, expected_digest)
     except (ConfigurationError, OSError) as exc:
@@ -931,7 +987,8 @@ def _capture_expected_state(path: Path, expected_digest: str) -> Path:
             "Saved routing state changed concurrently; refusing state publication.",
             exc,
         )
-    return captured
+    except BaseException as exc:
+        _reconcile_state_capture(path, captured, expected_digest, exc)
 
 
 def _validate_state_config(state: dict[str, Any] | None, config_path: Path) -> None:
@@ -986,6 +1043,7 @@ def _write_state(
     temp_path = Path(temporary)
     captured: Path | None = None
     committed = False
+    preserve_transaction_evidence = False
     try:
         fchmod = getattr(os, "fchmod", None)
         if callable(fchmod):
@@ -1002,12 +1060,48 @@ def _write_state(
                     "Saved routing state changed concurrently; refusing state "
                     "publication."
                 ) from exc
-            committed = True
+            except BaseException as exc:
+                try:
+                    _, canonical_digest = _read_state_snapshot(path)
+                    _, remaining_temp_digest = _read_state_snapshot(temp_path)
+                except BaseException as read_exc:
+                    raise StateTransactionIndeterminateError(
+                        "Routing-state publication outcome is indeterminate; state "
+                        "paths were preserved. Run status before continuing."
+                    ) from read_exc
+                if (
+                    canonical_digest == payload_digest
+                    and remaining_temp_digest is None
+                ):
+                    committed = True
+                    _safe_warning(
+                        "routing state publication committed despite an interrupted "
+                        "atomic rename: ",
+                        exc,
+                    )
+                elif canonical_digest is None and remaining_temp_digest == payload_digest:
+                    raise
+                else:
+                    raise StateTransactionIndeterminateError(
+                        "Routing-state publication matched neither a completed nor a "
+                        "precommit move; state paths were preserved. Run status before "
+                        "continuing."
+                    ) from exc
+            else:
+                committed = True
         else:
-            captured = _capture_expected_state(path, expected_digest)
+            captured = _private_state_capture_path(path)
+            try:
+                _capture_expected_state(path, captured, expected_digest)
+            except StateTransactionIndeterminateError:
+                raise
+            except (ConfigurationError, OSError):
+                raise
+            except BaseException as exc:
+                _reconcile_state_capture(path, captured, expected_digest, exc)
             try:
                 _rename_noreplace(temp_path, path)
-            except (OSError, ConfigurationError) as exc:
+            except FileExistsError as exc:
                 _restore_captured_state(
                     path,
                     captured,
@@ -1015,7 +1109,53 @@ def _write_state(
                     "it was not overwritten.",
                     exc,
                 )
-            committed = True
+            except BaseException as exc:
+                try:
+                    _, canonical_digest = _read_state_snapshot(path)
+                    _, remaining_temp_digest = _read_state_snapshot(temp_path)
+                    _, captured_digest = _read_state_snapshot(captured)
+                except BaseException as read_exc:
+                    raise StateTransactionIndeterminateError(
+                        "Routing-state replacement outcome is indeterminate; state "
+                        "and recovery paths were preserved. Run status before continuing."
+                    ) from read_exc
+                if (
+                    canonical_digest == payload_digest
+                    and remaining_temp_digest is None
+                    and captured_digest == expected_digest
+                ):
+                    committed = True
+                    _safe_warning(
+                        "routing state replacement committed despite an interrupted "
+                        "atomic rename: ",
+                        exc,
+                    )
+                elif (
+                    canonical_digest is None
+                    and remaining_temp_digest == payload_digest
+                    and captured_digest == expected_digest
+                ):
+                    _restore_captured_state(
+                        path,
+                        captured,
+                        "A newer routing-state pathname appeared during publication; "
+                        "it was not overwritten.",
+                        exc,
+                    )
+                elif (
+                    canonical_digest == expected_digest
+                    and remaining_temp_digest == payload_digest
+                    and captured_digest is None
+                ):
+                    raise
+                else:
+                    raise StateTransactionIndeterminateError(
+                        "Routing-state replacement matched neither a completed nor a "
+                        "recoverable precommit move; all paths were preserved. Run "
+                        "status before continuing."
+                    ) from exc
+            else:
+                committed = True
         try:
             _fsync_directory(path.parent)
         except BaseException as exc:
@@ -1056,6 +1196,9 @@ def _write_state(
                         "could not be confirmed: ",
                         exc,
                     )
+    except StateTransactionIndeterminateError:
+        preserve_transaction_evidence = True
+        raise
     finally:
         try:
             os.close(fd)
@@ -1064,15 +1207,16 @@ def _write_state(
         except BaseException:
             if not committed:
                 raise
-        try:
-            temp_path.unlink(missing_ok=True)
-        except OSError:
-            # Never mask the publication result or its primary failure. A
-            # successful rename already consumed this path.
-            pass
-        except BaseException:
-            if not committed:
-                raise
+        if not preserve_transaction_evidence:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                # Never mask the publication result or its primary failure. A
+                # successful rename already consumed this path.
+                pass
+            except BaseException:
+                if not committed:
+                    raise
     return payload_digest
 
 
@@ -1085,7 +1229,15 @@ def _remove_state(
     if expected_digest is None:
         _assert_state_digest(path, None)
         return
-    captured = _capture_expected_state(path, expected_digest)
+    captured = _private_state_capture_path(path)
+    try:
+        _capture_expected_state(path, captured, expected_digest)
+    except StateTransactionIndeterminateError:
+        raise
+    except (ConfigurationError, OSError):
+        raise
+    except BaseException as exc:
+        _reconcile_state_capture(path, captured, expected_digest, exc)
     if path.exists():
         raise ConfigurationError(
             "A newer routing-state pathname appeared during removal; it was preserved."
@@ -3050,6 +3202,10 @@ def main() -> int:
                     identity_guard,
                     state_digest,
                 )
+            except StateTransactionIndeterminateError:
+                # The canonical state may already reflect the new config. Retain the
+                # accepted config rather than making an unsafe rollback guess.
+                raise
             except BaseException as state_exc:
                 try:
                     rollback_result = _batch_write(
@@ -3117,6 +3273,19 @@ def main() -> int:
                             "unexpected rollback status "
                             f"{rollback_result.get('status')!r}"
                         )
+                except BaseException as rollback_exc:
+                    try:
+                        rollback_detail = str(rollback_exc)
+                    except BaseException:
+                        rollback_detail = type(rollback_exc).__name__
+                    raise ConfigurationError(
+                        "Codex accepted the write but effective readback did not match, "
+                        "and automatic rollback failed before config rollback "
+                        "completed. The newly published restore state was retained; "
+                        "config and state may be inconsistent. Run status before "
+                        f"continuing. Rollback error: {rollback_detail}"
+                    ) from rollback_exc
+                try:
                     if state is None:
                         _remove_state(
                             state_path,
@@ -3130,12 +3299,79 @@ def main() -> int:
                             identity_guard,
                             published_state_digest,
                         )
-                except (ConfigurationError, OSError) as rollback_exc:
+                except BaseException as state_rollback_exc:
+                    try:
+                        _, observed_state_digest = _read_state_snapshot(state_path)
+                    except BaseException as state_read_exc:
+                        raise ConfigurationError(
+                            "Config rollback completed after effective readback failed, "
+                            "but restore-state rollback and canonical-state readback "
+                            "failed. Config and state may be inconsistent. Run status "
+                            "before continuing."
+                        ) from state_read_exc
+
+                    prior_state_digest = None if state is None else state_digest
+                    if observed_state_digest == prior_state_digest:
+                        if not isinstance(state_rollback_exc, Exception):
+                            raise
+                        raise ConfigurationError(
+                            "Codex accepted the user-layer write, but effective "
+                            "readback did not match. The prior config and exact prior "
+                            "restore state were reinstated despite a rollback error."
+                        ) from state_rollback_exc
+
+                    if observed_state_digest == published_state_digest:
+                        try:
+                            compensation_result = _batch_write(
+                                app,
+                                edits,
+                                rollback_result.get("version"),
+                                identity_guard=identity_guard,
+                                identity_phase="setup readback compensation",
+                                reload_user_config=True,
+                            )
+                            if compensation_result.get("status") not in {
+                                "ok",
+                                "okOverridden",
+                            }:
+                                raise ConfigurationError(
+                                    "unexpected compensation status "
+                                    f"{compensation_result.get('status')!r}"
+                                )
+                            compensation_read = app.request(
+                                "config/read",
+                                {"includeLayers": True, "cwd": str(workspace)},
+                            )
+                            compensation_config, _ = _user_layer(compensation_read)
+                            compensation_current = _current_values(
+                                compensation_config, plugin_id
+                            )
+                            if not _managed_matches(new_state, compensation_current):
+                                raise ConfigurationError(
+                                    "forward-compensated user config did not match the "
+                                    "newly published restore state"
+                                )
+                        except BaseException as compensation_exc:
+                            raise ConfigurationError(
+                                "Config rollback completed after effective readback "
+                                "failed, but restore-state rollback did not commit and "
+                                "forward config compensation failed. Config and state "
+                                "may be inconsistent. Run status before continuing."
+                            ) from compensation_exc
+                        if not isinstance(state_rollback_exc, Exception):
+                            raise
+                        raise ConfigurationError(
+                            "Codex accepted the write but effective readback did not "
+                            "match. The newly published config and restore state were "
+                            "re-paired after state rollback failed before commit."
+                        ) from state_rollback_exc
+
                     raise ConfigurationError(
-                        "Codex accepted the write but current-workspace effective "
-                        "readback did not match, and "
-                        f"automatic rollback failed: {rollback_exc}"
-                    ) from rollback_exc
+                        "Config rollback completed after effective readback failed, "
+                        "but canonical restore state matched neither the exact prior "
+                        "state nor the newly published state. Config and state may be "
+                        "inconsistent. Run status before continuing."
+                    ) from state_rollback_exc
                 raise ConfigurationError(
                     "Codex accepted the user-layer write, but current-workspace "
                     "effective readback did not match; the prior config and restore "
