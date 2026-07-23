@@ -804,6 +804,73 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertEqual(feature, {"max_concurrent_threads_per_session": 5})
         self.assertFalse((self.home / NATIVE.STATE_FILENAME).exists())
 
+    def test_disable_refuses_overridden_restore_and_retains_state(self) -> None:
+        self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "xhigh",
+            "--apply",
+        )
+        state_path = self.home / NATIVE.STATE_FILENAME
+        state_bytes = state_path.read_bytes()
+        (self.home / ".fake-ok-overridden").touch()
+
+        disabled = self.run_script("--disable", "--apply", check=False)
+
+        self.assertEqual(disabled.returncode, 2)
+        self.assertIn("higher-priority layer overrides", disabled.stderr)
+        self.assertNotIn("Native routing disabled", disabled.stdout)
+        self.assertEqual(state_path.read_bytes(), state_bytes)
+
+    def test_disable_readback_preserves_state_after_post_write_edit(self) -> None:
+        self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "xhigh",
+            "--apply",
+        )
+        state_path = self.home / NATIVE.STATE_FILENAME
+        state_bytes = state_path.read_bytes()
+        (self.home / ".fake-mutate-after-write").touch()
+
+        disabled = self.run_script("--disable", "--apply", check=False)
+
+        self.assertEqual(disabled.returncode, 2)
+        self.assertIn("newer edit was preserved", disabled.stderr)
+        self.assertNotIn("Native routing disabled", disabled.stdout)
+        self.assertEqual(state_path.read_bytes(), state_bytes)
+        self.assertEqual(
+            self.read_fake_config()["features"]["multi_agent_v2"][
+                "usage_hint_text"
+            ],
+            "CONCURRENT USER EDIT",
+        )
+
+    def test_disable_readback_preserves_state_when_effective_restore_is_overridden(
+        self,
+    ) -> None:
+        self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "xhigh",
+            "--apply",
+        )
+        state_path = self.home / NATIVE.STATE_FILENAME
+        state_bytes = state_path.read_bytes()
+        (self.home / ".fake-effective-config.json").write_text(
+            json.dumps(self.read_fake_config()), encoding="utf-8"
+        )
+
+        disabled = self.run_script("--disable", "--apply", check=False)
+
+        self.assertEqual(disabled.returncode, 2)
+        self.assertIn("overridden in this workspace", disabled.stderr)
+        self.assertNotIn("Native routing disabled", disabled.stdout)
+        self.assertEqual(state_path.read_bytes(), state_bytes)
+
     def test_direct_planner_designer_setup_status_and_require_effective(self) -> None:
         setup = self.run_script(
             "--executor-model",
@@ -2094,6 +2161,101 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertEqual(
             json.loads(state_path.read_text(encoding="utf-8")), intervening
         )
+
+    def test_state_cas_rechecks_mutation_during_identity_guard(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        original = self.valid_state()
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        original_digest = NATIVE._write_state(
+            state_path, original, identity_guard, None
+        )
+        intervening = self.valid_state("gpt-5.6-terra")
+        intervening_bytes = json.dumps(intervening).encode("utf-8")
+
+        def mutate_during_guard(_phase: str) -> None:
+            state_path.write_bytes(intervening_bytes)
+
+        identity_guard.assert_unchanged.side_effect = mutate_during_guard
+        with self.assertRaisesRegex(NATIVE.ConfigurationError, "changed concurrently"):
+            NATIVE._remove_state(state_path, identity_guard, original_digest)
+        self.assertEqual(state_path.read_bytes(), intervening_bytes)
+
+        identity_guard.assert_unchanged.side_effect = None
+        state_path.write_bytes(json.dumps(original).encode("utf-8"))
+        original_digest = NATIVE._read_state_snapshot(state_path)[1]
+        identity_guard.assert_unchanged.side_effect = mutate_during_guard
+        with self.assertRaisesRegex(NATIVE.ConfigurationError, "changed concurrently"):
+            NATIVE._write_state(
+                state_path, self.valid_state("gpt-5.6-sol"), identity_guard, original_digest
+            )
+        self.assertEqual(state_path.read_bytes(), intervening_bytes)
+
+    def test_absent_state_publication_never_overwrites_intervening_state(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        replacement = self.valid_state("gpt-5.6-terra")
+        replacement_bytes = json.dumps(replacement).encode("utf-8")
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+
+        def publish_during_guard(_phase: str) -> None:
+            state_path.write_bytes(replacement_bytes)
+
+        identity_guard.assert_unchanged.side_effect = publish_during_guard
+        with self.assertRaisesRegex(NATIVE.ConfigurationError, "changed concurrently"):
+            NATIVE._write_state(state_path, self.valid_state(), identity_guard, None)
+        self.assertEqual(state_path.read_bytes(), replacement_bytes)
+
+    def test_state_cas_preserves_write_after_captured_validation(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        original = self.valid_state()
+        original_digest = NATIVE._write_state(
+            state_path, original, identity_guard, None
+        )
+        newer_bytes = json.dumps(self.valid_state("gpt-5.6-terra")).encode("utf-8")
+        original_assert = NATIVE._assert_state_digest
+
+        def mutate_after_validation(path: Path, digest: str | None) -> None:
+            original_assert(path, digest)
+            if path.name.endswith(".cas-backup"):
+                state_path.write_bytes(newer_bytes)
+
+        with mock.patch.object(
+            NATIVE, "_assert_state_digest", side_effect=mutate_after_validation
+        ):
+            with self.assertRaisesRegex(
+                NATIVE.ConfigurationError, "was not overwritten"
+            ):
+                NATIVE._write_state(
+                    state_path,
+                    self.valid_state("gpt-5.6-sol"),
+                    identity_guard,
+                    original_digest,
+                )
+        self.assertEqual(state_path.read_bytes(), newer_bytes)
+        self.assertEqual(len(list(self.home.glob("*.cas-backup"))), 1)
+
+    def test_state_cas_preserves_write_after_remove_validation(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        original_digest = NATIVE._write_state(
+            state_path, self.valid_state(), identity_guard, None
+        )
+        newer_bytes = json.dumps(self.valid_state("gpt-5.6-terra")).encode("utf-8")
+        original_assert = NATIVE._assert_state_digest
+
+        def mutate_after_validation(path: Path, digest: str | None) -> None:
+            original_assert(path, digest)
+            if path.name.endswith(".cas-backup"):
+                state_path.write_bytes(newer_bytes)
+
+        with mock.patch.object(
+            NATIVE, "_assert_state_digest", side_effect=mutate_after_validation
+        ):
+            with self.assertRaisesRegex(
+                NATIVE.ConfigurationError, "appeared during removal"
+            ):
+                NATIVE._remove_state(state_path, identity_guard, original_digest)
+        self.assertEqual(state_path.read_bytes(), newer_bytes)
 
     def test_state_cas_digest_progression_binds_write_remove_and_rollback(self) -> None:
         state_path = self.home / NATIVE.STATE_FILENAME

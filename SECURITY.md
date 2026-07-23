@@ -124,9 +124,14 @@ version. On Windows, identity sources are held through strict non-write/non-dele
 shared handles and every identity, stat, and hash recheck uses those retained handles.
 One nonblocking transaction lock per effective `CODEX_HOME` serializes status,
 setup, repair, disable, rollback, and publication across cooperating configurators.
-State replacement/removal additionally compares the exact originally observed byte
-digest or absence and carries each new digest through rollback. Setup and repair
-require the enabled executing installation;
+State replacement/removal additionally captures the prior pathname into a private
+same-directory recovery object, validates its exact originally observed bytes, and
+publishes only with atomic no-overwrite creation. A concurrently recreated pathname
+is preserved; a failed recovery leaves the captured bytes at a diagnosed private
+path rather than overwriting newer state. Each new digest is carried through rollback.
+Disable retains restore state until user and effective config readback prove the
+intended restoration and rejects `okOverridden`. Setup and repair require the enabled
+executing installation;
 disable resolves the saved namespace from the full installed inventory even when it
 is disabled. Unmigrated schemas 1–6 remain bound to the historical canonical
 marketplace identity. A legacy state without an MCP snapshot may be upgraded to the

@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.9.2 — Unreleased
+## 0.9.2 — 2026-07-23
 
 - Resolve the enabled executing Codex Orchestration installation from the native
   plugin inventory instead of writing MCP overrides beneath a hard-coded marketplace
@@ -18,8 +18,11 @@
   identity, stat, and payload hashes are rechecked through retained strict handles
   rather than weaker path reopens.
 - Serialize native routing operations with one nonblocking per-`CODEX_HOME`
-  transaction lock and compare-and-swap every state replacement/removal against the
-  exact originally observed byte digest or absence.
+  transaction lock. State replacement/removal atomically captures the prior pathname,
+  validates its exact originally observed bytes, and publishes only by no-overwrite
+  creation so a non-cooperating newer writer is preserved rather than clobbered.
+  Disable now retains recovery state unless both user and effective config readback
+  prove the intended restore, including explicit refusal of `okOverridden` writes.
 - Clear Git's repository-local environment before versioned pre-commit and pre-push
   preflight so linked-worktree hooks cannot redirect nested Git fixture tests into
   the parent repository metadata.

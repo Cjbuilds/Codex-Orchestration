@@ -795,6 +795,66 @@ def _assert_state_digest(path: Path, expected_digest: str | None) -> None:
         )
 
 
+def _private_state_capture_path(path: Path) -> Path:
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".cas-backup", dir=path.parent
+    )
+    os.close(descriptor)
+    captured = Path(temporary)
+    captured.unlink()
+    return captured
+
+
+def _restore_captured_state(
+    path: Path, captured: Path, message: str, cause: BaseException
+) -> None:
+    """Restore by no-overwrite creation or retain a diagnosed recovery artifact."""
+
+    try:
+        os.link(captured, path)
+    except FileExistsError:
+        raise ConfigurationError(
+            f"{message} A newer routing-state pathname was preserved; captured "
+            f"bytes remain at {captured}."
+        ) from cause
+    except OSError as exc:
+        raise ConfigurationError(
+            f"{message} Automatic no-overwrite restoration failed; captured bytes "
+            f"remain at {captured}: {exc}"
+        ) from cause
+    try:
+        captured.unlink()
+    except OSError as exc:
+        raise ConfigurationError(
+            f"{message} The pathname was restored, but its extra recovery link "
+            f"remains at {captured}: {exc}"
+        ) from cause
+    raise ConfigurationError(message) from cause
+
+
+def _capture_expected_state(path: Path, expected_digest: str) -> Path:
+    """Atomically remove the current pathname, then validate the captured object."""
+
+    captured = _private_state_capture_path(path)
+    try:
+        os.replace(path, captured)
+    except OSError as exc:
+        captured.unlink(missing_ok=True)
+        raise ConfigurationError(
+            "Saved routing state changed concurrently; refusing state publication."
+        ) from exc
+    try:
+        _assert_state_digest(captured, expected_digest)
+    except (ConfigurationError, OSError) as exc:
+        _restore_captured_state(
+            path,
+            captured,
+            "Saved routing state changed concurrently; refusing state publication.",
+            exc,
+        )
+    return captured
+
+
 def _validate_state_config(state: dict[str, Any] | None, config_path: Path) -> None:
     if state is None:
         return
@@ -829,8 +889,39 @@ def _write_state(
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
-        _assert_state_digest(path, expected_digest)
-        os.replace(temp_path, path)
+        if expected_digest is None:
+            try:
+                os.link(temp_path, path)
+            except FileExistsError as exc:
+                raise ConfigurationError(
+                    "Saved routing state changed concurrently; refusing state "
+                    "publication."
+                ) from exc
+            temp_path.unlink()
+        else:
+            captured = _capture_expected_state(path, expected_digest)
+            try:
+                os.link(temp_path, path)
+            except OSError as exc:
+                _restore_captured_state(
+                    path,
+                    captured,
+                    "A newer routing-state pathname appeared during publication; "
+                    "it was not overwritten.",
+                    exc,
+                )
+            temp_path.unlink()
+            try:
+                captured.unlink()
+            except OSError as exc:
+                # Publication is already complete. Reporting this as a failed write
+                # would make the caller roll config back while leaving the new state
+                # live, so retain the harmless prior-state recovery object and warn.
+                print(
+                    "WARNING: routing state was published, but the prior-state "
+                    f"recovery artifact remains at {captured}: {exc}",
+                    file=sys.stderr,
+                )
         try:
             directory_fd = os.open(path.parent, os.O_RDONLY)
         except OSError:
@@ -854,11 +945,24 @@ def _remove_state(
     identity_guard: plugin_identity.PluginIdentityGuard,
     expected_digest: str | None,
 ) -> None:
-    _assert_state_digest(path, expected_digest)
     identity_guard.assert_unchanged("routing-state removal")
     if expected_digest is None:
+        _assert_state_digest(path, None)
         return
-    path.unlink()
+    captured = _capture_expected_state(path, expected_digest)
+    try:
+        captured.unlink()
+    except OSError as exc:
+        _restore_captured_state(
+            path,
+            captured,
+            "Could not remove the captured routing state.",
+            exc,
+        )
+    if path.exists():
+        raise ConfigurationError(
+            "A newer routing-state pathname appeared during removal; it was preserved."
+        )
     try:
         directory_fd = os.open(path.parent, os.O_RDONLY)
     except OSError:
@@ -1497,6 +1601,61 @@ def _strict_equal(left: Any, right: Any) -> bool:
             for left_item, right_item in zip(left, right, strict=True)
         )
     return left == right
+
+
+def _restored_snapshot_value(saved: Any, fallback: Any) -> Any:
+    if not isinstance(saved, dict) or not saved.get("known"):
+        return fallback
+    return saved.get("value") if saved.get("present") else MISSING
+
+
+def _disable_expected_values(
+    state: dict[str, Any] | None, current: dict[str, Any]
+) -> tuple[dict[str, Any], bool]:
+    expected = dict(current)
+    expected["mcp"] = dict(current["mcp"])
+    compare_feature = False
+    if state is None:
+        for field in ("mode", "usage"):
+            if _is_managed(current[field]):
+                expected[field] = MISSING
+        return expected, compare_feature
+
+    previous = state.get("previous")
+    if not isinstance(previous, dict):
+        raise ConfigurationError("Routing state has no restore data.")
+    scalar_origin = state.get("scalar_origin")
+    if isinstance(scalar_origin, bool):
+        expected["feature"] = scalar_origin
+        compare_feature = True
+        for field in ("mode", "usage", "metadata", "namespace"):
+            expected[field] = MISSING
+    else:
+        for field in ("mode", "usage", "metadata", "namespace"):
+            expected[field] = _restored_snapshot_value(
+                previous.get(field), current[field]
+            )
+    previous_mcp = previous.get("mcp")
+    if isinstance(previous_mcp, dict):
+        for server, saved in previous_mcp.items():
+            expected["mcp"][server] = _restored_snapshot_value(
+                saved, current["mcp"].get(server, MISSING)
+            )
+    return expected, compare_feature
+
+
+def _disable_values_match(
+    expected: dict[str, Any], observed: dict[str, Any], compare_feature: bool
+) -> bool:
+    fields = ("mode", "usage", "metadata", "namespace")
+    if compare_feature and not _strict_equal(expected["feature"], observed["feature"]):
+        return False
+    if any(not _strict_equal(expected[field], observed[field]) for field in fields):
+        return False
+    return all(
+        _strict_equal(expected_value, observed["mcp"].get(server, MISSING))
+        for server, expected_value in expected["mcp"].items()
+    )
 
 
 def _managed_matches(state: dict[str, Any], current: dict[str, Any]) -> bool:
@@ -2268,6 +2427,7 @@ def _disable(
     version: str | None,
     state: dict[str, Any] | None,
     state_digest: str | None,
+    workspace: Path,
     identity_guard: plugin_identity.PluginIdentityGuard,
     plugin_id: str,
     apply: bool,
@@ -2375,8 +2535,33 @@ def _disable(
         identity_phase="disable write",
         reload_user_config=True,
     )
-    if result.get("status") not in {"ok", "okOverridden"}:
+    if result.get("status") == "okOverridden":
+        raise ConfigurationError(
+            "A higher-priority layer overrides the restored routing values; saved "
+            "restore state was retained."
+        )
+    if result.get("status") != "ok":
         raise ConfigurationError(f"Unexpected config write status: {result.get('status')!r}")
+    expected, compare_feature = _disable_expected_values(state, current)
+    read_result = app.request(
+        "config/read", {"includeLayers": True, "cwd": str(workspace)}
+    )
+    user_config, _ = _user_layer(read_result)
+    user_current = _current_values(user_config, plugin_id)
+    if not _disable_values_match(expected, user_current, compare_feature):
+        raise ConfigurationError(
+            "The user routing fields changed after Codex accepted disable; the newer "
+            "edit was preserved and saved restore state remains available."
+        )
+    effective_config = read_result.get("config")
+    effective_current = _current_values(
+        effective_config if isinstance(effective_config, dict) else {}, plugin_id
+    )
+    if not _disable_values_match(expected, effective_current, compare_feature):
+        raise ConfigurationError(
+            "The restored routing values are overridden in this workspace; saved "
+            "restore state remains available."
+        )
     _remove_state(state_path, identity_guard, state_digest)
     identity_guard.assert_unchanged("disable success publication")
     print("Native routing disabled. Start a new Codex task to clear the loaded policy.")
@@ -2455,6 +2640,7 @@ def main() -> int:
                     version,
                     state,
                     state_digest,
+                    workspace,
                     identity_guard,
                     plugin_id,
                     args.apply,
