@@ -534,22 +534,26 @@ def _inventory(
     result: list[dict[str, Any]] = []
     transient: dict[str, _Package] = {}
     seen: set[str] = set()
+    targets: list[tuple[Mapping[str, Any], str]] = []
     try:
         for raw in _records(value):
             plugin_id, name, _, installed, _ = _record_identity(raw)
-            if not installed or name != PLUGIN_NAME:
+            if name != PLUGIN_NAME:
                 continue
+            if plugin_id in seen:
+                raise InventoryFormatError(
+                    "Plugin inventory contains a duplicate plugin ID."
+                )
+            seen.add(plugin_id)
+            if installed:
+                targets.append((raw, plugin_id))
+        for raw, plugin_id in targets:
             package = (
                 retained_packages.get(plugin_id)
                 if retained_packages is not None
                 else None
             )
             record, opened = _canonical_record(raw, package)
-            if record["plugin_id"] in seen:
-                if package is None:
-                    opened.close()
-                raise InventoryFormatError("Plugin inventory contains a duplicate plugin ID.")
-            seen.add(record["plugin_id"])
             result.append(record)
             if package is None:
                 transient[record["plugin_id"]] = opened

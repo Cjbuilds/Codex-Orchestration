@@ -220,6 +220,25 @@ class SelectionTests(IdentityFixture):
         with self.assertRaises(IDENTITY.SelectionError):
             self.select([self.record()], "setup", executing=self.root / "wrong")
 
+    def test_single_uninstalled_target_is_not_source_opened_and_is_missing(self):
+        uninstalled = self.record(
+            installed=False,
+            root=self.root / "missing-uninstalled-source",
+            source_type="unsupported-uninstalled-source",
+        )
+        records, packages = IDENTITY._inventory(
+            {"installed": [uninstalled], "available": []}
+        )
+        self.assertEqual(records, [])
+        self.assertEqual(packages, {})
+        with self.assertRaisesRegex(
+            IDENTITY.SelectionError,
+            "^Enabled executing plugin identity is missing or ambiguous\\.$",
+        ):
+            IDENTITY._select(
+                records, "setup", self.cache, None, self.codex_home
+            )
+
     def test_enabled_executing_ambiguity_fails(self):
         canonical, packages = IDENTITY._inventory(
             {"installed": [self.record()], "available": []}
@@ -256,6 +275,28 @@ class SelectionTests(IdentityFixture):
 
 
 class FormatAndCommandTests(IdentityFixture):
+    def test_duplicate_target_ids_fail_before_state_filtering_or_source_opening(self):
+        states = ((True, True), (True, False), (False, True), (False, False))
+        for first_state in states:
+            for second_state in states:
+                with self.subTest(first=first_state, second=second_state):
+                    records = [
+                        self.record(
+                            installed=installed,
+                            enabled=enabled,
+                            root=self.root / "missing-duplicate-source",
+                            source_type="unsupported-duplicate-source",
+                        )
+                        for installed, enabled in (first_state, second_state)
+                    ]
+                    with self.assertRaisesRegex(
+                        IDENTITY.InventoryFormatError,
+                        "^Plugin inventory contains a duplicate plugin ID\\.$",
+                    ):
+                        IDENTITY._inventory(
+                            {"installed": records, "available": []}
+                        )
+
     def test_malformed_shapes_and_fields_fail(self):
         bad_values = [None, {}, {"plugins": {}}, [1], {"installed": [1], "available": []}, {"installed": [{"installed": True, "name": 1}], "available": []}]
         for value in bad_values:

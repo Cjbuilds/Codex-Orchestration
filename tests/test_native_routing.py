@@ -2357,6 +2357,24 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertIn("routing state was published", stderr.getvalue())
         self.assertIn("durability could not be confirmed", stderr.getvalue())
 
+    def test_interrupt_like_postcommit_maintenance_cannot_escape(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        state = self.valid_state()
+
+        with (
+            mock.patch.object(
+                NATIVE,
+                "_fsync_directory",
+                side_effect=KeyboardInterrupt("maintenance interrupt"),
+            ),
+            mock.patch.object(sys, "stderr", io.StringIO()),
+        ):
+            digest = NATIVE._write_state(state_path, state, identity_guard, None)
+
+        self.assertEqual(NATIVE._read_state_snapshot(state_path)[1], digest)
+        self.assertEqual(NATIVE._read_state(state_path), state)
+
     def test_replacement_directory_fsync_failure_retains_prior_capture(self) -> None:
         state_path = self.home / NATIVE.STATE_FILENAME
         identity_guard = mock.Mock(spec=["assert_unchanged"])
@@ -2563,14 +2581,32 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertEqual(state_path.lstat().st_nlink, 1)
 
     @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
-    def test_postcommit_fsync_failures_keep_config_and_visible_state_consistent(
+    def test_postcommit_fsync_and_stderr_failures_keep_config_state_consistent(
         self,
     ) -> None:
         state_path = self.home / NATIVE.STATE_FILENAME
 
-        def invoke(*arguments: str) -> tuple[int, str, str]:
+        class BrokenStderr:
+            def __init__(self) -> None:
+                self.writes = 0
+
+            def write(self, _message: str) -> None:
+                self.writes += 1
+                raise BrokenPipeError("closed diagnostic stream")
+
+            def flush(self) -> None:
+                raise BrokenPipeError("closed diagnostic stream")
+
+        real_app_server_close = NATIVE.AppServer.close
+
+        def close_app_server_streams(app: NATIVE.AppServer) -> None:
+            real_app_server_close(app)
+            app._stdin.close()
+            app._stdout.close()
+
+        def invoke(*arguments: str) -> tuple[int, str, BrokenStderr]:
             stdout = io.StringIO()
-            stderr = io.StringIO()
+            stderr = BrokenStderr()
             argv = [
                 str(self.installed_script),
                 "--codex-bin",
@@ -2586,13 +2622,18 @@ class NativeRoutingTests(unittest.TestCase):
                 mock.patch.object(sys, "stderr", stderr),
                 mock.patch.dict(os.environ, self.fake_env()),
                 mock.patch.object(
+                    NATIVE.AppServer,
+                    "close",
+                    new=close_app_server_streams,
+                ),
+                mock.patch.object(
                     NATIVE,
                     "_fsync_directory",
                     side_effect=PermissionError("forced directory fsync failure"),
                 ),
             ):
                 result = NATIVE.main()
-            return result, stdout.getvalue(), stderr.getvalue()
+            return result, stdout.getvalue(), stderr
 
         result, stdout, stderr = invoke(
             "--executor-model",
@@ -2603,8 +2644,7 @@ class NativeRoutingTests(unittest.TestCase):
         )
         self.assertEqual(result, 0)
         self.assertIn("Native routing policy installed", stdout)
-        self.assertIn("directory durability could not be confirmed", stderr)
-        self.assertNotIn("rolled back", stderr)
+        self.assertGreater(stderr.writes, 0)
         state = NATIVE._read_state(state_path)
         self.assertIsNotNone(state)
         self.assertTrue(
@@ -2624,7 +2664,7 @@ class NativeRoutingTests(unittest.TestCase):
         )
         self.assertEqual(result, 0)
         self.assertIn("Native routing policy installed", stdout)
-        self.assertIn("Prior-state recovery remains", stderr)
+        self.assertGreater(stderr.writes, 0)
         state = NATIVE._read_state(state_path)
         self.assertIsNotNone(state)
         self.assertEqual(state["executor"]["model"], "gpt-5.6-terra")
@@ -2642,7 +2682,7 @@ class NativeRoutingTests(unittest.TestCase):
         result, stdout, stderr = invoke("--disable", "--apply")
         self.assertEqual(result, 0)
         self.assertIn("Native routing disabled", stdout)
-        self.assertIn("routing state was removed", stderr)
+        self.assertGreater(stderr.writes, 0)
         self.assertFalse(state_path.exists())
         self.assertEqual(
             self.read_fake_config()["features"]["multi_agent_v2"],
@@ -2651,6 +2691,49 @@ class NativeRoutingTests(unittest.TestCase):
         captures = list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.cas-backup"))
         self.assertEqual(len(captures), 2)
         self.assertIn(removed_bytes, [capture.read_bytes() for capture in captures])
+
+    def test_windows_transaction_mutex_uses_exact_global_name_and_fails_closed(
+        self,
+    ) -> None:
+        lock_identity = os.path.normcase(os.path.realpath(self.home))
+        name_hash = NATIVE.hashlib.sha256(lock_identity.encode("utf-8")).hexdigest()
+        expected_name = f"Global\\CodexOrchestrationNativeRouting-{name_hash}"
+
+        for create_result, wait_result, expected_error in (
+            (123, 0x00000000, None),
+            (0, 0x00000000, "Could not create"),
+            (123, 0xFFFFFFFF, "transaction is active"),
+        ):
+            with self.subTest(
+                create_result=create_result,
+                wait_result=wait_result,
+            ):
+                kernel32 = mock.Mock()
+                kernel32.CreateMutexW.return_value = create_result
+                kernel32.WaitForSingleObject.return_value = wait_result
+                with (
+                    mock.patch.object(NATIVE.os, "name", "nt"),
+                    mock.patch.object(
+                        NATIVE.ctypes,
+                        "WinDLL",
+                        create=True,
+                        return_value=kernel32,
+                    ),
+                ):
+                    if expected_error is None:
+                        with NATIVE._transaction_directory_lock(self.home):
+                            pass
+                    else:
+                        with self.assertRaisesRegex(
+                            NATIVE.ConfigurationError, expected_error
+                        ):
+                            with NATIVE._transaction_directory_lock(self.home):
+                                pass
+
+                kernel32.CreateMutexW.assert_called_once_with(
+                    None, False, expected_name
+                )
+                self.assertNotIn("Local\\", expected_name)
 
     def test_transaction_lock_rejects_a_concurrent_process(self) -> None:
         probe = textwrap.dedent(

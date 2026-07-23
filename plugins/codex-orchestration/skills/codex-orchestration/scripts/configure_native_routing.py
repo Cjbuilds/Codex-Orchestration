@@ -147,7 +147,7 @@ def _transaction_directory_lock(root: Path):
         kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
         kernel32.CloseHandle.restype = wintypes.BOOL
         mutex = kernel32.CreateMutexW(
-            None, False, f"Local\\CodexOrchestrationNativeRouting-{name_hash}"
+            None, False, f"Global\\CodexOrchestrationNativeRouting-{name_hash}"
         )
         if not mutex:
             raise ConfigurationError("Could not create the Windows transaction mutex.")
@@ -959,6 +959,16 @@ def _fsync_directory(path: Path) -> None:
         os.close(directory_fd)
 
 
+def _safe_warning(*parts: object) -> None:
+    """Best-effort post-commit diagnostic that can never change the outcome."""
+
+    try:
+        sys.stderr.write("WARNING: " + "".join(str(part) for part in parts) + "\n")
+        sys.stderr.flush()
+    except BaseException:
+        pass
+
+
 def _write_state(
     path: Path,
     state: dict[str, Any],
@@ -969,11 +979,13 @@ def _write_state(
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(state, indent=2, sort_keys=True) + "\n"
     payload_bytes = payload.encode("utf-8")
+    payload_digest = hashlib.sha256(payload_bytes).hexdigest()
     fd, temporary = tempfile.mkstemp(
         prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
     )
     temp_path = Path(temporary)
     captured: Path | None = None
+    committed = False
     try:
         fchmod = getattr(os, "fchmod", None)
         if callable(fchmod):
@@ -990,6 +1002,7 @@ def _write_state(
                     "Saved routing state changed concurrently; refusing state "
                     "publication."
                 ) from exc
+            committed = True
         else:
             captured = _capture_expected_state(path, expected_digest)
             try:
@@ -1002,50 +1015,65 @@ def _write_state(
                     "it was not overwritten.",
                     exc,
                 )
+            committed = True
         try:
             _fsync_directory(path.parent)
-        except OSError as exc:
-            recovery = (
-                f" Prior-state recovery remains at {captured}." if captured else ""
-            )
-            print(
-                "WARNING: routing state was published, but directory durability "
-                f"could not be confirmed.{recovery} Error: {exc}",
-                file=sys.stderr,
+        except BaseException as exc:
+            recovery: tuple[object, ...] = ()
+            if captured is not None:
+                recovery = (
+                    " Prior-state recovery remains at ",
+                    captured,
+                    ".",
+                )
+            _safe_warning(
+                "routing state was published, but directory durability could not "
+                "be confirmed.",
+                *recovery,
+                " Error: ",
+                exc,
             )
         else:
             if captured is None:
-                return hashlib.sha256(payload_bytes).hexdigest()
+                return payload_digest
             try:
                 captured.unlink()
-            except OSError as exc:
-                print(
-                    "WARNING: routing state was published, but the prior-state "
-                    f"recovery artifact remains at {captured}: {exc}",
-                    file=sys.stderr,
+            except BaseException as exc:
+                _safe_warning(
+                    "routing state was published, but the prior-state recovery "
+                    "artifact remains at ",
+                    captured,
+                    ": ",
+                    exc,
                 )
             else:
                 try:
                     _fsync_directory(path.parent)
-                except OSError as exc:
-                    print(
-                        "WARNING: routing state was published and prior-state "
+                except BaseException as exc:
+                    _safe_warning(
+                        "routing state was published and prior-state "
                         "recovery cleanup completed, but cleanup directory durability "
-                        f"could not be confirmed: {exc}",
-                        file=sys.stderr,
+                        "could not be confirmed: ",
+                        exc,
                     )
     finally:
         try:
             os.close(fd)
         except OSError:
             pass
+        except BaseException:
+            if not committed:
+                raise
         try:
             temp_path.unlink(missing_ok=True)
         except OSError:
             # Never mask the publication result or its primary failure. A
             # successful rename already consumed this path.
             pass
-    return hashlib.sha256(payload_bytes).hexdigest()
+        except BaseException:
+            if not committed:
+                raise
+    return payload_digest
 
 
 def _remove_state(
@@ -1064,30 +1092,33 @@ def _remove_state(
         )
     try:
         _fsync_directory(path.parent)
-    except OSError as exc:
-        print(
-            "WARNING: routing state was removed, but directory durability could not "
-            f"be confirmed. Prior-state recovery remains at {captured}. Error: {exc}",
-            file=sys.stderr,
+    except BaseException as exc:
+        _safe_warning(
+            "routing state was removed, but directory durability could not "
+            "be confirmed. Prior-state recovery remains at ",
+            captured,
+            ". Error: ",
+            exc,
         )
         return
     try:
         captured.unlink()
-    except OSError as exc:
-        print(
-            "WARNING: routing state was removed, but the prior-state recovery "
-            f"artifact remains at {captured}: {exc}",
-            file=sys.stderr,
+    except BaseException as exc:
+        _safe_warning(
+            "routing state was removed, but the prior-state recovery artifact "
+            "remains at ",
+            captured,
+            ": ",
+            exc,
         )
         return
     try:
         _fsync_directory(path.parent)
-    except OSError as exc:
-        print(
-            "WARNING: routing state was removed and prior-state recovery cleanup "
-            "completed, but cleanup directory durability could not be confirmed: "
-            f"{exc}",
-            file=sys.stderr,
+    except BaseException as exc:
+        _safe_warning(
+            "routing state was removed and prior-state recovery cleanup "
+            "completed, but cleanup directory durability could not be confirmed: ",
+            exc,
         )
 
 
