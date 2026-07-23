@@ -196,6 +196,11 @@ Gate 0 probe, create the role variants, then start a new task. Never paste an AP
 key into Codex chat. The repository,
 provider TOML, registry, journal, logs, and tests store no key.
 
+Once a literal provider-backed External Model role is READY, execution uses only the
+sealed, tool-free `codex exec` transport with the bounded task packet on stdin. It
+never runs through native `agents.spawn_agent`; `resolve` remains a read-only
+diagnostic rather than an execution path.
+
 OpenRouter now officially lists the exact ID `moonshotai/kimi-k3`, a 1,048,576-token
 context, a Responses-compatible endpoint, and only `max` reasoning. For this model,
 `auto` resolves to `max`; every other explicit effort is rejected rather than
@@ -308,7 +313,8 @@ codex plugin add codex-orchestration@codex-orchestration
 Version **0.6.0 or newer** is required for External Model roles; version **0.7.0
 or newer** adds `--update`, routing repair, and Designer; version **0.7.2 or newer**
 uses concise per-role activation confirmation; version **0.8.0 or newer** routes
-`Designer: Kimi K3` through the existing Kimi Code OAuth subscription via ACP;
+`Designer: Kimi K3` through the existing Kimi Code OAuth subscription via ACP and
+uses sealed direct CLI invocation for READY External Model roles;
 version **0.9.0 or newer** adds the sealed Qwen 3.8 Max Preview Advisor. Version
 **0.9.1 or newer** clarifies that root-owned planning may use a direct Advisor
 matching the root model, while two configured Planner/Advisor routes must still

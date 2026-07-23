@@ -12,6 +12,8 @@ import subprocess
 import sys
 from typing import Any
 
+import external_cli_trust
+
 
 HELPER_NAME = "external_auth_helper.py"
 HELPER_MARKER = b"codex-orchestration-managed-external-auth-helper-v1"
@@ -213,6 +215,7 @@ def credential_ready(
             check=False,
             timeout=20,
             shell=False,
+            env=external_cli_trust.sanitized_environment(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return False

@@ -525,8 +525,13 @@ def discover_compatibility_binaries(
 
 
 class AppServer:
-    def __init__(self, binary: Path, codex_home: Path | None) -> None:
-        env = os.environ.copy()
+    def __init__(
+        self,
+        binary: Path,
+        codex_home: Path | None,
+        environment: dict[str, str] | None = None,
+    ) -> None:
+        env = os.environ.copy() if environment is None else environment.copy()
         if codex_home is not None:
             resolved_home = codex_home.expanduser().absolute()
             resolved_home.mkdir(parents=True, exist_ok=True)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -22,6 +23,10 @@ SPEC = importlib.util.spec_from_file_location(
 assert SPEC and SPEC.loader
 CONFIG = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(CONFIG)
+
+FAKE_CODEX_DIR = Path(tempfile.gettempdir()).resolve() / "codex-orchestration-tests"
+FAKE_CODEX_BIN = FAKE_CODEX_DIR / "codex"
+FAKE_RESOLVED_CODEX_BIN = FAKE_CODEX_DIR / "resolved-codex"
 
 
 class FakeBackend:
@@ -75,6 +80,18 @@ GATE0_HELP = """Run Codex non-interactively
   -o, --output-last-message <FILE>
 """
 
+INVOKE_HELP = GATE0_HELP + """  --ignore-rules
+  --disable <FEATURE>
+"""
+
+INVOKE_FEATURES_0144 = "\n".join(
+    f"{name:<36} stable             true"
+    for name in CONFIG.INVOKE_DISABLED_FEATURES
+    if name != "skill_search"
+) + "\n"
+
+INVOKE_FEATURES_CURRENT = INVOKE_FEATURES_0144 + f"{'skill_search':<36} stable             true\n"
+
 
 def gate0_help_result():
     return mock.Mock(returncode=0, stdout=GATE0_HELP, stderr="")
@@ -109,6 +126,424 @@ def mutate_user_helper(helper: Path, marker: bytes) -> None:
 
 
 class ExternalConfiguratorTests(unittest.TestCase):
+    def test_main_sanitizes_invoke_app_server_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            backend = FakeBackend()
+            prepared(home, backend)
+            observed: dict[str, object] = {}
+
+            class FakeAppServer:
+                def __init__(self, binary, codex_home, environment=None):
+                    observed["binary"] = binary
+                    observed["home"] = codex_home
+                    observed["environment"] = environment
+
+                def close(self):
+                    observed["closed"] = True
+
+            stdin = io.TextIOWrapper(io.BytesIO(b"bounded packet"), encoding="utf-8")
+            with mock.patch.object(
+                CONFIG.native_routing, "AppServer", FakeAppServer
+            ), mock.patch.object(
+                CONFIG.external_cli_trust, "fingerprint",
+                return_value=(FAKE_RESOLVED_CODEX_BIN, "same"),
+            ), mock.patch.object(
+                CONFIG.external_cli_trust, "version", return_value="codex 0.144.1"
+            ), mock.patch.object(
+                CONFIG.external_cli_trust, "sanitized_environment",
+                return_value={"PATH": "/safe/bin", "KEEP": "yes"},
+            ) as sanitized, mock.patch.object(
+                CONFIG, "invoke_role",
+                return_value={"role": "researcher", "output": "safe"},
+            ) as invoke, mock.patch.object(CONFIG.sys, "stdin", stdin), mock.patch.dict(
+                os.environ, {"OPENROUTER_API_KEY": "sentinel-app-server-secret"}
+            ):
+                result = CONFIG.main([
+                    "--codex-home", str(home), "--codex-bin", str(FAKE_CODEX_BIN),
+                    "invoke", "--role", "researcher", "--effort", "max",
+                ])
+            self.assertEqual(result, 0)
+            self.assertEqual(observed["binary"], FAKE_RESOLVED_CODEX_BIN)
+            self.assertEqual(invoke.call_args.args[5], FAKE_RESOLVED_CODEX_BIN)
+            self.assertEqual(
+                observed["environment"], {"PATH": "/safe/bin", "KEEP": "yes"}
+            )
+            self.assertNotIn(
+                "sentinel-app-server-secret", json.dumps(observed["environment"])
+            )
+            self.assertTrue(observed["closed"])
+            sanitized.assert_called_once_with()
+
+    def test_invoke_feature_catalog_omits_unadvertised_optional_control(self) -> None:
+        with mock.patch.object(
+            CONFIG.subprocess,
+            "run",
+            side_effect=[
+                mock.Mock(returncode=0, stdout=INVOKE_HELP, stderr=""),
+                mock.Mock(returncode=0, stdout=INVOKE_FEATURES_0144, stderr=""),
+            ],
+        ):
+            advertised = CONFIG._verify_invoke_cli_contract(
+                FAKE_CODEX_BIN, cwd=FAKE_CODEX_DIR, environment={}
+            )
+        self.assertEqual(
+            advertised,
+            tuple(
+                name for name in CONFIG.INVOKE_DISABLED_FEATURES
+                if name != "skill_search"
+            ),
+        )
+
+    def test_invoke_feature_catalog_includes_current_control_and_fails_closed(self) -> None:
+        with mock.patch.object(
+            CONFIG.subprocess,
+            "run",
+            side_effect=[
+                mock.Mock(returncode=0, stdout=INVOKE_HELP, stderr=""),
+                mock.Mock(returncode=0, stdout=INVOKE_FEATURES_CURRENT, stderr=""),
+            ],
+        ):
+            advertised = CONFIG._verify_invoke_cli_contract(
+                FAKE_CODEX_BIN, cwd=FAKE_CODEX_DIR, environment={}
+            )
+        self.assertEqual(advertised, CONFIG.INVOKE_DISABLED_FEATURES)
+
+        failures = (
+            mock.Mock(returncode=1, stdout="provider-secret", stderr="provider-secret"),
+            mock.Mock(returncode=0, stdout="malformed provider-secret", stderr=""),
+        )
+        for catalog in failures:
+            with self.subTest(returncode=catalog.returncode), mock.patch.object(
+                CONFIG.subprocess,
+                "run",
+                side_effect=[
+                    mock.Mock(returncode=0, stdout=INVOKE_HELP, stderr=""),
+                    catalog,
+                ],
+            ):
+                with self.assertRaises(CONFIG.ExternalConfigurationError) as failure:
+                    CONFIG._verify_invoke_cli_contract(
+                        FAKE_CODEX_BIN, cwd=FAKE_CODEX_DIR, environment={}
+                    )
+                self.assertNotIn("provider-secret", str(failure.exception))
+
+        for missing in ("shell_tool", "multi_agent"):
+            incomplete = "\n".join(
+                line
+                for line in INVOKE_FEATURES_0144.splitlines()
+                if not line.startswith(missing)
+            ) + "\n"
+            with self.subTest(missing=missing), mock.patch.object(
+                CONFIG.subprocess,
+                "run",
+                side_effect=[
+                    mock.Mock(returncode=0, stdout=INVOKE_HELP, stderr=""),
+                    mock.Mock(returncode=0, stdout=incomplete, stderr=""),
+                ],
+            ):
+                with self.assertRaisesRegex(
+                    CONFIG.ExternalConfigurationError,
+                    "required feature controls are unavailable",
+                ):
+                    CONFIG._verify_invoke_cli_contract(
+                        FAKE_CODEX_BIN, cwd=FAKE_CODEX_DIR, environment={}
+                    )
+
+    def test_invoke_rejects_packet_boundaries_before_resolution(self) -> None:
+        for packet in (b"", b"\xff", b"x" * (CONFIG.INVOKE_INPUT_MAX_BYTES + 1)):
+            with self.subTest(size=len(packet)), self.assertRaises(
+                CONFIG.ExternalConfigurationError
+            ):
+                CONFIG._decode_invoke_packet(packet)
+        exact = CONFIG._decode_invoke_packet(
+            b"x" * CONFIG.INVOKE_INPUT_MAX_BYTES
+        )
+        self.assertEqual(len(exact), CONFIG.INVOKE_INPUT_MAX_BYTES)
+
+    def test_v072_schema1_role_invokes_without_migration_and_seals_transport(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            backend = FakeBackend()
+            prepared(home, backend)
+            qualify(home)
+            CONFIG.connect_role(
+                home, "researcher", "Review only the bounded packet.",
+                "openrouter", "moonshotai/kimi-k3", "max",
+            )
+            CONFIG.mark_role_ready(home, "researcher")
+            before = CONFIG.registry_path(home).read_bytes()
+            self.assertEqual(json.loads(before)["schema"], 1)
+            registry_before, _ = CONFIG.load_registry(home)
+            agent_path = Path(
+                registry_before["roles"]["researcher"]["effort_agents"]["max"]["file"]
+            )
+            agent_before = agent_path.read_bytes()
+            observed: dict[str, object] = {}
+
+            class FakeProcess:
+                returncode = 0
+                pid = 12345
+
+                def __init__(self, command, **kwargs):
+                    observed["command"] = command
+                    observed["kwargs"] = kwargs
+
+                def communicate(self, *, input, timeout):
+                    observed["prompt"] = input
+                    observed["timeout"] = timeout
+                    command = observed["command"]
+                    target = Path(command[command.index("--output-last-message") + 1])
+                    observed["config"] = (Path(observed["kwargs"]["cwd"]) / "config.toml").read_text()
+                    target.write_text("safe result", encoding="utf-8")
+                    return (None, None)
+
+                def poll(self):
+                    return self.returncode
+
+            packet = b"sentinel bounded packet"
+            def run_control(command, **kwargs):
+                if "status" in command:
+                    observed["auth_environment"] = kwargs["env"]
+                    return mock.Mock(returncode=0, stdout="configured\n", stderr="")
+                if command[-2:] == ["exec", "--help"]:
+                    return mock.Mock(returncode=0, stdout=INVOKE_HELP, stderr="")
+                if command[-2:] == ["features", "list"]:
+                    return mock.Mock(
+                        returncode=0, stdout=INVOKE_FEATURES_CURRENT, stderr=""
+                    )
+                raise AssertionError(f"unexpected subprocess: {command}")
+
+            with mock.patch.object(
+                CONFIG.external_cli_trust, "fingerprint",
+                side_effect=[(FAKE_CODEX_BIN, "same"), (FAKE_CODEX_BIN, "same")],
+            ), mock.patch.object(
+                CONFIG.external_cli_trust, "version", return_value="codex 1.0"
+            ), mock.patch.object(
+                CONFIG.subprocess, "run", side_effect=run_control
+            ), mock.patch.object(CONFIG.subprocess, "Popen", side_effect=FakeProcess), mock.patch.dict(
+                os.environ, {"OPENROUTER_API_KEY": "sentinel-secret-value"}
+            ):
+                result = CONFIG.invoke_role(
+                    home, "researcher", "max", packet, backend,
+                    FAKE_CODEX_BIN, workspace=home,
+                )
+            self.assertEqual(result["output"], "safe result")
+            command = observed["command"]
+            self.assertNotIn(packet.decode(), command)
+            self.assertEqual(command[-1], "-")
+            for feature in CONFIG.INVOKE_DISABLED_FEATURES:
+                self.assertIn(["--disable", feature], [command[i:i + 2] for i in range(len(command) - 1)])
+            prompt = observed["prompt"]
+            self.assertIn(packet, prompt)
+            self.assertIn(b"Review only the bounded packet.", prompt)
+            self.assertEqual(observed["timeout"], 180)
+            kwargs = observed["kwargs"]
+            self.assertEqual(kwargs["stdout"], CONFIG.subprocess.DEVNULL)
+            self.assertEqual(kwargs["stderr"], CONFIG.subprocess.DEVNULL)
+            self.assertNotIn("OPENROUTER_API_KEY", kwargs["env"])
+            self.assertNotIn("OPENROUTER_API_KEY", observed["auth_environment"])
+            serialized = json.dumps(command) + str(observed["config"]) + json.dumps(kwargs["env"])
+            self.assertNotIn("sentinel-secret-value", serialized)
+            self.assertEqual(CONFIG.registry_path(home).read_bytes(), before)
+            self.assertEqual(agent_path.read_bytes(), agent_before)
+            self.assertFalse(CONFIG.journal_path(home).exists())
+
+    @unittest.skipUnless(os.name == "posix", "POSIX process-group cleanup")
+    def test_invoke_timeout_kills_process_group(self) -> None:
+        class TimedOutProcess:
+            returncode = None
+            pid = 4242
+
+            def communicate(self, **_kwargs):
+                raise CONFIG.subprocess.TimeoutExpired("codex", 180)
+
+            def poll(self):
+                return None
+
+            def wait(self, timeout):
+                self.returncode = -9
+                return self.returncode
+
+        with mock.patch.object(
+            CONFIG.subprocess, "Popen", return_value=TimedOutProcess()
+        ) as popen, mock.patch.object(CONFIG.os, "killpg") as killpg:
+            with self.assertRaisesRegex(CONFIG.ExternalConfigurationError, "timed out"):
+                CONFIG._run_invoke_process(
+                    [str(FAKE_CODEX_BIN)], cwd=FAKE_CODEX_DIR, environment={}, prompt=b"packet"
+                )
+        self.assertTrue(popen.call_args.kwargs["start_new_session"])
+        killpg.assert_called_once_with(4242, CONFIG.signal.SIGKILL)
+
+    def test_windows_cleanup_breaks_group_then_kills_direct_child(self) -> None:
+        process = mock.Mock()
+        process.poll.return_value = None
+        process.wait.side_effect = [CONFIG.subprocess.TimeoutExpired("codex", 2), 1]
+        with mock.patch.object(CONFIG.os, "name", "nt"), mock.patch.object(
+            CONFIG.signal, "CTRL_BREAK_EVENT", 999, create=True
+        ):
+            CONFIG._terminate_invoke_process(process)
+        process.send_signal.assert_called_once_with(999)
+        process.kill.assert_called_once_with()
+        self.assertEqual(process.wait.call_args_list, [mock.call(timeout=2), mock.call(timeout=5)])
+
+    @unittest.skipUnless(os.name == "posix", "POSIX process-group cleanup")
+    def test_invoke_keyboard_interrupt_always_cleans_up_and_propagates(self) -> None:
+        process = mock.Mock()
+        process.pid = 4343
+        process.poll.return_value = None
+        process.communicate.side_effect = KeyboardInterrupt()
+        with mock.patch.object(
+            CONFIG.subprocess, "Popen", return_value=process
+        ), mock.patch.object(CONFIG.os, "killpg") as killpg:
+            with self.assertRaises(KeyboardInterrupt):
+                CONFIG._run_invoke_process(
+                    [str(FAKE_CODEX_BIN)], cwd=FAKE_CODEX_DIR, environment={}, prompt=b"packet"
+                )
+        killpg.assert_called_once_with(4343, CONFIG.signal.SIGKILL)
+        process.wait.assert_called_once_with(timeout=5)
+
+    def test_invoke_rejects_binary_replacement_before_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            backend = FakeBackend()
+            prepared(home, backend)
+            qualify(home)
+            CONFIG.connect_role(
+                home, "researcher", "Review only the bounded packet.",
+                "openrouter", "moonshotai/kimi-k3", "max",
+            )
+            CONFIG.mark_role_ready(home, "researcher")
+            with mock.patch.object(
+                CONFIG.external_credentials, "credential_ready", return_value=True
+            ), self.assertRaisesRegex(
+                CONFIG.ExternalConfigurationError, "absolute --codex-bin"
+            ):
+                CONFIG.invoke_role(
+                    home, "researcher", "max", b"packet", backend,
+                    Path("codex"), workspace=home,
+                )
+            with mock.patch.object(
+                CONFIG.external_credentials, "credential_ready", return_value=True
+            ), mock.patch.object(
+                CONFIG.external_cli_trust, "fingerprint",
+                side_effect=[(FAKE_CODEX_BIN, "before"), (FAKE_CODEX_BIN, "after")],
+            ), mock.patch.object(
+                CONFIG.external_cli_trust, "version", return_value="codex 1.0"
+            ), mock.patch.object(
+                CONFIG.subprocess, "run", side_effect=[
+                    mock.Mock(returncode=0, stdout=INVOKE_HELP, stderr=""),
+                    mock.Mock(returncode=0, stdout=INVOKE_FEATURES_0144, stderr=""),
+                ]
+            ), mock.patch.object(CONFIG.subprocess, "Popen") as popen:
+                with self.assertRaisesRegex(CONFIG.ExternalConfigurationError, "CLI_CHANGED"):
+                    CONFIG.invoke_role(
+                        home, "researcher", "max", b"packet", backend,
+                        FAKE_CODEX_BIN, workspace=home,
+                    )
+            popen.assert_not_called()
+
+    def test_invoke_nonzero_exit_redacts_provider_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            backend = FakeBackend()
+            prepared(home, backend)
+            qualify(home)
+            CONFIG.connect_role(
+                home, "researcher", "Review only the bounded packet.",
+                "openrouter", "moonshotai/kimi-k3", "max",
+            )
+            CONFIG.mark_role_ready(home, "researcher")
+            with mock.patch.object(
+                CONFIG.external_credentials, "credential_ready", return_value=True
+            ), mock.patch.object(
+                CONFIG.external_cli_trust, "fingerprint",
+                side_effect=[(FAKE_CODEX_BIN, "same"), (FAKE_CODEX_BIN, "same")],
+            ), mock.patch.object(
+                CONFIG.external_cli_trust, "version", return_value="codex 1.0"
+            ), mock.patch.object(
+                CONFIG, "_verify_invoke_cli_contract"
+            ), mock.patch.object(
+                CONFIG, "_run_invoke_process", return_value=9
+            ):
+                with self.assertRaises(CONFIG.ExternalConfigurationError) as failure:
+                    CONFIG.invoke_role(
+                        home, "researcher", "max", b"sentinel-provider-output",
+                        backend, FAKE_CODEX_BIN, workspace=home,
+                    )
+            self.assertIn("exit 9", str(failure.exception))
+            self.assertNotIn("sentinel-provider-output", str(failure.exception))
+
+    def test_invoke_rejects_registry_dequalification_race_before_model_call(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            backend = FakeBackend()
+            prepared(home, backend)
+            qualify(home)
+            CONFIG.connect_role(
+                home, "researcher", "Review only the bounded packet.",
+                "openrouter", "moonshotai/kimi-k3", "max",
+            )
+            CONFIG.mark_role_ready(home, "researcher")
+            original_load = CONFIG.load_registry
+            calls = 0
+
+            def racing_load(selected_home):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    changed, digest = original_load(selected_home)
+                    changed["providers"]["openrouter"]["state"] = "AUTH_REQUIRED"
+                    changed["providers"]["openrouter"]["qualified"] = False
+                    CONFIG.external_registry.write_registry(
+                        CONFIG.registry_path(selected_home), changed,
+                        expected_sha256=digest,
+                    )
+                return original_load(selected_home)
+
+            with mock.patch.object(
+                CONFIG, "load_registry", side_effect=racing_load
+            ), mock.patch.object(
+                CONFIG.external_credentials, "credential_ready", return_value=True
+            ), mock.patch.object(
+                CONFIG.external_cli_trust, "fingerprint",
+                side_effect=[(FAKE_CODEX_BIN, "same"), (FAKE_CODEX_BIN, "same")],
+            ), mock.patch.object(
+                CONFIG.external_cli_trust, "version", return_value="codex 0.144.1"
+            ), mock.patch.object(
+                CONFIG, "_verify_invoke_cli_contract", return_value=()
+            ), mock.patch.object(CONFIG, "_run_invoke_process") as run:
+                with self.assertRaisesRegex(
+                    CONFIG.ExternalConfigurationError, "registry changed"
+                ):
+                    CONFIG.invoke_role(
+                        home, "researcher", "max", b"packet", backend,
+                        FAKE_CODEX_BIN, workspace=home,
+                    )
+            run.assert_not_called()
+
+    def test_invoke_output_exact_limit_and_plus_one(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            exact = root / "exact"
+            exact.write_bytes(b"x" * CONFIG.INVOKE_OUTPUT_MAX_BYTES)
+            self.assertEqual(len(CONFIG._read_invoke_last_message(exact)), CONFIG.INVOKE_OUTPUT_MAX_BYTES)
+            oversized = root / "oversized"
+            oversized.write_bytes(b"x" * (CONFIG.INVOKE_OUTPUT_MAX_BYTES + 1))
+            with self.assertRaisesRegex(CONFIG.ExternalConfigurationError, "oversized"):
+                CONFIG._read_invoke_last_message(oversized)
+
+            invalid = root / "invalid"
+            invalid.write_bytes(b"\xff")
+            with self.assertRaises(CONFIG.ExternalConfigurationError) as failure:
+                CONFIG._read_invoke_last_message(invalid)
+            self.assertNotIn("\\xff", str(failure.exception))
+
+            linked = root / "linked"
+            os.link(exact, linked)
+            with self.assertRaisesRegex(CONFIG.ExternalConfigurationError, "unsafe"):
+                CONFIG._read_invoke_last_message(linked)
+
     def test_prepare_is_additive_nonsecret_and_returns_external_auth_command(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
@@ -690,7 +1125,7 @@ class ExternalConfiguratorTests(unittest.TestCase):
                     "openrouter",
                     "moonshotai/kimi-k3",
                     "max",
-                    Path("/safe/codex"),
+                    FAKE_CODEX_BIN,
                     acknowledge_billing=False,
                 )
             completed = mock.Mock(
@@ -726,14 +1161,14 @@ class ExternalConfiguratorTests(unittest.TestCase):
                         "openrouter",
                         "moonshotai/kimi-k3",
                         "max",
-                        Path("/safe/codex"),
+                        FAKE_CODEX_BIN,
                         acknowledge_billing=True,
                     )
             self.assertNotIn("sensitive-test-value", str(failure.exception))
             sanitized.assert_called_once_with()
             self.assertEqual(run.call_count, 2)
             command = run.call_args.args[0]
-            self.assertEqual(command[:2], [str(Path("/safe/codex")), "exec"])
+            self.assertEqual(command[:2], [str(FAKE_CODEX_BIN), "exec"])
             self.assertIn("--ephemeral", command)
             self.assertIn("--skip-git-repo-check", command)
             self.assertEqual(command[command.index("--sandbox") + 1], "read-only")
@@ -796,7 +1231,7 @@ class ExternalConfiguratorTests(unittest.TestCase):
                     "openrouter",
                     "moonshotai/kimi-k3",
                     "max",
-                    Path("/safe/codex"),
+                    FAKE_CODEX_BIN,
                     acknowledge_billing=True,
                 )
             self.assertIn(
@@ -831,7 +1266,7 @@ class ExternalConfiguratorTests(unittest.TestCase):
                     "openrouter",
                     "moonshotai/kimi-k3",
                     "max",
-                    Path("/safe/codex"),
+                    FAKE_CODEX_BIN,
                     acknowledge_billing=True,
                 )
 
@@ -861,7 +1296,7 @@ class ExternalConfiguratorTests(unittest.TestCase):
                         "openrouter",
                         "moonshotai/kimi-k3",
                         "max",
-                        Path("/safe/codex"),
+                        FAKE_CODEX_BIN,
                         acknowledge_billing=True,
                     )
             self.assertEqual(run.call_count, 1)
@@ -949,7 +1384,7 @@ class ExternalConfiguratorTests(unittest.TestCase):
                         "openrouter",
                         "moonshotai/kimi-k3",
                         "max",
-                        Path("/safe/codex"),
+                        FAKE_CODEX_BIN,
                         acknowledge_billing=True,
                     )
 
@@ -998,7 +1433,7 @@ class ExternalConfiguratorTests(unittest.TestCase):
                             "openrouter",
                             "moonshotai/kimi-k3",
                             "max",
-                            Path("/safe/codex"),
+                            FAKE_CODEX_BIN,
                             acknowledge_billing=True,
                         )
 

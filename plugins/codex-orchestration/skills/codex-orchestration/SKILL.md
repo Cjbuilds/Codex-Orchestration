@@ -108,8 +108,9 @@ Do not print omitted, `none`, or implicit-root seats. On a role-selection-only i
 activation lines are the entire successful response: do not add a heading,
 preamble, route internals, or delegation boilerplate.
 
-Use `Activated` only after that exact route is ready and callable in the current
-task. It means available for this task, not `used and confirmed` runtime identity.
+Use `Activated` only after that exact route is locally ready and its sealed invoke
+preflight succeeds for the active binary in the current task. It means available
+for this task, not `used and confirmed` runtime identity.
 If authentication, qualification, connection, restart, resolution, or another
 required boundary remains, report the exact lifecycle state and next action instead of `Activated`.
 Never mix a false activation line into a blocker response. For a
@@ -278,9 +279,10 @@ or `latest` Kimi alias.
 
 `connect` creates one personal provider-pinned custom-agent variant for every
 manifest-validated effort. After a new task and exact integrity check, `resolve`
-maps the requested role and effort to one exact loaded agent name. Delegate only to
-that returned name. Report `route accepted` when the host accepts it. Report `used
-and confirmed` only from mechanical host/provider/rollout metadata; model self-identification is never evidence.
+maps the requested role and effort for diagnostics. Execute only with sealed
+`invoke`, never a native spawn-agent tool. Report `route accepted` when the direct
+CLI accepts it. Report `used and confirmed` only from mechanical
+host/provider/rollout metadata; model self-identification is never evidence.
 
 For an unavailable provider, effort, auth helper, role file, or readiness state,
 stop and report the exact blocker. `CLI_CHANGED`, `CONFIG_DRIFT`, `ROLE_COLLISION`,

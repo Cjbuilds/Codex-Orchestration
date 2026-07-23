@@ -83,7 +83,7 @@ Executor — GPT-5.6 Sol high: Activated
         self.assertIn("one plain line per explicitly supplied model-bearing seat", SKILL)
         self.assertIn("preserve the user's seat order", SKILL)
         self.assertIn("Do not print omitted, `none`, or implicit-root seats", SKILL)
-        self.assertIn("Use `Activated` only after that exact route is ready", SKILL)
+        self.assertIn("Use `Activated` only after that exact route is locally ready", SKILL)
         self.assertIn("lifecycle state and next action instead of `Activated`", SKILL)
         self.assertIn(
             "activation confirmation preserves the supplied `Fable 5` label", SKILL
@@ -119,6 +119,17 @@ Executor — GPT-5.6 Sol high: Activated
         self.assertIn("KIMI_MODEL_THINKING_EFFORT=max", SKILL)
         self.assertIn("never reads or copies the OAuth token", SKILL)
         self.assertIn("Never silently substitute one lane for\nanother", EXTERNAL_REFERENCE)
+
+    def test_literal_external_models_use_sealed_invoke_not_native_spawn(self) -> None:
+        self.assertIn(
+            "Explicit forms that name `OpenRouter model moonshotai/kimi-k3`",
+            SKILL,
+        )
+        self.assertIn("Execute only with sealed\n`invoke`", SKILL)
+        self.assertIn("never a native spawn-agent tool", SKILL)
+        self.assertIn("maps the requested role and effort for diagnostics", SKILL)
+        self.assertNotIn("Delegate only to\nthat returned name", SKILL)
+        self.assertIn("Run sealed `invoke` with the bounded packet on stdin", EXTERNAL_REFERENCE)
 
     def test_qwen_advisor_label_uses_sealed_subscription_bridge(self) -> None:
         self.assertIn("Advisor: Qwen 3.8 Max Preview", SKILL)
