@@ -3050,7 +3050,7 @@ def main() -> int:
                     identity_guard,
                     state_digest,
                 )
-            except (ConfigurationError, OSError) as state_exc:
+            except BaseException as state_exc:
                 try:
                     rollback_result = _batch_write(
                         app,
@@ -3065,12 +3065,19 @@ def main() -> int:
                             "unexpected rollback status "
                             f"{rollback_result.get('status')!r}"
                         )
-                except ConfigurationError as rollback_exc:
+                except BaseException as rollback_exc:
+                    try:
+                        rollback_detail = str(rollback_exc)
+                    except BaseException:
+                        rollback_detail = type(rollback_exc).__name__
                     raise ConfigurationError(
                         "Config was written but state persistence and automatic rollback "
                         "both failed; the user config may still contain managed fields. "
-                        f"State error: {state_exc}; rollback: {rollback_exc}"
-                    ) from state_exc
+                        "Run status before continuing. Rollback error: "
+                        f"{rollback_detail}"
+                    ) from rollback_exc
+                if not isinstance(state_exc, Exception):
+                    raise
                 raise ConfigurationError(
                     f"Could not persist restore state; config write was rolled back: {state_exc}"
                 ) from state_exc

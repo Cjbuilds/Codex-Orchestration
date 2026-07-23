@@ -3092,6 +3092,104 @@ class NativeRoutingTests(unittest.TestCase):
         feature = self.read_fake_config()["features"]["multi_agent_v2"]
         self.assertIn(NATIVE.MANAGED_MARKER, feature["usage_hint_text"])
 
+    @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
+    def test_state_interrupt_repropagates_only_after_config_rollback(self) -> None:
+        real_batch_write = NATIVE._batch_write
+        events: list[str] = []
+
+        def batch_write(*args: object, **kwargs: object) -> dict[str, object]:
+            events.append("config-write")
+            return real_batch_write(*args, **kwargs)
+
+        def interrupt_state_write(*_args: object, **_kwargs: object) -> str:
+            events.append("state-interrupt")
+            raise KeyboardInterrupt("forced pre-state interrupt")
+
+        argv = [
+            str(self.installed_script),
+            "--codex-bin",
+            str(self.codex),
+            "--codex-home",
+            str(self.home),
+            "--allow-incompatible-client",
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "high",
+            "--apply",
+        ]
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(NATIVE, "_batch_write", side_effect=batch_write),
+            mock.patch.object(NATIVE, "_write_state", side_effect=interrupt_state_write),
+            mock.patch.object(sys, "stdout", io.StringIO()),
+            mock.patch.object(sys, "stderr", io.StringIO()),
+            mock.patch.dict(os.environ, self.fake_env()),
+        ):
+            with self.assertRaisesRegex(KeyboardInterrupt, "forced pre-state"):
+                NATIVE.main()
+
+        self.assertEqual(events, ["config-write", "state-interrupt", "config-write"])
+        self.assertEqual(
+            self.read_fake_config(),
+            {
+                "features": {
+                    "multi_agent_v2": {"max_concurrent_threads_per_session": 5}
+                },
+                "unrelated": {"keep": True},
+            },
+        )
+        self.assertFalse((self.home / NATIVE.STATE_FILENAME).exists())
+
+    @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
+    def test_state_interrupt_rollback_interrupt_is_actionable_error(self) -> None:
+        real_batch_write = NATIVE._batch_write
+        calls = 0
+
+        def batch_write(*args: object, **kwargs: object) -> dict[str, object]:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return real_batch_write(*args, **kwargs)
+            raise KeyboardInterrupt("forced rollback interrupt")
+
+        argv = [
+            str(self.installed_script),
+            "--codex-bin",
+            str(self.codex),
+            "--codex-home",
+            str(self.home),
+            "--allow-incompatible-client",
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "high",
+            "--apply",
+        ]
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(NATIVE, "_batch_write", side_effect=batch_write),
+            mock.patch.object(
+                NATIVE,
+                "_write_state",
+                side_effect=KeyboardInterrupt("forced pre-state interrupt"),
+            ),
+            mock.patch.object(sys, "stdout", io.StringIO()),
+            mock.patch.object(sys, "stderr", stderr),
+            mock.patch.dict(os.environ, self.fake_env()),
+        ):
+            result = NATIVE.main()
+
+        self.assertEqual(result, 2)
+        self.assertEqual(calls, 2)
+        self.assertIn("state persistence and automatic rollback both failed", stderr.getvalue())
+        self.assertIn("may still contain managed fields", stderr.getvalue())
+        self.assertIn("Run status before continuing", stderr.getvalue())
+        feature = self.read_fake_config()["features"]["multi_agent_v2"]
+        self.assertIn(NATIVE.MANAGED_MARKER, feature["usage_hint_text"])
+        self.assertFalse((self.home / NATIVE.STATE_FILENAME).exists())
+
     def test_custom_agent_route_and_optional_advisor(self) -> None:
         self.write_personal_agent("codex_orchestration_executor")
         self.write_personal_agent("codex_orchestration_advisor")
