@@ -67,7 +67,7 @@ if sys.argv[1:] == ["plugin", "list", "--json"]:
                 "pluginId": plugin_id,
                 "name": "codex-orchestration",
                 "marketplaceName": marketplace,
-                "version": "0.9.2",
+                "version": "0.9.3",
                 "installed": True,
                 "enabled": True,
                 "source": {"source": "local", "path": source_root},
@@ -87,8 +87,11 @@ home = Path(os.environ["CODEX_HOME"]).resolve()
 home.mkdir(parents=True, exist_ok=True)
 store = home / ".fake-user-config.json"
 effective_store = home / ".fake-effective-config.json"
+workspace_store = home / ".fake-workspace-config.json"
+synthetic_mcp_store = home / ".fake-disabled-plugin-synthetic-mcp.json"
 version_file = home / ".fake-version"
 mutate_after_write = home / ".fake-mutate-after-write"
+mutate_mcp_after_write = home / ".fake-mutate-mcp-after-write.json"
 mutate_namespace_after_write = home / ".fake-mutate-namespace-after-write"
 mutate_feature_after_write = home / ".fake-mutate-feature-after-write"
 mutate_state_after_write = home / ".fake-mutate-state-after-write"
@@ -137,6 +140,26 @@ def set_path(root, path, value):
     else:
         current[parts[-1]] = value
 
+def merge_config(base, overlay):
+    result = json.loads(json.dumps(base))
+    for key, value in overlay.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = merge_config(result[key], value)
+        else:
+            result[key] = json.loads(json.dumps(value))
+    return result
+
+def plugin_is_disabled(plugin_id):
+    inventory_file = home / ".fake-plugin-inventory.json"
+    if not inventory_file.exists():
+        return False
+    inventory = json.loads(inventory_file.read_text(encoding="utf-8"))
+    matches = [
+        record for record in inventory.get("installed", [])
+        if record.get("pluginId") == plugin_id
+    ]
+    return len(matches) == 1 and matches[0].get("enabled") is False
+
 models = [
     {
         "id": "gpt-5.6-sol",
@@ -182,26 +205,58 @@ for line in sys.stdin:
         }
     elif method == "config/read":
         config = read_config()
-        effective = (
-            json.loads(effective_store.read_text(encoding="utf-8"))
-            if effective_store.exists()
-            else config
-        )
+        layers = [
+            {
+                "name": {
+                    "type": "user",
+                    "file": str(home / "config.toml"),
+                    "profile": None,
+                },
+                "version": f"sha256:v{version()}",
+                "config": config,
+                "disabledReason": None,
+            }
+        ]
+        effective = json.loads(json.dumps(config))
+        if effective_store.exists():
+            project = json.loads(effective_store.read_text(encoding="utf-8"))
+            effective = project
+            layers.append({
+                "name": {
+                    "type": "project",
+                    "file": str(home / ".codex" / "config.toml"),
+                },
+                "version": "sha256:effective-override",
+                "config": project,
+                "disabledReason": None,
+            })
+        if workspace_store.exists():
+            workspace = json.loads(workspace_store.read_text(encoding="utf-8"))
+            effective = merge_config(effective, workspace)
+            layers.append({
+                "name": {
+                    "type": "project",
+                    "file": str(home / ".codex" / "config.toml"),
+                },
+                "version": "sha256:workspace-override",
+                "config": workspace,
+                "disabledReason": None,
+            })
+        if synthetic_mcp_store.exists():
+            synthetic = json.loads(synthetic_mcp_store.read_text(encoding="utf-8"))
+            plugin_id = synthetic["plugin_id"]
+            if plugin_is_disabled(plugin_id):
+                for server in synthetic["servers"]:
+                    set_path(
+                        effective,
+                        f'plugins.{json.dumps(plugin_id)}.mcp_servers.'
+                        f'{json.dumps(server)}.enabled',
+                        True,
+                    )
         result = {
             "config": effective,
             "origins": {},
-            "layers": [
-                {
-                    "name": {
-                        "type": "user",
-                        "file": str(home / "config.toml"),
-                        "profile": None,
-                    },
-                    "version": f"sha256:v{version()}",
-                    "config": config,
-                    "disabledReason": None,
-                }
-            ],
+            "layers": layers,
         }
     elif method == "model/list":
         result = {"data": models, "nextCursor": None}
@@ -239,6 +294,12 @@ for line in sys.stdin:
                 "CONCURRENT USER EDIT",
             )
             mutate_after_write.unlink()
+        if mutate_mcp_after_write.exists():
+            mutation = json.loads(
+                mutate_mcp_after_write.read_text(encoding="utf-8")
+            )
+            set_path(config, mutation["keyPath"], mutation["value"])
+            mutate_mcp_after_write.unlink()
         if mutate_namespace_after_write.exists():
             set_path(
                 config,
@@ -423,7 +484,7 @@ class NativeRoutingTests(unittest.TestCase):
             / "cache"
             / marketplace
             / "codex-orchestration"
-            / "0.9.2"
+            / "0.9.3"
         )
         if not plugin_root.exists():
             shutil.copytree(
@@ -482,6 +543,41 @@ class NativeRoutingTests(unittest.TestCase):
             self.fail(f"command failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}")
         return result
 
+    def run_main_with_qwen(
+        self, *arguments: str, check: bool = True
+    ) -> subprocess.CompletedProcess[str]:
+        argv = [
+            str(self.installed_script),
+            "--codex-bin",
+            str(self.codex),
+            "--codex-home",
+            str(self.home),
+            "--allow-incompatible-client",
+            *arguments,
+        ]
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(sys, "stdout", stdout),
+            mock.patch.object(sys, "stderr", stderr),
+            mock.patch.dict(os.environ, self.fake_env()),
+            mock.patch.object(
+                NATIVE,
+                "verify_qwen_prerequisites",
+                return_value={"protocol": "test-sealed-protocol"},
+            ),
+        ):
+            returncode = NATIVE.main()
+        result = subprocess.CompletedProcess(
+            argv, returncode, stdout.getvalue(), stderr.getvalue()
+        )
+        if check and result.returncode != 0:
+            self.fail(
+                f"command failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+            )
+        return result
+
     def disable_main_argv(self) -> list[str]:
         return [
             str(self.installed_script),
@@ -513,7 +609,7 @@ class NativeRoutingTests(unittest.TestCase):
             "pluginId": plugin_id,
             "name": "codex-orchestration",
             "marketplaceName": marketplace,
-            "version": "0.9.2",
+            "version": "0.9.3",
             "installed": True,
             "enabled": enabled,
             "source": {"source": "local", "path": str(source_root)},
@@ -549,6 +645,40 @@ class NativeRoutingTests(unittest.TestCase):
             False,
         )
         return state
+
+    def setup_disabled_provider_synthesis(self) -> tuple[list[str], bytes]:
+        self.run_main_with_qwen(
+            "--executor-model",
+            "gpt-5.6-sol",
+            "--executor-effort",
+            "low",
+            "--planner-fable",
+            "--planner-effort",
+            "max",
+            "--advisor-qwen",
+            "--qwen-region",
+            "global",
+            "--designer-kimi",
+            "--apply",
+        )
+        state_path = self.home / NATIVE.STATE_FILENAME
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        servers = sorted(state["managed"]["mcp"])
+        self.assertEqual(len(servers), 3)
+        self.assertEqual(
+            {server.split("-", 1)[0] for server in servers},
+            {"fable", "kimi", "qwen"},
+        )
+        self.write_plugin_inventory(
+            self.plugin_inventory_record(
+                self.plugin_id, self.source_plugin_root, enabled=False
+            )
+        )
+        (self.home / ".fake-disabled-plugin-synthetic-mcp.json").write_text(
+            json.dumps({"plugin_id": self.plugin_id, "servers": servers}),
+            encoding="utf-8",
+        )
+        return servers, state_path.read_bytes()
 
     def run_main_with_identity_failure(
         self, phase: str, *arguments: str
@@ -1546,6 +1676,240 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertIn("overridden in this workspace", disabled.stderr)
         self.assertNotIn("Native routing disabled", disabled.stdout)
         self.assertEqual(state_path.read_bytes(), state_bytes)
+
+    def test_disable_disabled_plugin_ignores_synthetic_provider_mcp_effective_values(
+        self,
+    ) -> None:
+        servers, _ = self.setup_disabled_provider_synthesis()
+        unrelated_before = self.read_fake_config()["unrelated"]
+
+        disabled = self.run_script("--disable", "--apply")
+
+        self.assertIn("Native routing disabled", disabled.stdout)
+        self.assertFalse((self.home / NATIVE.STATE_FILENAME).exists())
+        restored = self.read_fake_config()
+        self.assertEqual(restored["unrelated"], unrelated_before)
+        feature = restored["features"]["multi_agent_v2"]
+        for key in (
+            "hide_spawn_agent_metadata",
+            "tool_namespace",
+            "multi_agent_mode_hint_text",
+            "usage_hint_text",
+        ):
+            self.assertNotIn(key, feature)
+        restored_servers = restored["plugins"][self.plugin_id]["mcp_servers"]
+        for server in servers:
+            self.assertNotIn("enabled", restored_servers[server])
+
+    def test_disable_disabled_plugin_still_rejects_workspace_provider_override(
+        self,
+    ) -> None:
+        servers, state_bytes = self.setup_disabled_provider_synthesis()
+        target = servers[0]
+        workspace = {
+            "plugins": {
+                self.plugin_id: {
+                    "mcp_servers": {target: {"enabled": True}}
+                }
+            }
+        }
+        (self.home / ".fake-workspace-config.json").write_text(
+            json.dumps(workspace), encoding="utf-8"
+        )
+
+        disabled = self.run_script("--disable", "--apply", check=False)
+
+        self.assertEqual(disabled.returncode, 2)
+        self.assertIn("overridden in this workspace", disabled.stderr)
+        self.assertNotIn("Native routing disabled", disabled.stdout)
+        self.assertEqual(
+            (self.home / NATIVE.STATE_FILENAME).read_bytes(), state_bytes
+        )
+        self.assertTrue(workspace["plugins"][self.plugin_id]["mcp_servers"][target]["enabled"])
+
+    def test_disable_disabled_plugin_preserves_concurrent_user_provider_edit(
+        self,
+    ) -> None:
+        servers, state_bytes = self.setup_disabled_provider_synthesis()
+        target = servers[0]
+        (self.home / ".fake-mutate-mcp-after-write.json").write_text(
+            json.dumps(
+                {
+                    "keyPath": NATIVE.mcp_key_path(self.plugin_id, target),
+                    "value": False,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        disabled = self.run_script("--disable", "--apply", check=False)
+
+        self.assertEqual(disabled.returncode, 2)
+        self.assertIn("newer edit was preserved", disabled.stderr)
+        self.assertNotIn("Native routing disabled", disabled.stdout)
+        self.assertEqual(
+            (self.home / NATIVE.STATE_FILENAME).read_bytes(), state_bytes
+        )
+        self.assertFalse(
+            self.read_fake_config()["plugins"][self.plugin_id]["mcp_servers"]
+            [target]["enabled"]
+        )
+
+    def test_disable_disabled_plugin_preserves_concurrent_state_digest_change(
+        self,
+    ) -> None:
+        self.setup_disabled_provider_synthesis()
+        state_path = self.home / NATIVE.STATE_FILENAME
+        (self.home / ".fake-mutate-state-after-write").touch()
+
+        disabled = self.run_script("--disable", "--apply", check=False)
+
+        self.assertEqual(disabled.returncode, 2)
+        self.assertIn("matched neither the exact saved state", disabled.stderr)
+        self.assertIn("may be inconsistent", disabled.stderr)
+        self.assertNotIn("Native routing disabled", disabled.stdout)
+        changed = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            changed["previous"]["usage"]["value"], "CONCURRENT STATE EDIT"
+        )
+
+    def test_synthetic_mcp_match_rejects_unattested_or_explicit_divergence(
+        self,
+    ) -> None:
+        server = "fable-advisor-python3"
+        expected = NATIVE._current_values({}, self.plugin_id)
+        user = NATIVE._current_values({}, self.plugin_id)
+        effective_config = {
+            "plugins": {
+                self.plugin_id: {
+                    "mcp_servers": {server: {"enabled": True}}
+                }
+            }
+        }
+        effective = NATIVE._current_values(effective_config, self.plugin_id)
+        state = {
+            "schema": 7,
+            "plugin_id": self.plugin_id,
+            "managed": {"mcp": {server: True}},
+            "previous": {
+                "mcp": {server: {"known": True, "present": False}}
+            },
+        }
+        layers = {
+            "layers": [
+                {
+                    "name": {"type": "user", "profile": None},
+                    "config": {},
+                }
+            ]
+        }
+        guard = mock.Mock()
+        guard.selected_plugin_id = self.plugin_id
+        guard.selected_plugin_enabled.return_value = False
+        guard.selected_mcp_default_enabled.return_value = False
+
+        self.assertTrue(
+            NATIVE._disabled_plugin_synthetic_mcp_match(
+                expected,
+                user,
+                effective,
+                False,
+                state,
+                layers,
+                self.plugin_id,
+                guard,
+            )
+        )
+
+        guard.selected_plugin_enabled.return_value = True
+        self.assertFalse(
+            NATIVE._disabled_plugin_synthetic_mcp_match(
+                expected, user, effective, False, state, layers,
+                self.plugin_id, guard,
+            )
+        )
+        guard.selected_plugin_enabled.return_value = False
+        guard.selected_mcp_default_enabled.return_value = True
+        self.assertFalse(
+            NATIVE._disabled_plugin_synthetic_mcp_match(
+                expected, user, effective, False, state, layers,
+                self.plugin_id, guard,
+            )
+        )
+        guard.selected_mcp_default_enabled.return_value = False
+        explicit_layers = {
+            "layers": [
+                layers["layers"][0],
+                {
+                    "name": {"type": "project"},
+                    "config": effective_config,
+                },
+            ]
+        }
+        self.assertFalse(
+            NATIVE._disabled_plugin_synthetic_mcp_match(
+                expected, user, effective, False, state, explicit_layers,
+                self.plugin_id, guard,
+            )
+        )
+        effective_false = json.loads(json.dumps(effective_config))
+        effective_false["plugins"][self.plugin_id]["mcp_servers"][server][
+            "enabled"
+        ] = False
+        self.assertFalse(
+            NATIVE._disabled_plugin_synthetic_mcp_match(
+                expected,
+                user,
+                NATIVE._current_values(effective_false, self.plugin_id),
+                False,
+                state,
+                layers,
+                self.plugin_id,
+                guard,
+            )
+        )
+        self.assertFalse(
+            NATIVE._disabled_plugin_synthetic_mcp_match(
+                expected,
+                user,
+                effective,
+                False,
+                state,
+                {"layers": [{"name": {"type": "user", "profile": None}}]},
+                self.plugin_id,
+                guard,
+            )
+        )
+        unmanaged_state = json.loads(json.dumps(state))
+        unmanaged_state["managed"]["mcp"] = {}
+        self.assertFalse(
+            NATIVE._disabled_plugin_synthetic_mcp_match(
+                expected,
+                user,
+                effective,
+                False,
+                unmanaged_state,
+                layers,
+                self.plugin_id,
+                guard,
+            )
+        )
+        scalar_mismatch = json.loads(json.dumps(effective_config))
+        scalar_mismatch["features"] = {
+            "multi_agent_v2": {"tool_namespace": "collaboration"}
+        }
+        self.assertFalse(
+            NATIVE._disabled_plugin_synthetic_mcp_match(
+                expected,
+                user,
+                NATIVE._current_values(scalar_mismatch, self.plugin_id),
+                False,
+                state,
+                layers,
+                self.plugin_id,
+                guard,
+            )
+        )
 
     def test_direct_planner_designer_setup_status_and_require_effective(self) -> None:
         setup = self.run_script(

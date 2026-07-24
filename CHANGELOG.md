@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.9.3 — 2026-07-24
+
+- Repair provider-enabled teardown after the exact installed plugin is disabled.
+  Codex 0.145 can materialize selected Fable, Qwen, or Kimi launcher `enabled`
+  leaves as effective `true` after their user overrides are deleted, even though
+  every explicit config layer omits those leaves and only empty MCP table headers
+  remain. Disable now recognizes only that provenance-attested plugin contribution
+  and removes the saved restore state normally.
+- Keep the exception fail-closed: it requires the exact schema-7 saved identity,
+  a guard-attested disabled inventory record, a retained package manifest default
+  of `enabled=false`, known prior absence, exact user restoration, absence from
+  every explicit config layer, and an effective-only boolean `true`. Workspace or
+  managed overrides, enabled or drifted identities, unexpected values, concurrent
+  user edits, state-digest races, and `okOverridden` writes remain failures.
+- Add faithful positive, workspace-override, user-race, and state-race regressions,
+  plus manifest and explicit-layer rejection coverage for the new proof boundary.
+
 ## 0.9.2 — 2026-07-23
 
 - Decode Kimi Code CLI and ACP subprocess output explicitly as UTF-8 on Windows,

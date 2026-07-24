@@ -29,6 +29,10 @@ class IdentityFixture(unittest.TestCase):
         self.plugin = self.root / "plugin"
         self.plugin.mkdir()
         (self.plugin / "plugin.json").write_text('{"version":"1.0.0"}', encoding="utf-8")
+        (self.plugin / ".mcp.json").write_text(
+            '{"mcpServers":{"fable-advisor-python3":{"enabled":false}}}',
+            encoding="utf-8",
+        )
         (self.plugin / "skills").mkdir()
         (self.plugin / "skills" / "SKILL.md").write_text("identity", encoding="utf-8")
         self.codex_home = self.root / "codex-home"

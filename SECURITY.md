@@ -154,6 +154,21 @@ validated executing identity only after its global managed fields match exactly;
 legacy MCP restore snapshot is never transplanted to another namespace. Missing,
 malformed, duplicate, disabled-executing, or drifted identity fails closed.
 
+Codex 0.145 may synthesize an effective plugin-scoped MCP `enabled=true` after an
+absent-before-setup user leaf is deleted from a disabled plugin, even though only an
+empty table remains and no explicit config layer supplies the value. Treating every
+such value as a workspace override traps otherwise correct provider teardown;
+ignoring it broadly could instead erase a real project, managed, system, user, or
+concurrent override. The disable exception therefore requires the exact schema-7
+saved identity, a guard-attested disabled inventory record, a retained-package MCP
+manifest default of `enabled=false`, a known prior-absence snapshot, exact user
+readback, absence from every explicit returned layer, and the exact observed
+effective-only boolean `true`. Any non-MCP mismatch, explicit layer value, enabled or
+drifted identity, different default/value, post-write user change, state-digest
+change, or `okOverridden` result preserves the newer data and restore state. The
+package manifest is read through the already retained identity handle rather than a
+new pathname open, so the provenance proof remains bound to the guarded payload.
+
 Schema 6 introduced the sealed `qwen_cli` Advisor route (a stable saved-state tag
 for the Token Plan transport), while schema 5 introduced only the sealed `kimi_cli`
 Designer route. Legacy schemas cannot smuggle newer fields. Persistent

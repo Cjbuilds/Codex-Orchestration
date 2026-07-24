@@ -686,7 +686,7 @@ class AppServer:
                     "clientInfo": {
                         "name": "codex_orchestration_installer",
                         "title": "Codex Orchestration Installer",
-                        "version": "0.9.2",
+                        "version": "0.9.3",
                     },
                     "capabilities": {"experimentalApi": True},
                 },
@@ -2108,6 +2108,94 @@ def _disable_values_match(
     )
 
 
+def _explicit_layers_omit_mcp_enabled(
+    read_result: dict[str, Any], plugin_id: str, server: str
+) -> bool:
+    """Prove one effective MCP leaf is absent from every explicit config layer."""
+
+    layers = read_result.get("layers")
+    if not isinstance(layers, list) or not layers:
+        return False
+    user_layers = 0
+    for layer in layers:
+        if not isinstance(layer, dict):
+            return False
+        name = layer.get("name")
+        config = layer.get("config")
+        if (
+            not isinstance(name, dict)
+            or not isinstance(name.get("type"), str)
+            or not isinstance(config, dict)
+        ):
+            return False
+        if name["type"] == "user" and name.get("profile") is None:
+            user_layers += 1
+        value = _current_values(config, plugin_id)["mcp"].get(server, MISSING)
+        if value is not MISSING:
+            return False
+    return user_layers == 1
+
+
+def _disabled_plugin_synthetic_mcp_match(
+    expected: dict[str, Any],
+    user_observed: dict[str, Any],
+    effective_observed: dict[str, Any],
+    compare_feature: bool,
+    state: dict[str, Any] | None,
+    read_result: dict[str, Any],
+    plugin_id: str,
+    identity_guard: plugin_identity.PluginIdentityGuard,
+) -> bool:
+    """Accept only attested effective-only MCP defaults from a disabled plugin."""
+
+    if (
+        state is None
+        or state.get("schema") != 7
+        or state.get("plugin_id") != plugin_id
+        or identity_guard.selected_plugin_id != plugin_id
+        or identity_guard.selected_plugin_enabled()
+        or not _disable_values_match(expected, user_observed, compare_feature)
+    ):
+        return False
+    managed = state.get("managed")
+    previous = state.get("previous")
+    managed_mcp = managed.get("mcp") if isinstance(managed, dict) else None
+    previous_mcp = previous.get("mcp") if isinstance(previous, dict) else None
+    if not isinstance(managed_mcp, dict) or not isinstance(previous_mcp, dict):
+        return False
+
+    mismatched = {
+        server
+        for server, expected_value in expected["mcp"].items()
+        if not _strict_equal(
+            expected_value, effective_observed["mcp"].get(server, MISSING)
+        )
+    }
+    if not mismatched:
+        return False
+    normalized = dict(effective_observed)
+    normalized["mcp"] = dict(effective_observed["mcp"])
+    for server in mismatched:
+        saved = previous_mcp.get(server)
+        if (
+            managed_mcp.get(server) is not True
+            or not isinstance(saved, dict)
+            or set(saved) != {"known", "present"}
+            or saved.get("known") is not True
+            or saved.get("present") is not False
+            or expected["mcp"].get(server, MISSING) is not MISSING
+            or user_observed["mcp"].get(server, MISSING) is not MISSING
+            or effective_observed["mcp"].get(server, MISSING) is not True
+            or identity_guard.selected_mcp_default_enabled(server) is not False
+            or not _explicit_layers_omit_mcp_enabled(
+                read_result, plugin_id, server
+            )
+        ):
+            return False
+        normalized["mcp"][server] = MISSING
+    return _disable_values_match(expected, normalized, compare_feature)
+
+
 def _managed_compensation_edits(
     state: dict[str, Any], current: dict[str, Any], plugin_id: str
 ) -> list[dict[str, Any]]:
@@ -3134,7 +3222,22 @@ def _disable(
     effective_current = _current_values(
         effective_config if isinstance(effective_config, dict) else {}, plugin_id
     )
-    if not _disable_values_match(expected, effective_current, compare_feature):
+    effective_matches = _disable_values_match(
+        expected, effective_current, compare_feature
+    )
+    if not effective_matches:
+        identity_guard.assert_unchanged("disable effective verification")
+        effective_matches = _disabled_plugin_synthetic_mcp_match(
+            expected,
+            user_current,
+            effective_current,
+            compare_feature,
+            state,
+            read_result,
+            plugin_id,
+            identity_guard,
+        )
+    if not effective_matches:
         raise ConfigurationError(
             "The restored routing values are overridden in this workspace; saved "
             "restore state remains available."

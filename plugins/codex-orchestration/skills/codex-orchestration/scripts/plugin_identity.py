@@ -401,6 +401,37 @@ class _Retained:
             raise IdentityDriftError("Plugin payload pathname identity drifted.")
         return retained
 
+    def read_payload(self) -> bytes:
+        """Read one retained regular file without reopening its pathname."""
+
+        if self.directory or self.fd is None:
+            raise PackageIdentityError("Retained plugin file is unavailable.")
+        snapshot = self.live_snapshot(include_hash=True)
+        size = snapshot["size"]
+        if size > MAX_OUTPUT_BYTES:
+            raise PackageIdentityError("Retained plugin file exceeded its bound.")
+        offset = os.lseek(self.fd, 0, os.SEEK_CUR)
+        chunks: list[bytes] = []
+        try:
+            os.lseek(self.fd, 0, os.SEEK_SET)
+            remaining = size
+            while remaining:
+                chunk = os.read(self.fd, min(remaining, 1024 * 128))
+                if not chunk:
+                    raise PackageIdentityError("Retained plugin file was truncated.")
+                chunks.append(chunk)
+                remaining -= len(chunk)
+        finally:
+            os.lseek(self.fd, offset, os.SEEK_SET)
+        payload = b"".join(chunks)
+        if (
+            len(payload) != size
+            or hashlib.sha256(payload).hexdigest() != snapshot["sha256"]
+            or self.live_snapshot(include_hash=True) != snapshot
+        ):
+            raise IdentityDriftError("Retained plugin file content drifted.")
+        return payload
+
     def close(self) -> None:
         if self.fd is not None:
             os.close(self.fd)
@@ -655,6 +686,22 @@ class _Package:
     def content_fingerprint(self) -> str:
         """Fingerprint payload bytes and paths, excluding filesystem identity."""
         return self._fingerprint(include_file_identity=False)
+
+    def read_json_file(self, relative: str) -> Mapping[str, Any]:
+        matches = [
+            retained
+            for captured, retained in self.items
+            if captured == relative and not retained.directory
+        ]
+        if len(matches) != 1:
+            raise PackageIdentityError("Plugin package JSON file is missing or ambiguous.")
+        try:
+            payload = json.loads(matches[0].read_payload().decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as error:
+            raise PackageIdentityError("Plugin package JSON file is malformed.") from error
+        if not isinstance(payload, dict):
+            raise PackageIdentityError("Plugin package JSON file has an invalid shape.")
+        return payload
 
     def close(self) -> None:
         for _, retained in reversed(self.ignored_items):
@@ -967,6 +1014,7 @@ class PluginIdentityGuard:
         self._package: _Package | None = None
         self._selected_template: dict[str, Any] | None = None
         self._executing_template: dict[str, Any] | None = None
+        self._selected_mcp_defaults: dict[str, bool] = {}
         self._bytecode_isolation: _BytecodeIsolation | None = None
         self._loaded_source_records: dict[str, dict[str, Any]] = {}
 
@@ -1027,6 +1075,21 @@ class PluginIdentityGuard:
             self.full_inventory_sha256 = second_digest
             self._selected_template = dict(selected_second)
             self._executing_template = dict(executing_second)
+            mcp_manifest = self._package.read_json_file(".mcp.json")
+            mcp_servers = mcp_manifest.get("mcpServers")
+            if not isinstance(mcp_servers, dict):
+                raise PackageIdentityError("Plugin MCP manifest has an invalid shape.")
+            for server, config in mcp_servers.items():
+                if (
+                    not isinstance(server, str)
+                    or not server
+                    or not isinstance(config, dict)
+                    or type(config.get("enabled")) is not bool
+                ):
+                    raise PackageIdentityError(
+                        "Plugin MCP manifest has an invalid server default."
+                    )
+                self._selected_mcp_defaults[server] = config["enabled"]
             self.operation_identity_sha256 = _digest({
                 "namespace": PLUGIN_NAME,
                 "selector": self.selector,
@@ -1041,6 +1104,23 @@ class PluginIdentityGuard:
         except Exception:
             self.close()
             raise
+
+    def selected_plugin_enabled(self) -> bool:
+        if self._selected_template is None:
+            raise IdentityDriftError("Plugin identity guard is not active.")
+        enabled = self._selected_template.get("enabled")
+        if type(enabled) is not bool:
+            raise IdentityDriftError("Selected plugin enabled state is invalid.")
+        return enabled
+
+    def selected_mcp_default_enabled(self, server: str) -> bool:
+        if self._selected_template is None:
+            raise IdentityDriftError("Plugin identity guard is not active.")
+        if server not in self._selected_mcp_defaults:
+            raise PackageIdentityError(
+                "Selected plugin MCP server is absent from the attested manifest."
+            )
+        return self._selected_mcp_defaults[server]
 
     def assert_unchanged(self, phase: str) -> None:
         _text(phase, "guard phase")
@@ -1099,6 +1179,9 @@ class PluginIdentityGuard:
             package.close()
         self._packages.clear()
         self._package = None
+        self._selected_template = None
+        self._executing_template = None
+        self._selected_mcp_defaults.clear()
         self._loaded_source_records.clear()
         if self._executing_package:
             self._executing_package.close()
