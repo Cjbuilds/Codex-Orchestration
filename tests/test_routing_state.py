@@ -36,6 +36,16 @@ def fable_route(server: str = "fable-advisor-python3") -> dict[str, str]:
     }
 
 
+def qwen_route(server: str = "qwen-advisor-python3") -> dict[str, str]:
+    return {
+        "kind": "qwen_cli",
+        "model": STATE.QWEN_MODEL,
+        "effort": "native",
+        "region": "global",
+        "server": server,
+    }
+
+
 def genuine_state(schema: int) -> dict[str, object]:
     managed: dict[str, object] = {
         "mode": f"{STATE.MANAGED_MARKER}\nmode body",
@@ -71,6 +81,17 @@ def genuine_state(schema: int) -> dict[str, object]:
             "model": "gpt-designer",
             "effort": "high",
         }
+    elif schema >= 5:
+        state["designer"] = {
+            "kind": "kimi_cli",
+            "model": STATE.KIMI_MODEL,
+            "effort": "max",
+            "server": "kimi-designer-python3",
+        }
+    if schema >= 6:
+        state["advisor"] = qwen_route()
+    if schema >= 7:
+        state["plugin_id"] = "codex-orchestration@orion-codex-orchestration"
     if schema >= 2:
         managed["mcp"] = {
             "fable-advisor-python3": True,
@@ -80,15 +101,63 @@ def genuine_state(schema: int) -> dict[str, object]:
             "fable-advisor-python3": snapshot(),
             "fable-advisor-python": snapshot(False, present=True),
         }
+        if schema >= 5:
+            managed["mcp"]["kimi-designer-python3"] = True
+            previous["mcp"]["kimi-designer-python3"] = snapshot()
+        if schema >= 6:
+            managed["mcp"]["qwen-advisor-python3"] = True
+            previous["mcp"]["qwen-advisor-python3"] = snapshot()
     return state
 
 
 class RoutingStateTests(unittest.TestCase):
-    def test_genuine_schemas_one_through_four_are_accepted(self) -> None:
-        for schema in (1, 2, 3, 4):
+    def test_genuine_schemas_one_through_seven_are_accepted(self) -> None:
+        for schema in (1, 2, 3, 4, 5, 6, 7):
             with self.subTest(schema=schema):
                 state = genuine_state(schema)
                 self.assertIs(STATE.validate_routing_state(state), state)
+
+    def test_schema_seven_plugin_identity_is_exact_and_bounded(self) -> None:
+        valid = genuine_state(7)
+        self.assertEqual(
+            STATE.validate_plugin_id(valid["plugin_id"]), valid["plugin_id"]
+        )
+
+        invalid = (
+            None,
+            True,
+            7,
+            "",
+            "codex-orchestration@",
+            "@marketplace",
+            "other-plugin@marketplace",
+            "codex-orchestration@one@two",
+            "codex-orchestration@bad marketplace",
+            "codex-orchestration@bad/control",
+            "codex-orchestration@bad\ncontrol",
+            "codex-orchestration@bad\x00control",
+            "codex-orchestration@bad\x7fcontrol",
+            "codex-orchestration@" + ("m" * 129),
+        )
+        for plugin_id in invalid:
+            with self.subTest(plugin_id=plugin_id):
+                state = genuine_state(7)
+                state["plugin_id"] = plugin_id
+                with self.assertRaises(STATE.RoutingStateError):
+                    STATE.validate_routing_state(state)
+
+        missing = genuine_state(7)
+        missing.pop("plugin_id")
+        with self.assertRaises(STATE.RoutingStateError):
+            STATE.validate_routing_state(missing)
+
+    def test_legacy_schemas_reject_plugin_identity_extension(self) -> None:
+        for schema in range(1, 7):
+            with self.subTest(schema=schema):
+                state = genuine_state(schema)
+                state["plugin_id"] = "codex-orchestration@codex-orchestration"
+                with self.assertRaises(STATE.RoutingStateError):
+                    STATE.validate_routing_state(state)
 
     def test_scalar_conversion_and_retained_disabled_mcp_are_accepted(self) -> None:
         state = genuine_state(3)
@@ -106,7 +175,7 @@ class RoutingStateTests(unittest.TestCase):
         self.assertIs(STATE.validate_routing_state(state), state)
 
     def test_full_negative_invariant_matrix_fails_closed(self) -> None:
-        baseline = genuine_state(4)
+        baseline = genuine_state(5)
 
         def schema(value: object):
             return lambda state: state.__setitem__("schema", value)
@@ -115,8 +184,8 @@ class RoutingStateTests(unittest.TestCase):
             return lambda state: state.__setitem__("policy_version", value)
 
         mutations = [
-            *( (f"schema {value!r}", schema(value)) for value in (True, 1.0, "4", None, 0, 5) ),
-            *( (f"policy {value!r}", policy(value)) for value in (True, 4.0, "4", None, 0, 5, 3) ),
+            *( (f"schema {value!r}", schema(value)) for value in (True, 1.0, "5", None, 0, 6) ),
+            *( (f"policy {value!r}", policy(value)) for value in (True, 5.0, "5", None, 0, 6, 4) ),
             ("missing top key", lambda state: state.pop("managed_by")),
             ("extra top key", lambda state: state.__setitem__("future", True)),
             ("wrong owner", lambda state: state.__setitem__("managed_by", "other")),
@@ -151,6 +220,11 @@ class RoutingStateTests(unittest.TestCase):
             ("Fable wrong effort", lambda state: state["planner"].update(effort="ultra")),
             ("Fable wrong server", lambda state: state["planner"].update(server="future-server")),
             ("Fable extra route key", lambda state: state["planner"].update(future=True)),
+            ("Kimi wrong model", lambda state: state["designer"].update(model="kimi-code/k2")),
+            ("Kimi wrong effort", lambda state: state["designer"].update(effort="high")),
+            ("Kimi effort non-string", lambda state: state["designer"].update(effort=["max"])),
+            ("Kimi wrong server", lambda state: state["designer"].update(server="future-server")),
+            ("Kimi extra route key", lambda state: state["designer"].update(future=True)),
             ("same direct model", lambda state: state.update(planner={"kind": "model", "model": "same", "effort": "high"}, advisor={"kind": "model", "model": "same", "effort": "low"})),
             ("same agent", lambda state: state.update(planner={"kind": "agent", "agent": "same_agent"}, advisor={"kind": "agent", "agent": "same_agent"})),
             ("two Fable seats", lambda state: state.__setitem__("advisor", fable_route())),
@@ -162,6 +236,7 @@ class RoutingStateTests(unittest.TestCase):
             ("MCP value integer", lambda state: state["managed"]["mcp"].update({"fable-advisor-python": 0})),
             ("MCP snapshot wrong type", lambda state: state["previous"]["mcp"].update({"fable-advisor-python": snapshot(0, present=True)})),
             ("selected launcher disabled", lambda state: state["managed"]["mcp"].update({"fable-advisor-python3": False})),
+            ("selected Kimi launcher disabled", lambda state: state["managed"]["mcp"].update({"kimi-designer-python3": False})),
             ("two launchers enabled", lambda state: state["managed"]["mcp"].update({"fable-advisor-python": True})),
             ("launcher without Fable", lambda state: state.__setitem__("planner", {"kind": "model", "model": "planner", "effort": "high"})),
             ("scalar origin integer", lambda state: state.__setitem__("scalar_origin", 1)),
@@ -202,10 +277,50 @@ class RoutingStateTests(unittest.TestCase):
             legacy = genuine_state(schema)
             legacy["designer"] = None
             scenarios.append((f"schema {schema} designer", legacy))
+        schema_four = genuine_state(4)
+        schema_four["designer"] = {
+            "kind": "kimi_cli",
+            "model": STATE.KIMI_MODEL,
+            "effort": "max",
+            "server": "kimi-designer-python3",
+        }
+        scenarios.append(("schema 4 Kimi", schema_four))
+        schema_five = genuine_state(5)
+        schema_five["advisor"] = qwen_route()
+        schema_five["managed"]["mcp"]["qwen-advisor-python3"] = True
+        schema_five["previous"]["mcp"]["qwen-advisor-python3"] = snapshot()
+        scenarios.append(("schema 5 Qwen", schema_five))
 
         for label, state in scenarios:
             with self.subTest(label=label), self.assertRaises(STATE.RoutingStateError):
                 STATE.validate_routing_state(state)
+
+    def test_qwen_route_fails_closed_on_every_pinned_field(self) -> None:
+        baseline = genuine_state(6)
+        mutations = [
+            ("wrong model", lambda route: route.update(model="qwen3.7-max")),
+            ("wrong effort", lambda route: route.update(effort="high")),
+            ("wrong region", lambda route: route.update(region="future")),
+            ("wrong server", lambda route: route.update(server="future-server")),
+            ("extra key", lambda route: route.update(future=True)),
+        ]
+        for label, mutate in mutations:
+            with self.subTest(label=label):
+                state = deepcopy(baseline)
+                mutate(state["advisor"])
+                with self.assertRaises(STATE.RoutingStateError):
+                    STATE.validate_routing_state(state)
+
+    def test_direct_qwen_planner_cannot_duplicate_sealed_qwen_advisor(self) -> None:
+        state = genuine_state(6)
+        state["planner"] = {
+            "kind": "model",
+            "model": STATE.QWEN_MODEL,
+            "effort": "high",
+        }
+        state["managed"]["mcp"]["fable-advisor-python3"] = False
+        with self.assertRaises(STATE.RoutingStateError):
+            STATE.validate_routing_state(state)
 
 
 if __name__ == "__main__":

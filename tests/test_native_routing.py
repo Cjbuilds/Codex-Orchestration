@@ -5,6 +5,8 @@ import io
 import json
 import os
 from pathlib import Path
+import py_compile
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -51,6 +53,33 @@ if "features" in sys.argv and "list" in sys.argv:
     print("multi_agent_v2 under-development false")
     raise SystemExit(0)
 
+if sys.argv[1:] == ["plugin", "list", "--json"]:
+    home = Path(os.environ["CODEX_HOME"]).resolve()
+    inventory_file = home / ".fake-plugin-inventory.json"
+    if inventory_file.exists():
+        print(inventory_file.read_text(encoding="utf-8"))
+    else:
+        plugin_id = os.environ["FAKE_PLUGIN_ID"]
+        marketplace = plugin_id.split("@", 1)[1]
+        source_root = os.environ["FAKE_PLUGIN_ROOT"]
+        print(json.dumps({
+            "installed": [{
+                "pluginId": plugin_id,
+                "name": "codex-orchestration",
+                "marketplaceName": marketplace,
+                "version": "0.9.3",
+                "installed": True,
+                "enabled": True,
+                "source": {"source": "local", "path": source_root},
+                "marketplaceSource": {
+                    "sourceType": "local",
+                    "source": str(Path(source_root).parent.parent),
+                },
+            }],
+            "available": [],
+        }))
+    raise SystemExit(0)
+
 if "app-server" not in sys.argv:
     raise SystemExit(2)
 
@@ -58,11 +87,15 @@ home = Path(os.environ["CODEX_HOME"]).resolve()
 home.mkdir(parents=True, exist_ok=True)
 store = home / ".fake-user-config.json"
 effective_store = home / ".fake-effective-config.json"
+workspace_store = home / ".fake-workspace-config.json"
+synthetic_mcp_store = home / ".fake-disabled-plugin-synthetic-mcp.json"
 version_file = home / ".fake-version"
 mutate_after_write = home / ".fake-mutate-after-write"
+mutate_mcp_after_write = home / ".fake-mutate-mcp-after-write.json"
 mutate_namespace_after_write = home / ".fake-mutate-namespace-after-write"
 mutate_feature_after_write = home / ".fake-mutate-feature-after-write"
 mutate_state_after_write = home / ".fake-mutate-state-after-write"
+reformat_state_after_write = home / ".fake-reformat-state-after-write"
 ok_overridden = home / ".fake-ok-overridden"
 overridden_returned = home / ".fake-overridden-returned"
 fail_overridden_rollback = home / ".fake-fail-overridden-rollback"
@@ -106,6 +139,26 @@ def set_path(root, path, value):
         current.pop(parts[-1], None)
     else:
         current[parts[-1]] = value
+
+def merge_config(base, overlay):
+    result = json.loads(json.dumps(base))
+    for key, value in overlay.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = merge_config(result[key], value)
+        else:
+            result[key] = json.loads(json.dumps(value))
+    return result
+
+def plugin_is_disabled(plugin_id):
+    inventory_file = home / ".fake-plugin-inventory.json"
+    if not inventory_file.exists():
+        return False
+    inventory = json.loads(inventory_file.read_text(encoding="utf-8"))
+    matches = [
+        record for record in inventory.get("installed", [])
+        if record.get("pluginId") == plugin_id
+    ]
+    return len(matches) == 1 and matches[0].get("enabled") is False
 
 models = [
     {
@@ -152,26 +205,58 @@ for line in sys.stdin:
         }
     elif method == "config/read":
         config = read_config()
-        effective = (
-            json.loads(effective_store.read_text(encoding="utf-8"))
-            if effective_store.exists()
-            else config
-        )
+        layers = [
+            {
+                "name": {
+                    "type": "user",
+                    "file": str(home / "config.toml"),
+                    "profile": None,
+                },
+                "version": f"sha256:v{version()}",
+                "config": config,
+                "disabledReason": None,
+            }
+        ]
+        effective = json.loads(json.dumps(config))
+        if effective_store.exists():
+            project = json.loads(effective_store.read_text(encoding="utf-8"))
+            effective = project
+            layers.append({
+                "name": {
+                    "type": "project",
+                    "file": str(home / ".codex" / "config.toml"),
+                },
+                "version": "sha256:effective-override",
+                "config": project,
+                "disabledReason": None,
+            })
+        if workspace_store.exists():
+            workspace = json.loads(workspace_store.read_text(encoding="utf-8"))
+            effective = merge_config(effective, workspace)
+            layers.append({
+                "name": {
+                    "type": "project",
+                    "file": str(home / ".codex" / "config.toml"),
+                },
+                "version": "sha256:workspace-override",
+                "config": workspace,
+                "disabledReason": None,
+            })
+        if synthetic_mcp_store.exists():
+            synthetic = json.loads(synthetic_mcp_store.read_text(encoding="utf-8"))
+            plugin_id = synthetic["plugin_id"]
+            if plugin_is_disabled(plugin_id):
+                for server in synthetic["servers"]:
+                    set_path(
+                        effective,
+                        f'plugins.{json.dumps(plugin_id)}.mcp_servers.'
+                        f'{json.dumps(server)}.enabled',
+                        True,
+                    )
         result = {
             "config": effective,
             "origins": {},
-            "layers": [
-                {
-                    "name": {
-                        "type": "user",
-                        "file": str(home / "config.toml"),
-                        "profile": None,
-                    },
-                    "version": f"sha256:v{version()}",
-                    "config": config,
-                    "disabledReason": None,
-                }
-            ],
+            "layers": layers,
         }
     elif method == "model/list":
         result = {"data": models, "nextCursor": None}
@@ -209,6 +294,12 @@ for line in sys.stdin:
                 "CONCURRENT USER EDIT",
             )
             mutate_after_write.unlink()
+        if mutate_mcp_after_write.exists():
+            mutation = json.loads(
+                mutate_mcp_after_write.read_text(encoding="utf-8")
+            )
+            set_path(config, mutation["keyPath"], mutation["value"])
+            mutate_mcp_after_write.unlink()
         if mutate_namespace_after_write.exists():
             set_path(
                 config,
@@ -234,6 +325,11 @@ for line in sys.stdin:
             }
             state_path.write_text(json.dumps(state), encoding="utf-8")
             mutate_state_after_write.unlink()
+        if reformat_state_after_write.exists():
+            state_path = home / ".codex-orchestration-routing.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            reformat_state_after_write.unlink()
         new_version = version() + 1
         version_file.write_text(str(new_version), encoding="utf-8")
         status = "ok"
@@ -257,20 +353,56 @@ for line in sys.stdin:
 
 
 class NativeRoutingTests(unittest.TestCase):
+    def write_python_fixture(self, path: Path, source: str) -> tuple[Path, Path]:
+        """Create a Python-backed command that is executable on this platform."""
+
+        script = path if os.name != "nt" else path.with_suffix(".py")
+        script.write_text(textwrap.dedent(source), encoding="utf-8")
+        script.chmod(0o755)
+        if os.name != "nt":
+            return script, script
+
+        launcher = path.with_suffix(".cmd")
+        launcher.write_text(
+            f'@echo off\r\n"{sys.executable}" "%~dp0{script.name}" %*\r\n',
+            encoding="utf-8",
+        )
+        return launcher, script
+
+    def write_unchecked_bytecode(
+        self, source: Path, sentinel: Path, label: str
+    ) -> Path:
+        malicious = self.root / f"malicious-{label}.py"
+        malicious.write_text(
+            "from pathlib import Path\n"
+            f"Path({str(sentinel)!r}).write_text('executed', encoding='utf-8')\n"
+            f"_source = Path({str(source)!r})\n"
+            "exec(compile(_source.read_bytes(), str(_source), 'exec'), globals())\n",
+            encoding="utf-8",
+        )
+        cache = Path(importlib.util.cache_from_source(str(source)))
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        py_compile.compile(
+            str(malicious),
+            cfile=str(cache),
+            doraise=True,
+            invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH,
+        )
+        return cache
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.home = self.root / "home"
         self.home.mkdir()
-        self.codex = self.root / "fake-codex"
-        self.codex.write_text(textwrap.dedent(FAKE_CODEX), encoding="utf-8")
-        self.codex.chmod(0o755)
+        self.codex, _ = self.write_python_fixture(
+            self.root / "fake-codex", FAKE_CODEX
+        )
         self.bin = self.root / "bin"
         self.bin.mkdir()
-        self.claude = self.bin / "claude"
-        self.claude.write_text(
-            textwrap.dedent(
-                """\
+        _, self.claude = self.write_python_fixture(
+            self.bin / "claude",
+            """\
                 #!/usr/bin/env python3
                 import json
                 import sys
@@ -290,14 +422,96 @@ class NativeRoutingTests(unittest.TestCase):
                     )
                     raise SystemExit(0)
                 raise SystemExit(2)
-                """
-            ),
-            encoding="utf-8",
+                """,
         )
-        self.claude.chmod(0o755)
+        _, self.kimi = self.write_python_fixture(
+            self.bin / "kimi",
+            """\
+                #!/usr/bin/env python3
+                import json
+                import sys
+                if sys.argv[1:] == ["--version"]:
+                    print("0.27.0")
+                    raise SystemExit(0)
+                if sys.argv[1:] == ["provider", "list", "--json"]:
+                    print(json.dumps({
+                        "providers": {
+                            "managed:kimi-code": {
+                                "type": "kimi",
+                                "apiKey": "",
+                                "oauth": {"storage": "file", "key": "oauth/kimi-code"},
+                            }
+                        },
+                        "models": {
+                            "kimi-code/k3": {
+                                "provider": "managed:kimi-code",
+                                "model": "k3",
+                                "defaultEffort": "high",
+                                "supportEfforts": ["low", "high", "max"],
+                            }
+                        },
+                    }))
+                    raise SystemExit(0)
+                raise SystemExit(2)
+                """,
+        )
+        _, self.acpx = self.write_python_fixture(
+            self.bin / "acpx",
+            "#!/usr/bin/env python3\nimport sys\nprint('0.12.0') if sys.argv[1:] == ['--version'] else sys.exit(2)\n",
+        )
+        self.source_plugin_root = SCRIPT.resolve().parents[3]
+        self.plugin_id = "codex-orchestration@test-marketplace"
+        self._original_executing_plugin_root = NATIVE.EXECUTING_PLUGIN_ROOT
+        self._original_source_attestations = {
+            name: dict(record)
+            for name, record in NATIVE._LOCAL_SOURCE_ATTESTATIONS.items()
+        }
+        self.activate_plugin_cache(self.plugin_id)
 
     def tearDown(self) -> None:
+        NATIVE.EXECUTING_PLUGIN_ROOT = self._original_executing_plugin_root
+        NATIVE._LOCAL_SOURCE_ATTESTATIONS.clear()
+        NATIVE._LOCAL_SOURCE_ATTESTATIONS.update(
+            self._original_source_attestations
+        )
         self.temp.cleanup()
+
+    def activate_plugin_cache(self, plugin_id: str) -> None:
+        marketplace = plugin_id.split("@", 1)[1]
+        plugin_root = (
+            self.home
+            / "plugins"
+            / "cache"
+            / marketplace
+            / "codex-orchestration"
+            / "0.9.3"
+        )
+        if not plugin_root.exists():
+            shutil.copytree(
+                self.source_plugin_root,
+                plugin_root,
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+            )
+        self.plugin_id = plugin_id
+        self.plugin_root = plugin_root
+        self.installed_script = (
+            plugin_root
+            / "skills"
+            / "codex-orchestration"
+            / "scripts"
+            / "configure_native_routing.py"
+        )
+        NATIVE.EXECUTING_PLUGIN_ROOT = plugin_root
+        scripts = self.installed_script.parent
+        NATIVE._LOCAL_SOURCE_ATTESTATIONS.clear()
+        for name in (
+            "external_cli_trust",
+            "external_credentials",
+            "plugin_identity",
+            "routing_state",
+        ):
+            _, attestation = NATIVE._read_local_source(scripts / f"{name}.py")
+            NATIVE._LOCAL_SOURCE_ATTESTATIONS[name] = attestation
 
     def run_script(
         self,
@@ -306,12 +520,11 @@ class NativeRoutingTests(unittest.TestCase):
         allow_incompatible: bool = True,
     ) -> subprocess.CompletedProcess[str]:
         compatibility = ["--allow-incompatible-client"] if allow_incompatible else []
-        env = os.environ.copy()
-        env["PATH"] = f"{self.bin}{os.pathsep}{env.get('PATH', '')}"
+        env = self.fake_env()
         result = subprocess.run(
             [
                 sys.executable,
-                str(SCRIPT),
+                str(self.installed_script),
                 "--codex-bin",
                 str(self.codex),
                 "--codex-home",
@@ -330,10 +543,268 @@ class NativeRoutingTests(unittest.TestCase):
             self.fail(f"command failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}")
         return result
 
+    def run_main_with_qwen(
+        self, *arguments: str, check: bool = True
+    ) -> subprocess.CompletedProcess[str]:
+        argv = [
+            str(self.installed_script),
+            "--codex-bin",
+            str(self.codex),
+            "--codex-home",
+            str(self.home),
+            "--allow-incompatible-client",
+            *arguments,
+        ]
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(sys, "stdout", stdout),
+            mock.patch.object(sys, "stderr", stderr),
+            mock.patch.dict(os.environ, self.fake_env()),
+            mock.patch.object(
+                NATIVE,
+                "verify_qwen_prerequisites",
+                return_value={"protocol": "test-sealed-protocol"},
+            ),
+        ):
+            returncode = NATIVE.main()
+        result = subprocess.CompletedProcess(
+            argv, returncode, stdout.getvalue(), stderr.getvalue()
+        )
+        if check and result.returncode != 0:
+            self.fail(
+                f"command failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+            )
+        return result
+
+    def disable_main_argv(self) -> list[str]:
+        return [
+            str(self.installed_script),
+            "--codex-bin",
+            str(self.codex),
+            "--codex-home",
+            str(self.home),
+            "--allow-incompatible-client",
+            "--disable",
+            "--apply",
+        ]
+
+    def fake_env(self) -> dict[str, str]:
+        env = os.environ.copy()
+        env["PATH"] = f"{self.bin}{os.pathsep}{env.get('PATH', '')}"
+        env["FAKE_PLUGIN_ROOT"] = str(self.source_plugin_root)
+        env["FAKE_PLUGIN_ID"] = self.plugin_id
+        return env
+
+    @staticmethod
+    def plugin_inventory_record(
+        plugin_id: str,
+        source_root: Path,
+        *,
+        enabled: bool,
+    ) -> dict[str, object]:
+        marketplace = plugin_id.split("@", 1)[1]
+        return {
+            "pluginId": plugin_id,
+            "name": "codex-orchestration",
+            "marketplaceName": marketplace,
+            "version": "0.9.3",
+            "installed": True,
+            "enabled": enabled,
+            "source": {"source": "local", "path": str(source_root)},
+            "marketplaceSource": {
+                "sourceType": "local",
+                "source": str(source_root.parent),
+            },
+        }
+
+    def write_plugin_inventory(self, *records: dict[str, object]) -> None:
+        (self.home / ".fake-plugin-inventory.json").write_text(
+            json.dumps({"installed": list(records), "available": []}),
+            encoding="utf-8",
+        )
+
     def read_fake_config(self) -> dict[str, object]:
         return json.loads(
             (self.home / ".fake-user-config.json").read_text(encoding="utf-8")
         )
+
+    def valid_state(self, model: str = "gpt-5.6-luna") -> dict[str, object]:
+        state, _, _ = NATIVE._prepare_setup_state(
+            {},
+            None,
+            self.plugin_id,
+            f"{NATIVE.MANAGED_MARKER}\nmode",
+            f"{NATIVE.MANAGED_MARKER}\nusage",
+            {"kind": "model", "model": model, "effort": "high"},
+            None,
+            None,
+            None,
+            self.home / "config.toml",
+            False,
+        )
+        return state
+
+    def setup_disabled_provider_synthesis(self) -> tuple[list[str], bytes]:
+        self.run_main_with_qwen(
+            "--executor-model",
+            "gpt-5.6-sol",
+            "--executor-effort",
+            "low",
+            "--planner-fable",
+            "--planner-effort",
+            "max",
+            "--advisor-qwen",
+            "--qwen-region",
+            "global",
+            "--designer-kimi",
+            "--apply",
+        )
+        state_path = self.home / NATIVE.STATE_FILENAME
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        servers = sorted(state["managed"]["mcp"])
+        self.assertEqual(len(servers), 3)
+        self.assertEqual(
+            {server.split("-", 1)[0] for server in servers},
+            {"fable", "kimi", "qwen"},
+        )
+        self.write_plugin_inventory(
+            self.plugin_inventory_record(
+                self.plugin_id, self.source_plugin_root, enabled=False
+            )
+        )
+        (self.home / ".fake-disabled-plugin-synthetic-mcp.json").write_text(
+            json.dumps({"plugin_id": self.plugin_id, "servers": servers}),
+            encoding="utf-8",
+        )
+        return servers, state_path.read_bytes()
+
+    def run_main_with_identity_failure(
+        self, phase: str, *arguments: str
+    ) -> tuple[int, str, str]:
+        real_assert = NATIVE.plugin_identity.PluginIdentityGuard.assert_unchanged
+
+        def assert_unchanged(
+            guard: NATIVE.plugin_identity.PluginIdentityGuard, current_phase: str
+        ) -> None:
+            if current_phase == phase:
+                raise NATIVE.plugin_identity.IdentityDriftError(
+                    f"forced drift before {phase}"
+                )
+            real_assert(guard, current_phase)
+
+        argv = [
+            str(self.installed_script),
+            "--codex-bin",
+            str(self.codex),
+            "--codex-home",
+            str(self.home),
+            "--allow-incompatible-client",
+            *arguments,
+        ]
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(sys, "stdout", stdout),
+            mock.patch.object(sys, "stderr", stderr),
+            mock.patch.dict(os.environ, self.fake_env()),
+            mock.patch.object(
+                NATIVE.plugin_identity.PluginIdentityGuard,
+                "assert_unchanged",
+                new=assert_unchanged,
+            ),
+        ):
+            result = NATIVE.main()
+        return result, stdout.getvalue(), stderr.getvalue()
+
+    def assert_effective_state_rollback_interrupt_pairing(
+        self, *, update: bool, after_state_commit: bool
+    ) -> None:
+        base_config = {
+            "features": {
+                "multi_agent_v2": {"max_concurrent_threads_per_session": 5}
+            },
+            "unrelated": {"keep": True},
+        }
+        if update:
+            self.run_script(
+                "--executor-model",
+                "gpt-5.6-luna",
+                "--executor-effort",
+                "high",
+                "--apply",
+            )
+            prior_config = self.read_fake_config()
+            prior_state_bytes = (self.home / NATIVE.STATE_FILENAME).read_bytes()
+            target_model = "gpt-5.6-terra"
+            primitive_name = "_write_state"
+        else:
+            prior_config = base_config
+            prior_state_bytes = None
+            target_model = "gpt-5.6-luna"
+            primitive_name = "_remove_state"
+        (self.home / ".fake-effective-config.json").write_text(
+            json.dumps(prior_config), encoding="utf-8"
+        )
+
+        real_primitive = getattr(NATIVE, primitive_name)
+        calls = 0
+
+        def interrupt_state_rollback(*args: object, **kwargs: object) -> object:
+            nonlocal calls
+            calls += 1
+            if update and calls == 1:
+                return real_primitive(*args, **kwargs)
+            if after_state_commit:
+                real_primitive(*args, **kwargs)
+            raise KeyboardInterrupt("forced effective rollback interrupt")
+
+        argv = [
+            str(self.installed_script),
+            "--codex-bin",
+            str(self.codex),
+            "--codex-home",
+            str(self.home),
+            "--allow-incompatible-client",
+            "--executor-model",
+            target_model,
+            "--executor-effort",
+            "high",
+            "--apply",
+        ]
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(
+                NATIVE, primitive_name, side_effect=interrupt_state_rollback
+            ),
+            mock.patch.object(sys, "stdout", io.StringIO()),
+            mock.patch.object(sys, "stderr", io.StringIO()),
+            mock.patch.dict(os.environ, self.fake_env()),
+        ):
+            with self.assertRaisesRegex(
+                KeyboardInterrupt, "forced effective rollback interrupt"
+            ):
+                NATIVE.main()
+
+        state_path = self.home / NATIVE.STATE_FILENAME
+        if after_state_commit:
+            self.assertEqual(self.read_fake_config(), prior_config)
+            if prior_state_bytes is None:
+                self.assertFalse(state_path.exists())
+            else:
+                self.assertEqual(state_path.read_bytes(), prior_state_bytes)
+        else:
+            state = NATIVE._read_state(state_path)
+            self.assertIsNotNone(state)
+            self.assertEqual(state["executor"]["model"], target_model)
+            self.assertTrue(
+                NATIVE._managed_matches(
+                    state,
+                    NATIVE._current_values(self.read_fake_config(), self.plugin_id),
+                )
+            )
 
     def write_personal_agent(self, name: str, *, managed: bool = False) -> Path:
         agents = self.home / "agents"
@@ -404,6 +875,24 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertNotIn("tool_namespace", mode + usage)
         self.assertNotIn("enabled = true", mode + usage)
 
+    def test_policy_routes_qwen_advisor_through_sealed_root_tool(self) -> None:
+        executor = {"kind": "model", "model": "gpt-5.6-luna", "effort": "xhigh"}
+        planner = {"kind": "model", "model": "gpt-5.6-sol", "effort": "xhigh"}
+        advisor = {
+            "kind": "qwen_cli",
+            "model": NATIVE.QWEN_MODEL,
+            "effort": "native",
+            "region": "global",
+            "server": "qwen-advisor-python3",
+        }
+        mode, usage = NATIVE.build_policy(executor, planner, advisor, None)
+
+        self.assertIn("direct Qwen Planner paired with the sealed Qwen Advisor", mode)
+        self.assertIn("qwen-advisor-python3", usage)
+        self.assertIn("Token Plan JSON API", usage)
+        self.assertIn("runtime model qwen3.8-max-preview", usage)
+        self.assertIn("not a spawned child", usage)
+
     def test_policy_root_fallback_planner_without_advisor_and_fable_hints(self) -> None:
         executor = {"kind": "model", "model": "gpt-5.6-luna", "effort": "high"}
         advisor = {"kind": "model", "model": "gpt-5.6-terra", "effort": "high"}
@@ -439,6 +928,26 @@ class NativeRoutingTests(unittest.TestCase):
         )
         self.assertIn("review_plan", fable_advisor_usage)
         self.assertIn('fork_turns = "none"', fable_advisor_usage)
+
+    def test_root_planning_allows_sol_advisor_and_sol_executor_override(self) -> None:
+        executor = {"kind": "model", "model": "gpt-5.6-sol", "effort": "medium"}
+        advisor = {"kind": "model", "model": "gpt-5.6-sol", "effort": "max"}
+
+        mode, usage = NATIVE.build_policy(executor, None, advisor)
+
+        self.assertIn("No Planner is configured", mode)
+        self.assertIn("root owns planning", mode)
+        self.assertIn(
+            "same model ID as the root is not a duplicate configured Planner route",
+            mode,
+        )
+        self.assertIn('model = "gpt-5.6-sol", reasoning_effort = "max"', usage)
+        self.assertIn('model = "gpt-5.6-sol", reasoning_effort = "medium"', usage)
+        self.assertGreaterEqual(usage.count('fork_turns = "none"'), 2)
+        self.assertIn("explicit current-task model, effort, agent", usage)
+        self.assertIn("Never invent or substitute GPT-5.5, Terra, Qwen, Fable", usage)
+        self.assertIn("If the exact explicit route is unavailable", usage)
+        self.assertIn("when both are configured", usage)
 
     def test_planner_argument_validation(self) -> None:
         exclusive = self.run_script(
@@ -554,6 +1063,9 @@ class NativeRoutingTests(unittest.TestCase):
 
         status = self.run_script("--status")
         self.assertIn("Native policy: installed and effective", status.stdout)
+        self.assertIn(f"Plugin identity: {self.plugin_id}", status.stdout)
+        self.assertIn(f"Executing plugin identity: {self.plugin_id}", status.stdout)
+        self.assertNotIn("Plugin identity mismatch:", status.stdout)
         self.assertIn("V2 activation: not inferred", status.stdout)
         self.assertIn("Executor: gpt-5.6-luna@xhigh", status.stdout)
         self.assertIn("Designer: none", status.stdout)
@@ -569,6 +1081,835 @@ class NativeRoutingTests(unittest.TestCase):
         feature = self.read_fake_config()["features"]["multi_agent_v2"]
         self.assertEqual(feature, {"max_concurrent_threads_per_session": 5})
         self.assertFalse((self.home / NATIVE.STATE_FILENAME).exists())
+
+    @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
+    def test_disable_capture_failure_recompensates_first_install_pair(self) -> None:
+        self.run_script("--executor-model", "gpt-5.6-luna", "--apply")
+        state_path = self.home / NATIVE.STATE_FILENAME
+        managed_config = self.read_fake_config()
+        managed_state = state_path.read_bytes()
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", self.disable_main_argv()),
+            mock.patch.object(
+                NATIVE,
+                "_rename_noreplace",
+                side_effect=PermissionError("capture blocked"),
+            ),
+            mock.patch.object(sys, "stdout", io.StringIO()),
+            mock.patch.object(sys, "stderr", stderr),
+            mock.patch.dict(os.environ, self.fake_env()),
+        ):
+            result = NATIVE.main()
+        self.assertEqual(result, 2)
+        self.assertIn("exact managed config and saved state were re-paired", stderr.getvalue())
+        self.assertEqual(self.read_fake_config(), managed_config)
+        self.assertEqual(state_path.read_bytes(), managed_state)
+
+    @unittest.skipUnless(os.name == "posix", "requires dangling symlink support")
+    def test_disable_dangling_symlink_race_retains_capture_and_fails_closed(self) -> None:
+        self.run_script("--executor-model", "gpt-5.6-luna", "--apply")
+        state_path = self.home / NATIVE.STATE_FILENAME
+        original_bytes = state_path.read_bytes()
+        missing_target = self.home / "missing-disable-state-target"
+        original_assert = NATIVE._assert_state_digest
+
+        def create_dangling_symlink(path: Path, digest: str | None) -> None:
+            original_assert(path, digest)
+            if path.name.endswith(".cas-backup"):
+                state_path.symlink_to(missing_target)
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", self.disable_main_argv()),
+            mock.patch.object(
+                NATIVE,
+                "_assert_state_digest",
+                side_effect=create_dangling_symlink,
+            ),
+            mock.patch.object(sys, "stdout", stdout),
+            mock.patch.object(sys, "stderr", stderr),
+            mock.patch.dict(os.environ, self.fake_env()),
+        ):
+            result = NATIVE.main()
+
+        self.assertEqual(result, 2)
+        self.assertNotIn("Native routing disabled", stdout.getvalue())
+        self.assertIn("may be inconsistent", stderr.getvalue())
+        self.assertIn("Run status", stderr.getvalue())
+        self.assertTrue(state_path.is_symlink())
+        self.assertEqual(state_path.readlink(), missing_target)
+        captures = list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.cas-backup"))
+        self.assertEqual(len(captures), 1)
+        self.assertEqual(captures[0].read_bytes(), original_bytes)
+        self.assertEqual(
+            self.read_fake_config()["features"]["multi_agent_v2"],
+            {"max_concurrent_threads_per_session": 5},
+        )
+
+        status = self.run_script("--status", check=False)
+        self.assertEqual(status.returncode, 2)
+        self.assertIn("Routing state is not a regular file", status.stderr)
+
+    @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
+    def test_update_disable_interrupt_before_removal_recompensates_pair(self) -> None:
+        self.run_script("--executor-model", "gpt-5.6-luna", "--apply")
+        self.run_script("--executor-model", "gpt-5.6-terra", "--apply")
+        state_path = self.home / NATIVE.STATE_FILENAME
+        managed_config = self.read_fake_config()
+        managed_config.setdefault("plugins", {})["sibling@elsewhere"] = {
+            "sentinel": "preserve"
+        }
+        (self.home / ".fake-user-config.json").write_text(
+            json.dumps(managed_config), encoding="utf-8"
+        )
+        managed_state = state_path.read_bytes()
+        with (
+            mock.patch.object(sys, "argv", self.disable_main_argv()),
+            mock.patch.object(
+                NATIVE,
+                "_remove_state",
+                side_effect=KeyboardInterrupt("before removal work"),
+            ),
+            mock.patch.object(sys, "stdout", io.StringIO()),
+            mock.patch.object(sys, "stderr", io.StringIO()),
+            mock.patch.dict(os.environ, self.fake_env()),
+        ):
+            with self.assertRaisesRegex(KeyboardInterrupt, "before removal work"):
+                NATIVE.main()
+        self.assertEqual(self.read_fake_config(), managed_config)
+        self.assertEqual(state_path.read_bytes(), managed_state)
+        self.assertEqual(
+            self.read_fake_config()["plugins"]["sibling@elsewhere"],
+            {"sentinel": "preserve"},
+        )
+
+    @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
+    def test_update_disable_interrupt_after_real_removal_keeps_disabled_pair(
+        self,
+    ) -> None:
+        self.run_script("--executor-model", "gpt-5.6-luna", "--apply")
+        self.run_script("--executor-model", "gpt-5.6-terra", "--apply")
+        config = self.read_fake_config()
+        config.setdefault("plugins", {})["sibling@elsewhere"] = {
+            "sentinel": "preserve"
+        }
+        (self.home / ".fake-user-config.json").write_text(
+            json.dumps(config), encoding="utf-8"
+        )
+        state_path = self.home / NATIVE.STATE_FILENAME
+        real_remove = NATIVE._remove_state
+
+        def interrupt_after_removal(*args: object, **kwargs: object) -> None:
+            real_remove(*args, **kwargs)
+            raise KeyboardInterrupt("after removal commit")
+
+        with (
+            mock.patch.object(sys, "argv", self.disable_main_argv()),
+            mock.patch.object(
+                NATIVE, "_remove_state", side_effect=interrupt_after_removal
+            ),
+            mock.patch.object(sys, "stdout", io.StringIO()),
+            mock.patch.object(sys, "stderr", io.StringIO()),
+            mock.patch.dict(os.environ, self.fake_env()),
+        ):
+            with self.assertRaisesRegex(KeyboardInterrupt, "after removal commit"):
+                NATIVE.main()
+        self.assertFalse(state_path.exists())
+        disabled = self.read_fake_config()
+        self.assertEqual(
+            disabled["features"]["multi_agent_v2"],
+            {"max_concurrent_threads_per_session": 5},
+        )
+        self.assertEqual(
+            disabled["plugins"]["sibling@elsewhere"], {"sentinel": "preserve"}
+        )
+
+    @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
+    def test_disable_compensation_failure_is_actionable(self) -> None:
+        self.run_script("--executor-model", "gpt-5.6-luna", "--apply")
+        state_path = self.home / NATIVE.STATE_FILENAME
+        managed_state = state_path.read_bytes()
+        real_batch_write = NATIVE._batch_write
+        calls = 0
+
+        def batch_write(*args: object, **kwargs: object) -> dict[str, object]:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return real_batch_write(*args, **kwargs)
+            raise KeyboardInterrupt("compensation interrupted")
+
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", self.disable_main_argv()),
+            mock.patch.object(NATIVE, "_batch_write", side_effect=batch_write),
+            mock.patch.object(
+                NATIVE,
+                "_remove_state",
+                side_effect=KeyboardInterrupt("before removal work"),
+            ),
+            mock.patch.object(sys, "stdout", io.StringIO()),
+            mock.patch.object(sys, "stderr", stderr),
+            mock.patch.dict(os.environ, self.fake_env()),
+        ):
+            result = NATIVE.main()
+        self.assertEqual(result, 2)
+        self.assertEqual(calls, 2)
+        self.assertIn("forward managed-config compensation failed", stderr.getvalue())
+        self.assertIn("Run status", stderr.getvalue())
+        self.assertEqual(state_path.read_bytes(), managed_state)
+        self.assertEqual(
+            self.read_fake_config()["features"]["multi_agent_v2"],
+            {"max_concurrent_threads_per_session": 5},
+        )
+
+    @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
+    def test_disable_compensation_rechecks_state_after_config_write(self) -> None:
+        self.run_script("--executor-model", "gpt-5.6-luna", "--apply")
+        state_path = self.home / NATIVE.STATE_FILENAME
+        external_state = self.valid_state("gpt-5.6-sol")
+        external_bytes = (
+            json.dumps(external_state, indent=2, sort_keys=True) + "\n"
+        ).encode("utf-8")
+        real_batch_write = NATIVE._batch_write
+        calls = 0
+
+        def batch_write(*args: object, **kwargs: object) -> dict[str, object]:
+            nonlocal calls
+            calls += 1
+            result = real_batch_write(*args, **kwargs)
+            if calls == 2:
+                state_path.write_bytes(external_bytes)
+            return result
+
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", self.disable_main_argv()),
+            mock.patch.object(NATIVE, "_batch_write", side_effect=batch_write),
+            mock.patch.object(
+                NATIVE,
+                "_remove_state",
+                side_effect=KeyboardInterrupt("before removal work"),
+            ),
+            mock.patch.object(sys, "stdout", io.StringIO()),
+            mock.patch.object(sys, "stderr", stderr),
+            mock.patch.dict(os.environ, self.fake_env()),
+        ):
+            result = NATIVE.main()
+
+        self.assertEqual(result, 2)
+        self.assertEqual(calls, 2)
+        self.assertIn("forward managed-config compensation failed", stderr.getvalue())
+        self.assertIn("may be inconsistent", stderr.getvalue())
+        self.assertIn("Run status", stderr.getvalue())
+        self.assertNotIn("re-paired", stderr.getvalue())
+        self.assertEqual(state_path.read_bytes(), external_bytes)
+
+    @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
+    def test_disable_unknown_state_digest_is_actionable(self) -> None:
+        self.run_script("--executor-model", "gpt-5.6-luna", "--apply")
+        state_path = self.home / NATIVE.STATE_FILENAME
+        unknown_state = self.valid_state("gpt-5.6-sol")
+
+        def publish_unknown(*_args: object, **_kwargs: object) -> None:
+            state_path.write_text(
+                json.dumps(unknown_state, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            raise KeyboardInterrupt("unknown removal outcome")
+
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", self.disable_main_argv()),
+            mock.patch.object(NATIVE, "_remove_state", side_effect=publish_unknown),
+            mock.patch.object(sys, "stdout", io.StringIO()),
+            mock.patch.object(sys, "stderr", stderr),
+            mock.patch.dict(os.environ, self.fake_env()),
+        ):
+            result = NATIVE.main()
+        self.assertEqual(result, 2)
+        self.assertIn("matched neither the exact saved state", stderr.getvalue())
+        self.assertIn("Run status", stderr.getvalue())
+        self.assertEqual(NATIVE._read_state(state_path), unknown_state)
+        self.assertEqual(
+            self.read_fake_config()["features"]["multi_agent_v2"],
+            {"max_concurrent_threads_per_session": 5},
+        )
+
+    @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
+    def test_disable_scalar_mcp_compensation_stays_in_plugin_namespace(self) -> None:
+        initial = {
+            "features": {"multi_agent_v2": True},
+            "plugins": {
+                self.plugin_id: {
+                    "mcp_servers": {
+                        "fable-advisor-python3": {"enabled": False}
+                    }
+                },
+                "sibling@elsewhere": {
+                    "mcp_servers": {
+                        "fable-advisor-python3": {"enabled": "sentinel"}
+                    }
+                },
+            },
+            "unrelated": {"keep": True},
+        }
+        (self.home / ".fake-user-config.json").write_text(
+            json.dumps(initial), encoding="utf-8"
+        )
+        self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--advisor-fable",
+            "--apply",
+        )
+        state_path = self.home / NATIVE.STATE_FILENAME
+        managed_config = self.read_fake_config()
+        managed_state = state_path.read_bytes()
+        with (
+            mock.patch.object(sys, "argv", self.disable_main_argv()),
+            mock.patch.object(
+                NATIVE,
+                "_remove_state",
+                side_effect=KeyboardInterrupt("before scalar removal"),
+            ),
+            mock.patch.object(sys, "stdout", io.StringIO()),
+            mock.patch.object(sys, "stderr", io.StringIO()),
+            mock.patch.dict(os.environ, self.fake_env()),
+        ):
+            with self.assertRaisesRegex(KeyboardInterrupt, "before scalar removal"):
+                NATIVE.main()
+        self.assertEqual(self.read_fake_config(), managed_config)
+        self.assertEqual(state_path.read_bytes(), managed_state)
+        restored = self.read_fake_config()
+        self.assertIsInstance(restored["features"]["multi_agent_v2"], dict)
+        self.assertTrue(
+            restored["plugins"][self.plugin_id]["mcp_servers"]
+            ["fable-advisor-python3"]["enabled"]
+        )
+        self.assertEqual(
+            restored["plugins"]["sibling@elsewhere"],
+            initial["plugins"]["sibling@elsewhere"],
+        )
+
+    def test_scalar_mcp_compensation_edit_paths_are_exactly_owned(self) -> None:
+        state = self.valid_state()
+        managed_feature = {
+            "hide_spawn_agent_metadata": False,
+            "tool_namespace": "agents",
+            "multi_agent_mode_hint_text": state["managed"]["mode"],
+            "usage_hint_text": state["managed"]["usage"],
+        }
+        state["scalar_origin"] = True
+        state["managed_feature"] = managed_feature
+        state["managed"]["mcp"] = {"fable-advisor-python3": True}
+        current = {
+            "feature": managed_feature,
+            "mode": state["managed"]["mode"],
+            "usage": state["managed"]["usage"],
+            "metadata": False,
+            "namespace": "agents",
+            "mcp": {"fable-advisor-python3": True},
+        }
+
+        edits = NATIVE._managed_compensation_edits(state, current, self.plugin_id)
+
+        self.assertEqual(
+            [edit["keyPath"] for edit in edits],
+            [
+                "features.multi_agent_v2",
+                NATIVE.mcp_key_path(self.plugin_id, "fable-advisor-python3"),
+            ],
+        )
+        self.assertNotIn("sibling@elsewhere", json.dumps(edits))
+
+    def test_status_uses_saved_namespace_when_an_alternate_identity_executes(self) -> None:
+        saved_id = self.plugin_id
+        self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "high",
+            "--advisor-fable",
+            "--apply",
+        )
+        state_path = self.home / NATIVE.STATE_FILENAME
+        state_before = state_path.read_bytes()
+        config = self.read_fake_config()
+        alternate_id = "codex-orchestration@alternate-status"
+        config.setdefault("plugins", {})[alternate_id] = {
+            "mcp_servers": {"fable-advisor-python3": {"enabled": False}}
+        }
+        (self.home / ".fake-user-config.json").write_text(
+            json.dumps(config), encoding="utf-8"
+        )
+        (self.home / ".fake-effective-config.json").write_text(
+            json.dumps(config), encoding="utf-8"
+        )
+        self.activate_plugin_cache(alternate_id)
+        self.write_plugin_inventory(
+            self.plugin_inventory_record(
+                saved_id, self.source_plugin_root, enabled=False
+            ),
+            self.plugin_inventory_record(
+                alternate_id, self.source_plugin_root, enabled=True
+            ),
+        )
+
+        status = self.run_script("--status", "--require-effective", check=False)
+
+        self.assertEqual(status.returncode, 1)
+        self.assertIn("Native policy: installed and effective", status.stdout)
+        self.assertIn(f"Plugin identity: {saved_id}", status.stdout)
+        self.assertIn(f"Executing plugin identity: {alternate_id}", status.stdout)
+        self.assertIn(
+            f"Plugin identity mismatch: saved namespace owner {saved_id}; "
+            f"executing cache owner {alternate_id}",
+            status.stdout,
+        )
+        self.assertIn("Advisor: Claude Fable 5 high", status.stdout)
+        self.assertNotIn("managed fields conflict", status.stdout)
+        self.assertEqual(state_path.read_bytes(), state_before)
+
+        config_before_disable = self.read_fake_config()
+        refused_disable = self.run_script("--disable", "--apply", check=False)
+        self.assertEqual(refused_disable.returncode, 2)
+        self.assertIn(
+            "Executing plugin identity does not match the saved disable target",
+            refused_disable.stderr,
+        )
+        self.assertEqual(self.read_fake_config(), config_before_disable)
+        self.assertEqual(state_path.read_bytes(), state_before)
+
+    def test_status_rechecks_exact_state_digest_before_publication(self) -> None:
+        self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "high",
+            "--apply",
+        )
+        real_assert = NATIVE._assert_state_digest
+
+        def mutate_before_publication(path: Path, digest: str | None) -> None:
+            state = json.loads(path.read_text(encoding="utf-8"))
+            state["executor"]["model"] = "gpt-5.6-terra"
+            path.write_text(json.dumps(state), encoding="utf-8")
+            real_assert(path, digest)
+
+        stdout = io.StringIO()
+        with (
+            mock.patch.dict(os.environ, self.fake_env()),
+            mock.patch.object(
+                NATIVE,
+                "_assert_state_digest",
+                side_effect=mutate_before_publication,
+            ),
+            mock.patch.object(sys, "stdout", stdout),
+            self.assertRaisesRegex(
+                NATIVE.ConfigurationError,
+                "Saved routing state changed concurrently",
+            ),
+        ):
+            NATIVE._status(self.codex, self.home, [self.codex], False)
+        self.assertEqual(stdout.getvalue(), "")
+
+    def test_disable_refuses_overridden_restore_and_retains_state(self) -> None:
+        self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "xhigh",
+            "--apply",
+        )
+        state_path = self.home / NATIVE.STATE_FILENAME
+        state_bytes = state_path.read_bytes()
+        managed_config = self.read_fake_config()
+        (self.home / ".fake-ok-overridden").touch()
+
+        disabled = self.run_script("--disable", "--apply", check=False)
+
+        self.assertEqual(disabled.returncode, 2)
+        self.assertIn("higher-priority layer overrides", disabled.stderr)
+        self.assertIn("re-paired and retained", disabled.stderr)
+        self.assertNotIn("Native routing disabled", disabled.stdout)
+        self.assertEqual(state_path.read_bytes(), state_bytes)
+        self.assertEqual(self.read_fake_config(), managed_config)
+        state = NATIVE._read_state(state_path)
+        self.assertIsNotNone(state)
+        self.assertTrue(
+            NATIVE._managed_matches(
+                state,
+                NATIVE._current_values(self.read_fake_config(), self.plugin_id),
+            )
+        )
+
+    def test_disable_overridden_scalar_restore_recompensates_managed_table(self) -> None:
+        initial = {
+            "features": {"multi_agent_v2": True},
+            "unrelated": {"keep": True},
+        }
+        (self.home / ".fake-user-config.json").write_text(
+            json.dumps(initial), encoding="utf-8"
+        )
+        self.run_script("--executor-model", "gpt-5.6-luna", "--apply")
+        state_path = self.home / NATIVE.STATE_FILENAME
+        state_bytes = state_path.read_bytes()
+        managed_config = self.read_fake_config()
+        (self.home / ".fake-ok-overridden").touch()
+
+        disabled = self.run_script("--disable", "--apply", check=False)
+
+        self.assertEqual(disabled.returncode, 2)
+        self.assertIn("re-paired and retained", disabled.stderr)
+        self.assertEqual(self.read_fake_config(), managed_config)
+        self.assertEqual(state_path.read_bytes(), state_bytes)
+        self.assertIsInstance(
+            self.read_fake_config()["features"]["multi_agent_v2"], dict
+        )
+
+    def test_disable_overridden_mcp_restore_stays_in_saved_plugin_namespace(
+        self,
+    ) -> None:
+        initial = {
+            "features": {
+                "multi_agent_v2": {"max_concurrent_threads_per_session": 5}
+            },
+            "plugins": {
+                self.plugin_id: {
+                    "mcp_servers": {
+                        "fable-advisor-python3": {"enabled": False}
+                    }
+                },
+                "sibling@elsewhere": {
+                    "mcp_servers": {
+                        "fable-advisor-python3": {"enabled": "sentinel"}
+                    }
+                },
+            },
+            "unrelated": {"keep": True},
+        }
+        (self.home / ".fake-user-config.json").write_text(
+            json.dumps(initial), encoding="utf-8"
+        )
+        self.run_script(
+            "--executor-model", "gpt-5.6-luna", "--advisor-fable", "--apply"
+        )
+        state_path = self.home / NATIVE.STATE_FILENAME
+        state_bytes = state_path.read_bytes()
+        managed_config = self.read_fake_config()
+        (self.home / ".fake-ok-overridden").touch()
+
+        disabled = self.run_script("--disable", "--apply", check=False)
+
+        self.assertEqual(disabled.returncode, 2)
+        self.assertIn("re-paired and retained", disabled.stderr)
+        self.assertEqual(self.read_fake_config(), managed_config)
+        self.assertEqual(state_path.read_bytes(), state_bytes)
+        self.assertEqual(
+            self.read_fake_config()["plugins"]["sibling@elsewhere"],
+            initial["plugins"]["sibling@elsewhere"],
+        )
+
+    def test_disable_overridden_compensation_failure_is_actionable(self) -> None:
+        self.run_script("--executor-model", "gpt-5.6-luna", "--apply")
+        state_path = self.home / NATIVE.STATE_FILENAME
+        state_bytes = state_path.read_bytes()
+        (self.home / ".fake-ok-overridden").touch()
+        (self.home / ".fake-fail-overridden-rollback").touch()
+
+        disabled = self.run_script("--disable", "--apply", check=False)
+
+        self.assertEqual(disabled.returncode, 2)
+        self.assertIn("compensation or verification failed", disabled.stderr)
+        self.assertIn("may be inconsistent", disabled.stderr)
+        self.assertIn("Run status", disabled.stderr)
+        self.assertNotIn("re-paired and retained", disabled.stderr)
+        self.assertEqual(state_path.read_bytes(), state_bytes)
+
+    def test_disable_readback_preserves_state_after_post_write_edit(self) -> None:
+        self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "xhigh",
+            "--apply",
+        )
+        state_path = self.home / NATIVE.STATE_FILENAME
+        state_bytes = state_path.read_bytes()
+        (self.home / ".fake-mutate-after-write").touch()
+
+        disabled = self.run_script("--disable", "--apply", check=False)
+
+        self.assertEqual(disabled.returncode, 2)
+        self.assertIn("newer edit was preserved", disabled.stderr)
+        self.assertNotIn("Native routing disabled", disabled.stdout)
+        self.assertEqual(state_path.read_bytes(), state_bytes)
+        self.assertEqual(
+            self.read_fake_config()["features"]["multi_agent_v2"][
+                "usage_hint_text"
+            ],
+            "CONCURRENT USER EDIT",
+        )
+
+    def test_disable_readback_preserves_state_when_effective_restore_is_overridden(
+        self,
+    ) -> None:
+        self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "xhigh",
+            "--apply",
+        )
+        state_path = self.home / NATIVE.STATE_FILENAME
+        state_bytes = state_path.read_bytes()
+        (self.home / ".fake-effective-config.json").write_text(
+            json.dumps(self.read_fake_config()), encoding="utf-8"
+        )
+
+        disabled = self.run_script("--disable", "--apply", check=False)
+
+        self.assertEqual(disabled.returncode, 2)
+        self.assertIn("overridden in this workspace", disabled.stderr)
+        self.assertNotIn("Native routing disabled", disabled.stdout)
+        self.assertEqual(state_path.read_bytes(), state_bytes)
+
+    def test_disable_disabled_plugin_ignores_synthetic_provider_mcp_effective_values(
+        self,
+    ) -> None:
+        servers, _ = self.setup_disabled_provider_synthesis()
+        unrelated_before = self.read_fake_config()["unrelated"]
+
+        disabled = self.run_script("--disable", "--apply")
+
+        self.assertIn("Native routing disabled", disabled.stdout)
+        self.assertFalse((self.home / NATIVE.STATE_FILENAME).exists())
+        restored = self.read_fake_config()
+        self.assertEqual(restored["unrelated"], unrelated_before)
+        feature = restored["features"]["multi_agent_v2"]
+        for key in (
+            "hide_spawn_agent_metadata",
+            "tool_namespace",
+            "multi_agent_mode_hint_text",
+            "usage_hint_text",
+        ):
+            self.assertNotIn(key, feature)
+        restored_servers = restored["plugins"][self.plugin_id]["mcp_servers"]
+        for server in servers:
+            self.assertNotIn("enabled", restored_servers[server])
+
+    def test_disable_disabled_plugin_still_rejects_workspace_provider_override(
+        self,
+    ) -> None:
+        servers, state_bytes = self.setup_disabled_provider_synthesis()
+        target = servers[0]
+        workspace = {
+            "plugins": {
+                self.plugin_id: {
+                    "mcp_servers": {target: {"enabled": True}}
+                }
+            }
+        }
+        (self.home / ".fake-workspace-config.json").write_text(
+            json.dumps(workspace), encoding="utf-8"
+        )
+
+        disabled = self.run_script("--disable", "--apply", check=False)
+
+        self.assertEqual(disabled.returncode, 2)
+        self.assertIn("overridden in this workspace", disabled.stderr)
+        self.assertNotIn("Native routing disabled", disabled.stdout)
+        self.assertEqual(
+            (self.home / NATIVE.STATE_FILENAME).read_bytes(), state_bytes
+        )
+        self.assertTrue(workspace["plugins"][self.plugin_id]["mcp_servers"][target]["enabled"])
+
+    def test_disable_disabled_plugin_preserves_concurrent_user_provider_edit(
+        self,
+    ) -> None:
+        servers, state_bytes = self.setup_disabled_provider_synthesis()
+        target = servers[0]
+        (self.home / ".fake-mutate-mcp-after-write.json").write_text(
+            json.dumps(
+                {
+                    "keyPath": NATIVE.mcp_key_path(self.plugin_id, target),
+                    "value": False,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        disabled = self.run_script("--disable", "--apply", check=False)
+
+        self.assertEqual(disabled.returncode, 2)
+        self.assertIn("newer edit was preserved", disabled.stderr)
+        self.assertNotIn("Native routing disabled", disabled.stdout)
+        self.assertEqual(
+            (self.home / NATIVE.STATE_FILENAME).read_bytes(), state_bytes
+        )
+        self.assertFalse(
+            self.read_fake_config()["plugins"][self.plugin_id]["mcp_servers"]
+            [target]["enabled"]
+        )
+
+    def test_disable_disabled_plugin_preserves_concurrent_state_digest_change(
+        self,
+    ) -> None:
+        self.setup_disabled_provider_synthesis()
+        state_path = self.home / NATIVE.STATE_FILENAME
+        (self.home / ".fake-mutate-state-after-write").touch()
+
+        disabled = self.run_script("--disable", "--apply", check=False)
+
+        self.assertEqual(disabled.returncode, 2)
+        self.assertIn("matched neither the exact saved state", disabled.stderr)
+        self.assertIn("may be inconsistent", disabled.stderr)
+        self.assertNotIn("Native routing disabled", disabled.stdout)
+        changed = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            changed["previous"]["usage"]["value"], "CONCURRENT STATE EDIT"
+        )
+
+    def test_synthetic_mcp_match_rejects_unattested_or_explicit_divergence(
+        self,
+    ) -> None:
+        server = "fable-advisor-python3"
+        expected = NATIVE._current_values({}, self.plugin_id)
+        user = NATIVE._current_values({}, self.plugin_id)
+        effective_config = {
+            "plugins": {
+                self.plugin_id: {
+                    "mcp_servers": {server: {"enabled": True}}
+                }
+            }
+        }
+        effective = NATIVE._current_values(effective_config, self.plugin_id)
+        state = {
+            "schema": 7,
+            "plugin_id": self.plugin_id,
+            "managed": {"mcp": {server: True}},
+            "previous": {
+                "mcp": {server: {"known": True, "present": False}}
+            },
+        }
+        layers = {
+            "layers": [
+                {
+                    "name": {"type": "user", "profile": None},
+                    "config": {},
+                }
+            ]
+        }
+        guard = mock.Mock()
+        guard.selected_plugin_id = self.plugin_id
+        guard.selected_plugin_enabled.return_value = False
+        guard.selected_mcp_default_enabled.return_value = False
+
+        self.assertTrue(
+            NATIVE._disabled_plugin_synthetic_mcp_match(
+                expected,
+                user,
+                effective,
+                False,
+                state,
+                layers,
+                self.plugin_id,
+                guard,
+            )
+        )
+
+        guard.selected_plugin_enabled.return_value = True
+        self.assertFalse(
+            NATIVE._disabled_plugin_synthetic_mcp_match(
+                expected, user, effective, False, state, layers,
+                self.plugin_id, guard,
+            )
+        )
+        guard.selected_plugin_enabled.return_value = False
+        guard.selected_mcp_default_enabled.return_value = True
+        self.assertFalse(
+            NATIVE._disabled_plugin_synthetic_mcp_match(
+                expected, user, effective, False, state, layers,
+                self.plugin_id, guard,
+            )
+        )
+        guard.selected_mcp_default_enabled.return_value = False
+        explicit_layers = {
+            "layers": [
+                layers["layers"][0],
+                {
+                    "name": {"type": "project"},
+                    "config": effective_config,
+                },
+            ]
+        }
+        self.assertFalse(
+            NATIVE._disabled_plugin_synthetic_mcp_match(
+                expected, user, effective, False, state, explicit_layers,
+                self.plugin_id, guard,
+            )
+        )
+        effective_false = json.loads(json.dumps(effective_config))
+        effective_false["plugins"][self.plugin_id]["mcp_servers"][server][
+            "enabled"
+        ] = False
+        self.assertFalse(
+            NATIVE._disabled_plugin_synthetic_mcp_match(
+                expected,
+                user,
+                NATIVE._current_values(effective_false, self.plugin_id),
+                False,
+                state,
+                layers,
+                self.plugin_id,
+                guard,
+            )
+        )
+        self.assertFalse(
+            NATIVE._disabled_plugin_synthetic_mcp_match(
+                expected,
+                user,
+                effective,
+                False,
+                state,
+                {"layers": [{"name": {"type": "user", "profile": None}}]},
+                self.plugin_id,
+                guard,
+            )
+        )
+        unmanaged_state = json.loads(json.dumps(state))
+        unmanaged_state["managed"]["mcp"] = {}
+        self.assertFalse(
+            NATIVE._disabled_plugin_synthetic_mcp_match(
+                expected,
+                user,
+                effective,
+                False,
+                unmanaged_state,
+                layers,
+                self.plugin_id,
+                guard,
+            )
+        )
+        scalar_mismatch = json.loads(json.dumps(effective_config))
+        scalar_mismatch["features"] = {
+            "multi_agent_v2": {"tool_namespace": "collaboration"}
+        }
+        self.assertFalse(
+            NATIVE._disabled_plugin_synthetic_mcp_match(
+                expected,
+                user,
+                NATIVE._current_values(scalar_mismatch, self.plugin_id),
+                False,
+                state,
+                layers,
+                self.plugin_id,
+                guard,
+            )
+        )
 
     def test_direct_planner_designer_setup_status_and_require_effective(self) -> None:
         setup = self.run_script(
@@ -592,8 +1933,9 @@ class NativeRoutingTests(unittest.TestCase):
         state = json.loads(
             (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
         )
-        self.assertEqual(state["schema"], 4)
-        self.assertEqual(state["policy_version"], 4)
+        self.assertEqual(state["schema"], 7)
+        self.assertEqual(state["policy_version"], 7)
+        self.assertEqual(state["plugin_id"], self.plugin_id)
         self.assertEqual(state["planner"]["effort"], "xhigh")
         self.assertEqual(state["designer"]["effort"], "medium")
 
@@ -602,12 +1944,258 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertIn("Designer: gpt-5.6-luna@medium", status.stdout)
         self.assertEqual(status.returncode, 0)
 
-    def test_legacy_state_schemas_upgrade_to_four_without_losing_restore(self) -> None:
-        for legacy_schema in (1, 2, 3):
+    def test_success_dry_runs_and_noop_repair_require_final_identity_recheck(self) -> None:
+        setup_result, setup_stdout, setup_stderr = self.run_main_with_identity_failure(
+            "setup dry-run publication",
+            "--executor-model",
+            "gpt-5.6-luna",
+        )
+        self.assertEqual(setup_result, 2)
+        self.assertNotIn("Dry run only", setup_stdout)
+        self.assertIn("forced drift", setup_stderr)
+
+        self.run_script("--executor-model", "gpt-5.6-luna", "--apply")
+        repair_result, repair_stdout, repair_stderr = self.run_main_with_identity_failure(
+            "repair no-op publication", "--repair"
+        )
+        self.assertEqual(repair_result, 2)
+        self.assertNotIn("already matches", repair_stdout)
+        self.assertIn("forced drift", repair_stderr)
+
+        disable_result, disable_stdout, disable_stderr = (
+            self.run_main_with_identity_failure(
+                "disable dry-run publication", "--disable"
+            )
+        )
+        self.assertEqual(disable_result, 2)
+        self.assertNotIn("Dry run only", disable_stdout)
+        self.assertIn("forced drift", disable_stderr)
+
+    def test_status_discards_buffered_output_when_final_recheck_fails(self) -> None:
+        def stale_status(*_args: object, **_kwargs: object) -> int:
+            print("stale identity result")
+            raise NATIVE.plugin_identity.IdentityDriftError("forced status drift")
+
+        stdout = io.StringIO()
+        with (
+            mock.patch.object(NATIVE, "_status_unbuffered", side_effect=stale_status),
+            mock.patch.object(sys, "stdout", stdout),
+            self.assertRaises(NATIVE.plugin_identity.IdentityDriftError),
+        ):
+            NATIVE._status(self.codex, self.home, [self.codex], True)
+        self.assertEqual(stdout.getvalue(), "")
+
+    def test_kimi_subscription_designer_setup_status_and_disable(self) -> None:
+        setup = self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "xhigh",
+            "--planner-fable",
+            "--planner-effort",
+            "high",
+            "--designer-kimi",
+            "--apply",
+        )
+        self.assertIn("Designer: Kimi K3 max (Kimi Code subscription)", setup.stdout)
+        self.assertIn("existing Kimi Code OAuth subscription via ACP", setup.stdout)
+        state = json.loads(
+            (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
+        )
+        self.assertEqual(state["schema"], 7)
+        self.assertEqual(state["plugin_id"], self.plugin_id)
+        self.assertEqual(state["designer"]["kind"], "kimi_cli")
+        self.assertEqual(state["designer"]["model"], "kimi-code/k3")
+        self.assertEqual(state["designer"]["effort"], "max")
+        selected = state["designer"]["server"]
+        planner_selected = state["planner"]["server"]
+        self.assertTrue(state["managed"]["mcp"][selected])
+        self.assertTrue(state["managed"]["mcp"][planner_selected])
+        config = self.read_fake_config()
+        servers = config["plugins"][self.plugin_id]["mcp_servers"]
+        self.assertTrue(servers[selected]["enabled"])
+        self.assertTrue(servers[planner_selected]["enabled"])
+
+        status = self.run_script("--status", "--require-effective")
+        self.assertIn("Kimi K3 Designer: ready", status.stdout)
+        self.assertEqual(status.returncode, 0)
+
+        self.run_script("--disable", "--apply")
+        restored = self.read_fake_config()
+        restored_servers = restored["plugins"][self.plugin_id]["mcp_servers"]
+        self.assertNotIn("enabled", restored_servers[selected])
+        self.assertNotIn("enabled", restored_servers[planner_selected])
+        self.assertFalse((self.home / NATIVE.STATE_FILENAME).exists())
+
+    def test_disabled_canonical_sibling_never_receives_alternate_identity_writes(self) -> None:
+        canonical_id = NATIVE.LEGACY_PLUGIN_ID
+        canonical_root = self.root / "disabled-canonical-plugin"
+        canonical_root.mkdir()
+        (canonical_root / "payload.txt").write_text("canonical", encoding="utf-8")
+        canonical_config = {
+            "mcp_servers": {
+                "fable-advisor-python3": {"enabled": False},
+                "fable-advisor-python": {"enabled": True},
+            }
+        }
+        initial = {
+            "features": {"multi_agent_v2": {}},
+            "plugins": {canonical_id: canonical_config},
+        }
+        (self.home / ".fake-user-config.json").write_text(
+            json.dumps(initial), encoding="utf-8"
+        )
+        self.write_plugin_inventory(
+            self.plugin_inventory_record(
+                canonical_id, canonical_root, enabled=False
+            ),
+            self.plugin_inventory_record(
+                self.plugin_id, self.source_plugin_root, enabled=True
+            ),
+        )
+
+        self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--advisor-fable",
+            "--apply",
+        )
+        configured = self.read_fake_config()
+        self.assertEqual(configured["plugins"][canonical_id], canonical_config)
+        self.assertTrue(
+            configured["plugins"][self.plugin_id]["mcp_servers"]
+            ["fable-advisor-python3"]["enabled"]
+        )
+        state = json.loads(
+            (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
+        )
+        self.assertEqual(state["plugin_id"], self.plugin_id)
+
+        self.write_plugin_inventory(
+            self.plugin_inventory_record(
+                canonical_id, canonical_root, enabled=False
+            ),
+            self.plugin_inventory_record(
+                self.plugin_id, self.source_plugin_root, enabled=False
+            ),
+        )
+        self.run_script("--disable", "--apply")
+        restored = self.read_fake_config()
+        self.assertEqual(restored["plugins"][canonical_id], canonical_config)
+        alternate_servers = restored["plugins"][self.plugin_id]["mcp_servers"]
+        self.assertNotIn("enabled", alternate_servers["fable-advisor-python3"])
+
+    def test_legacy_mcp_state_refuses_alternate_setup_repair_and_disable(self) -> None:
+        canonical_id = NATIVE.LEGACY_PLUGIN_ID
+        alternate_id = self.plugin_id
+        initial = {
+            "features": {"multi_agent_v2": {}},
+            "plugins": {
+                canonical_id: {
+                    "mcp_servers": {"fable-advisor-python3": {}}
+                },
+                alternate_id: {
+                    "mcp_servers": {
+                        "fable-advisor-python3": {"enabled": False}
+                    }
+                }
+            },
+        }
+        (self.home / ".fake-user-config.json").write_text(
+            json.dumps(initial), encoding="utf-8"
+        )
+        self.activate_plugin_cache(canonical_id)
+        self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--advisor-fable",
+            "--apply",
+        )
+        state_path = self.home / NATIVE.STATE_FILENAME
+        legacy = json.loads(state_path.read_text(encoding="utf-8"))
+        legacy["schema"] = 6
+        legacy["policy_version"] = 6
+        legacy.pop("plugin_id")
+        state_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+        self.activate_plugin_cache(alternate_id)
+        self.write_plugin_inventory(
+            self.plugin_inventory_record(
+                canonical_id, self.source_plugin_root, enabled=False
+            ),
+            self.plugin_inventory_record(
+                alternate_id, self.source_plugin_root, enabled=True
+            ),
+        )
+        status = self.run_script("--status", "--require-effective", check=False)
+        self.assertEqual(status.returncode, 1)
+        self.assertIn(f"Plugin identity: {canonical_id}", status.stdout)
+        self.assertIn(f"Executing plugin identity: {alternate_id}", status.stdout)
+        self.assertIn("Plugin identity mismatch:", status.stdout)
+
+        before_refused_setup = self.read_fake_config()
+        refused_setup = self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--advisor-fable",
+            "--apply",
+            check=False,
+        )
+        self.assertEqual(refused_setup.returncode, 2)
+        self.assertIn("Legacy MCP restore state", refused_setup.stderr)
+        self.assertEqual(self.read_fake_config(), before_refused_setup)
+
+        refused_repair = self.run_script("--repair", "--apply", check=False)
+        self.assertEqual(refused_repair.returncode, 2)
+        self.assertIn("Saved plugin identity", refused_repair.stderr)
+        self.assertEqual(self.read_fake_config(), before_refused_setup)
+
+        refused_disable = self.run_script("--disable", "--apply", check=False)
+        self.assertEqual(refused_disable.returncode, 2)
+        self.assertIn(
+            "Executing plugin identity does not match the saved disable target",
+            refused_disable.stderr,
+        )
+        self.assertEqual(self.read_fake_config(), before_refused_setup)
+        self.assertTrue(state_path.exists())
+
+    def test_prepare_qwen_installs_only_stable_helper_and_prints_hidden_prompt_lane(self) -> None:
+        target = (
+            self.home
+            / "codex-orchestration"
+            / "bin"
+            / NATIVE.external_credentials.HELPER_NAME
+        )
+        preview = self.run_script(
+            "--prepare-qwen",
+            "--qwen-region",
+            "china",
+            allow_incompatible=False,
+        )
+        self.assertIn("Dry run only", preview.stdout)
+        self.assertFalse(target.exists())
+
+        applied = self.run_script(
+            "--prepare-qwen",
+            "--qwen-region",
+            "china",
+            "--apply",
+            allow_incompatible=False,
+        )
+        self.assertTrue(target.is_file())
+        packaged = Path(NATIVE.external_credentials.__file__).with_name(
+            NATIVE.external_credentials.HELPER_NAME
+        )
+        self.assertEqual(target.read_bytes(), packaged.read_bytes())
+        self.assertTrue(
+            "credential: configured" in applied.stdout
+            or "secret prompt is hidden" in applied.stdout
+        )
+
+    def test_legacy_non_mcp_state_schemas_upgrade_to_seven_without_losing_restore(self) -> None:
+        for legacy_schema in (1, 3, 4, 5, 6):
             with self.subTest(schema=legacy_schema):
                 setup_arguments = ["--executor-model", "gpt-5.6-luna"]
-                if legacy_schema == 2:
-                    setup_arguments.append("--advisor-fable")
                 self.run_script(*setup_arguments, "--apply")
 
                 state_path = self.home / NATIVE.STATE_FILENAME
@@ -615,9 +2203,11 @@ class NativeRoutingTests(unittest.TestCase):
                 original_previous = legacy["previous"]
                 legacy["schema"] = legacy_schema
                 legacy["policy_version"] = legacy_schema
+                legacy.pop("plugin_id")
                 if legacy_schema < 3:
                     legacy.pop("planner", None)
-                legacy.pop("designer", None)
+                if legacy_schema < 4:
+                    legacy.pop("designer", None)
                 legacy["managed"]["mode"] = (
                     f"{NATIVE.MANAGED_MARKER}\nlegacy schema {legacy_schema} mode"
                 )
@@ -644,14 +2234,12 @@ class NativeRoutingTests(unittest.TestCase):
                     "--apply",
                 )
                 upgraded = json.loads(state_path.read_text(encoding="utf-8"))
-                self.assertEqual(upgraded["schema"], 4)
-                self.assertEqual(upgraded["policy_version"], 4)
+                self.assertEqual(upgraded["schema"], 7)
+                self.assertEqual(upgraded["policy_version"], 7)
+                self.assertEqual(upgraded["plugin_id"], self.plugin_id)
                 self.assertEqual(upgraded["previous"], original_previous)
                 self.assertEqual(upgraded["planner"]["model"], "gpt-5.6-sol")
                 self.assertEqual(upgraded["designer"]["model"], "gpt-5.6-luna")
-                if legacy_schema == 2:
-                    self.assertIn("mcp", upgraded["managed"])
-
                 self.run_script("--disable", "--apply")
                 self.assertEqual(
                     self.read_fake_config()["features"]["multi_agent_v2"],
@@ -664,11 +2252,22 @@ class NativeRoutingTests(unittest.TestCase):
         state_path = self.home / NATIVE.STATE_FILENAME
         current = json.loads(state_path.read_text(encoding="utf-8"))
 
-        for schema, wrong_policy in ((1, 2), (2, 3), (3, 4), (4, 1), (4, True)):
+        for schema, wrong_policy in (
+            (1, 2),
+            (2, 3),
+            (3, 4),
+            (4, 5),
+            (5, 6),
+            (6, 1),
+            (6, True),
+            (7, 6),
+        ):
             with self.subTest(schema=schema, policy=wrong_policy):
                 state = json.loads(json.dumps(current))
                 state["schema"] = schema
                 state["policy_version"] = wrong_policy
+                if schema < 7:
+                    state.pop("plugin_id")
                 if schema < 3:
                     state.pop("planner")
                 if schema < 4:
@@ -690,6 +2289,7 @@ class NativeRoutingTests(unittest.TestCase):
                 state = json.loads(json.dumps(current))
                 state["schema"] = schema
                 state["policy_version"] = schema
+                state.pop("plugin_id")
                 state["planner"] = None
                 state_path.write_text(json.dumps(state), encoding="utf-8")
 
@@ -707,6 +2307,7 @@ class NativeRoutingTests(unittest.TestCase):
                 state = json.loads(json.dumps(current))
                 state["schema"] = schema
                 state["policy_version"] = schema
+                state.pop("plugin_id")
                 if schema < 3:
                     state.pop("planner")
                 state["designer"] = None
@@ -722,6 +2323,7 @@ class NativeRoutingTests(unittest.TestCase):
         current = json.loads(state_path.read_text(encoding="utf-8"))
         current["schema"] = 1
         current["policy_version"] = 1
+        current.pop("plugin_id")
         current.pop("planner")
         mutations = {
             "fable advisor": lambda state: state.__setitem__(
@@ -1152,7 +2754,7 @@ class NativeRoutingTests(unittest.TestCase):
         feature["usage_hint_text"] = (
             f"{NATIVE.MANAGED_MARKER}\ndifferent usage"
         )
-        config["plugins"][NATIVE.PLUGIN_ID]["mcp_servers"][
+        config["plugins"][self.plugin_id]["mcp_servers"][
             "fable-advisor-python3"
         ]["enabled"] = False
         (self.home / ".fake-user-config.json").write_text(
@@ -1177,7 +2779,7 @@ class NativeRoutingTests(unittest.TestCase):
         feature["usage_hint_text"] = (
             f"{NATIVE.MANAGED_MARKER}\ndifferent usage"
         )
-        config["plugins"][NATIVE.PLUGIN_ID]["mcp_servers"][
+        config["plugins"][self.plugin_id]["mcp_servers"][
             "fable-advisor-python3"
         ]["enabled"] = 1
         (self.home / ".fake-user-config.json").write_text(
@@ -1217,6 +2819,31 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertEqual(
             state["previous"]["usage"]["value"], "CONCURRENT STATE EDIT"
         )
+
+    def test_repair_detects_same_object_state_byte_replacement(self) -> None:
+        self.run_script(
+            "--executor-model",
+            "gpt-5.6-sol",
+            "--executor-effort",
+            "medium",
+            "--apply",
+        )
+        config = self.read_fake_config()
+        config["features"]["multi_agent_v2"]["usage_hint_text"] = (
+            f"{NATIVE.MANAGED_MARKER}\ndifferent usage"
+        )
+        (self.home / ".fake-user-config.json").write_text(
+            json.dumps(config), encoding="utf-8"
+        )
+        state_path = self.home / NATIVE.STATE_FILENAME
+        parsed_before = json.loads(state_path.read_text(encoding="utf-8"))
+        (self.home / ".fake-reformat-state-after-write").touch()
+
+        repaired = self.run_script("--repair", "--apply", check=False)
+
+        self.assertEqual(repaired.returncode, 2)
+        self.assertIn("state changed concurrently", repaired.stderr)
+        self.assertEqual(json.loads(state_path.read_text(encoding="utf-8")), parsed_before)
 
     def test_repair_handles_one_hint_in_a_scalar_conversion_only(self) -> None:
         initial = {"features": {"multi_agent_v2": True}, "keep": "yes"}
@@ -1337,9 +2964,9 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertEqual(feature["tool_namespace"], "agents")
 
     def test_incompatible_client_blocks_setup_but_never_disable(self) -> None:
-        old_codex = self.root / "old-codex"
-        old_codex.write_text(textwrap.dedent(FAKE_CODEX), encoding="utf-8")
-        old_codex.chmod(0o755)
+        old_codex, _ = self.write_python_fixture(
+            self.root / "old-codex", FAKE_CODEX
+        )
         refused = self.run_script(
             "--executor-model",
             "gpt-5.6-luna",
@@ -1375,6 +3002,9 @@ class NativeRoutingTests(unittest.TestCase):
         )
         self.assertEqual(inactive.returncode, 1)
         self.assertIn("Native policy: inactive", inactive.stdout)
+        self.assertIn(f"Plugin identity: {self.plugin_id}", inactive.stdout)
+        self.assertIn(f"Executing plugin identity: {self.plugin_id}", inactive.stdout)
+        self.assertNotIn("Plugin identity mismatch:", inactive.stdout)
 
         self.run_script(
             "--executor-model",
@@ -1383,9 +3013,9 @@ class NativeRoutingTests(unittest.TestCase):
             "high",
             "--apply",
         )
-        old_codex = self.root / "old-status-codex"
-        old_codex.write_text(textwrap.dedent(FAKE_CODEX), encoding="utf-8")
-        old_codex.chmod(0o755)
+        old_codex, _ = self.write_python_fixture(
+            self.root / "old-status-codex", FAKE_CODEX
+        )
         incompatible = self.run_script(
             "--status",
             "--require-effective",
@@ -1507,9 +3137,1257 @@ class NativeRoutingTests(unittest.TestCase):
             "managed_by": "codex-orchestration",
             "config_file": str(self.home / "config.toml"),
         }
-        with mock.patch.object(NATIVE.os, "fchmod", None):
-            NATIVE._write_state(state_path, state)
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        with mock.patch.object(NATIVE.os, "fchmod", None, create=True):
+            digest = NATIVE._write_state(state_path, state, identity_guard, None)
+        identity_guard.assert_unchanged.assert_called_once_with(
+            "routing-state publication"
+        )
         self.assertEqual(json.loads(state_path.read_text(encoding="utf-8")), state)
+        self.assertEqual(digest, NATIVE.hashlib.sha256(state_path.read_bytes()).hexdigest())
+
+    def test_batch_write_post_identity_drift_is_indeterminate_without_compensation(
+        self,
+    ) -> None:
+        app = mock.Mock(spec=["request"])
+        app.request.return_value = {"status": "ok", "version": "sha256:v2"}
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        identity_guard.assert_unchanged.side_effect = [
+            None,
+            NATIVE.plugin_identity.IdentityDriftError("replaced after write"),
+        ]
+
+        with self.assertRaisesRegex(
+            NATIVE.StateTransactionIndeterminateError,
+            "No automatic compensation was attempted",
+        ):
+            NATIVE._batch_write(
+                app,
+                [{"keyPath": "example", "value": True}],
+                "sha256:v1",
+                identity_guard=identity_guard,
+                identity_phase="test write",
+                reload_user_config=True,
+            )
+
+        identity_guard.assert_unchanged.assert_has_calls(
+            [
+                mock.call("test write"),
+                mock.call("test write completion"),
+            ]
+        )
+        app.request.assert_called_once()
+
+    @unittest.skipUnless(sys.platform == "win32", "requires Windows rename semantics")
+    def test_rename_noreplace_windows_consumes_source_without_overwrite(self) -> None:
+        source = self.home / "rename-source"
+        destination = self.home / "rename-destination"
+        source.write_bytes(b"new")
+
+        NATIVE._rename_noreplace(source, destination)
+
+        self.assertFalse(source.exists())
+        self.assertEqual(destination.read_bytes(), b"new")
+        self.assertEqual(destination.lstat().st_nlink, 1)
+
+        source.write_bytes(b"blocked")
+        with self.assertRaises(FileExistsError):
+            NATIVE._rename_noreplace(source, destination)
+        self.assertEqual(source.read_bytes(), b"blocked")
+        self.assertEqual(destination.read_bytes(), b"new")
+
+    def test_rename_noreplace_linux_native_contract(self) -> None:
+        source = self.home / "linux-source"
+        destination = self.home / "linux-destination"
+
+        for result, error, expected in (
+            (0, 0, None),
+            (-1, NATIVE.errno.EEXIST, FileExistsError),
+            (-1, NATIVE.errno.ENOSYS, NATIVE.ConfigurationError),
+            (-1, NATIVE.errno.EACCES, OSError),
+        ):
+            with self.subTest(result=result, error=error):
+                native_rename = mock.Mock(return_value=result)
+                libc = mock.Mock()
+                libc.renameat2 = native_rename
+                patches = (
+                    mock.patch.object(NATIVE.sys, "platform", "linux"),
+                    mock.patch.object(NATIVE.ctypes, "CDLL", return_value=libc),
+                    mock.patch.object(NATIVE.ctypes, "get_errno", return_value=error),
+                    mock.patch.object(NATIVE.os, "rename", side_effect=AssertionError),
+                )
+                with patches[0], patches[1], patches[2], patches[3]:
+                    if expected is None:
+                        NATIVE._rename_noreplace(source, destination)
+                    else:
+                        with self.assertRaises(expected):
+                            NATIVE._rename_noreplace(source, destination)
+                native_rename.assert_called_once_with(
+                    -100,
+                    os.fsencode(source),
+                    -100,
+                    os.fsencode(destination),
+                    1,
+                )
+
+        with (
+            mock.patch.object(NATIVE.sys, "platform", "linux"),
+            mock.patch.object(NATIVE.ctypes, "CDLL", return_value=object()),
+        ):
+            with self.assertRaisesRegex(NATIVE.ConfigurationError, "unavailable"):
+                NATIVE._rename_noreplace(source, destination)
+
+    def test_rename_noreplace_macos_native_contract(self) -> None:
+        source = self.home / "macos-source"
+        destination = self.home / "macos-destination"
+
+        for result, error, expected in (
+            (0, 0, None),
+            (-1, NATIVE.errno.EEXIST, FileExistsError),
+            (-1, NATIVE.errno.EINVAL, NATIVE.ConfigurationError),
+            (-1, NATIVE.errno.EIO, OSError),
+        ):
+            with self.subTest(result=result, error=error):
+                native_rename = mock.Mock(return_value=result)
+                libc = mock.Mock()
+                libc.renamex_np = native_rename
+                with (
+                    mock.patch.object(NATIVE.sys, "platform", "darwin"),
+                    mock.patch.object(NATIVE.ctypes, "CDLL", return_value=libc),
+                    mock.patch.object(NATIVE.ctypes, "get_errno", return_value=error),
+                    mock.patch.object(NATIVE.os, "rename", side_effect=AssertionError),
+                ):
+                    if expected is None:
+                        NATIVE._rename_noreplace(source, destination)
+                    else:
+                        with self.assertRaises(expected):
+                            NATIVE._rename_noreplace(source, destination)
+                native_rename.assert_called_once_with(
+                    os.fsencode(source), os.fsencode(destination), 0x00000004
+                )
+
+    def test_rename_noreplace_other_platform_fails_closed(self) -> None:
+        with mock.patch.object(NATIVE.sys, "platform", "freebsd14"):
+            with self.assertRaisesRegex(NATIVE.ConfigurationError, "unsupported"):
+                NATIVE._rename_noreplace(
+                    self.home / "source", self.home / "destination"
+                )
+
+    def test_state_publication_and_restore_never_use_hard_links(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        state = self.valid_state()
+        with mock.patch.object(NATIVE.os, "link") as hard_link:
+            first_digest = NATIVE._write_state(
+                state_path, state, identity_guard, None
+            )
+            NATIVE._write_state(
+                state_path,
+                self.valid_state("gpt-5.6-terra"),
+                identity_guard,
+                first_digest,
+            )
+            hard_link.assert_not_called()
+        self.assertEqual(state_path.lstat().st_nlink, 1)
+
+    def test_existing_state_capture_failure_preserves_canonical(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        prior = self.valid_state()
+        prior_digest = NATIVE._write_state(
+            state_path, prior, identity_guard, None
+        )
+        prior_bytes = state_path.read_bytes()
+
+        with mock.patch.object(
+            NATIVE, "_rename_noreplace", side_effect=PermissionError("capture")
+        ):
+            with self.assertRaisesRegex(NATIVE.ConfigurationError, "changed concurrently"):
+                NATIVE._write_state(
+                    state_path,
+                    self.valid_state("gpt-5.6-terra"),
+                    identity_guard,
+                    prior_digest,
+                )
+
+        self.assertEqual(state_path.read_bytes(), prior_bytes)
+        self.assertEqual(state_path.lstat().st_nlink, 1)
+
+    def test_existing_state_capture_race_preserves_both_pathnames(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        prior_digest = NATIVE._write_state(
+            state_path, self.valid_state(), identity_guard, None
+        )
+        prior_bytes = state_path.read_bytes()
+        concurrent_bytes = b"concurrent capture destination"
+        real_capture_path = NATIVE._private_state_capture_path
+        raced_path: Path | None = None
+
+        def occupy_capture_destination(path: Path) -> Path:
+            nonlocal raced_path
+            raced_path = real_capture_path(path)
+            raced_path.write_bytes(concurrent_bytes)
+            return raced_path
+
+        with mock.patch.object(
+            NATIVE,
+            "_private_state_capture_path",
+            side_effect=occupy_capture_destination,
+        ):
+            with self.assertRaisesRegex(
+                NATIVE.ConfigurationError, "changed concurrently"
+            ):
+                NATIVE._write_state(
+                    state_path,
+                    self.valid_state("gpt-5.6-terra"),
+                    identity_guard,
+                    prior_digest,
+                )
+
+        self.assertIsNotNone(raced_path)
+        self.assertEqual(state_path.read_bytes(), prior_bytes)
+        self.assertEqual(raced_path.read_bytes(), concurrent_bytes)
+
+    def test_capture_real_rename_then_interrupt_continues_transaction(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        prior_digest = NATIVE._write_state(
+            state_path, self.valid_state(), identity_guard, None
+        )
+        replacement = self.valid_state("gpt-5.6-terra")
+        real_rename = NATIVE._rename_noreplace
+        calls = 0
+
+        def interrupt_after_capture(source: Path, destination: Path) -> None:
+            nonlocal calls
+            calls += 1
+            real_rename(source, destination)
+            if calls == 1:
+                raise KeyboardInterrupt("after capture rename")
+
+        with mock.patch.object(
+            NATIVE, "_rename_noreplace", side_effect=interrupt_after_capture
+        ):
+            digest = NATIVE._write_state(
+                state_path, replacement, identity_guard, prior_digest
+            )
+
+        self.assertEqual(calls, 2)
+        self.assertEqual(NATIVE._read_state_snapshot(state_path)[1], digest)
+        self.assertEqual(NATIVE._read_state(state_path), replacement)
+
+    def test_write_capture_helper_return_interrupt_keeps_owned_path(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        prior_digest = NATIVE._write_state(
+            state_path, self.valid_state(), identity_guard, None
+        )
+        replacement = self.valid_state("gpt-5.6-terra")
+        real_capture = NATIVE._capture_expected_state
+        owned_capture: Path | None = None
+
+        def interrupt_after_capture(
+            path: Path, captured: Path, expected_digest: str
+        ) -> None:
+            nonlocal owned_capture
+            owned_capture = captured
+            real_capture(path, captured, expected_digest)
+            raise KeyboardInterrupt("after capture helper return")
+
+        with mock.patch.object(
+            NATIVE, "_capture_expected_state", side_effect=interrupt_after_capture
+        ):
+            digest = NATIVE._write_state(
+                state_path, replacement, identity_guard, prior_digest
+            )
+
+        self.assertIsNotNone(owned_capture)
+        self.assertEqual(NATIVE._read_state_snapshot(state_path)[1], digest)
+        self.assertEqual(NATIVE._read_state(state_path), replacement)
+        self.assertFalse(owned_capture.exists())
+
+    def test_remove_capture_helper_return_interrupt_keeps_owned_path(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        prior_digest = NATIVE._write_state(
+            state_path, self.valid_state(), identity_guard, None
+        )
+        real_capture = NATIVE._capture_expected_state
+        owned_capture: Path | None = None
+
+        def interrupt_after_capture(
+            path: Path, captured: Path, expected_digest: str
+        ) -> None:
+            nonlocal owned_capture
+            owned_capture = captured
+            real_capture(path, captured, expected_digest)
+            raise KeyboardInterrupt("after capture helper return")
+
+        with mock.patch.object(
+            NATIVE, "_capture_expected_state", side_effect=interrupt_after_capture
+        ):
+            NATIVE._remove_state(state_path, identity_guard, prior_digest)
+
+        self.assertIsNotNone(owned_capture)
+        self.assertFalse(state_path.exists())
+        self.assertFalse(owned_capture.exists())
+
+    def test_capture_validation_interrupt_continues_with_known_artifact(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        prior_digest = NATIVE._write_state(
+            state_path, self.valid_state(), identity_guard, None
+        )
+        replacement = self.valid_state("gpt-5.6-terra")
+        real_assert = NATIVE._assert_state_digest
+
+        def interrupt_after_validation(path: Path, digest: str | None) -> None:
+            real_assert(path, digest)
+            if path.name.endswith(".cas-backup"):
+                raise KeyboardInterrupt("after capture validation")
+
+        with mock.patch.object(
+            NATIVE, "_assert_state_digest", side_effect=interrupt_after_validation
+        ):
+            digest = NATIVE._write_state(
+                state_path, replacement, identity_guard, prior_digest
+            )
+
+        self.assertEqual(NATIVE._read_state_snapshot(state_path)[1], digest)
+        self.assertEqual(NATIVE._read_state(state_path), replacement)
+        self.assertEqual(
+            list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.cas-backup")), []
+        )
+
+    def test_absent_publication_real_rename_then_interrupt_is_committed(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        state = self.valid_state()
+        real_rename = NATIVE._rename_noreplace
+
+        def interrupt_after_publish(source: Path, destination: Path) -> None:
+            real_rename(source, destination)
+            raise KeyboardInterrupt("after publication rename")
+
+        with (
+            mock.patch.object(
+                NATIVE, "_rename_noreplace", side_effect=interrupt_after_publish
+            ),
+            mock.patch.object(sys, "stderr", io.StringIO()),
+        ):
+            digest = NATIVE._write_state(state_path, state, identity_guard, None)
+
+        self.assertEqual(NATIVE._read_state_snapshot(state_path)[1], digest)
+        self.assertEqual(NATIVE._read_state(state_path), state)
+
+    def test_replacement_real_rename_then_interrupt_is_committed(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        prior_digest = NATIVE._write_state(
+            state_path, self.valid_state(), identity_guard, None
+        )
+        replacement = self.valid_state("gpt-5.6-terra")
+        real_rename = NATIVE._rename_noreplace
+        calls = 0
+
+        def interrupt_after_publication(source: Path, destination: Path) -> None:
+            nonlocal calls
+            calls += 1
+            real_rename(source, destination)
+            if calls == 2:
+                raise KeyboardInterrupt("after replacement rename")
+
+        with (
+            mock.patch.object(
+                NATIVE,
+                "_rename_noreplace",
+                side_effect=interrupt_after_publication,
+            ),
+            mock.patch.object(sys, "stderr", io.StringIO()),
+        ):
+            digest = NATIVE._write_state(
+                state_path, replacement, identity_guard, prior_digest
+            )
+
+        self.assertEqual(calls, 2)
+        self.assertEqual(NATIVE._read_state_snapshot(state_path)[1], digest)
+        self.assertEqual(NATIVE._read_state(state_path), replacement)
+
+    def test_indeterminate_replacement_preserves_staged_and_recovery_evidence(
+        self,
+    ) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        prior_digest = NATIVE._write_state(
+            state_path, self.valid_state(), identity_guard, None
+        )
+        prior_bytes = state_path.read_bytes()
+        replacement = self.valid_state("gpt-5.6-terra")
+        replacement_bytes = (
+            json.dumps(replacement, indent=2, sort_keys=True) + "\n"
+        ).encode("utf-8")
+        ambiguous = self.valid_state("gpt-5.6-sol")
+        ambiguous_bytes = (
+            json.dumps(ambiguous, indent=2, sort_keys=True) + "\n"
+        ).encode("utf-8")
+        real_rename = NATIVE._rename_noreplace
+        calls = 0
+
+        def create_ambiguous_publication(source: Path, destination: Path) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                real_rename(source, destination)
+                return
+            state_path.write_bytes(ambiguous_bytes)
+            raise KeyboardInterrupt("ambiguous publication outcome")
+
+        with mock.patch.object(
+            NATIVE,
+            "_rename_noreplace",
+            side_effect=create_ambiguous_publication,
+        ):
+            with self.assertRaisesRegex(
+                NATIVE.StateTransactionIndeterminateError,
+                "all paths were preserved",
+            ) as raised:
+                NATIVE._write_state(
+                    state_path, replacement, identity_guard, prior_digest
+                )
+
+        self.assertNotIn("prior state was restored", str(raised.exception))
+        self.assertEqual(state_path.read_bytes(), ambiguous_bytes)
+        captures = list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.cas-backup"))
+        self.assertEqual(len(captures), 1)
+        self.assertEqual(captures[0].read_bytes(), prior_bytes)
+        staged = list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.tmp"))
+        self.assertEqual(len(staged), 1)
+        self.assertEqual(staged[0].read_bytes(), replacement_bytes)
+
+    @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
+    def test_first_install_publish_rename_interrupt_keeps_config_state_paired(
+        self,
+    ) -> None:
+        real_rename = NATIVE._rename_noreplace
+
+        def interrupt_after_publish(source: Path, destination: Path) -> None:
+            real_rename(source, destination)
+            raise KeyboardInterrupt("after first publication rename")
+
+        argv = [
+            str(self.installed_script),
+            "--codex-bin",
+            str(self.codex),
+            "--codex-home",
+            str(self.home),
+            "--allow-incompatible-client",
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "high",
+            "--apply",
+        ]
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(
+                NATIVE, "_rename_noreplace", side_effect=interrupt_after_publish
+            ),
+            mock.patch.object(sys, "stdout", io.StringIO()),
+            mock.patch.object(sys, "stderr", io.StringIO()),
+            mock.patch.dict(os.environ, self.fake_env()),
+        ):
+            result = NATIVE.main()
+
+        self.assertEqual(result, 0)
+        state = NATIVE._read_state(self.home / NATIVE.STATE_FILENAME)
+        self.assertIsNotNone(state)
+        self.assertTrue(
+            NATIVE._managed_matches(
+                state,
+                NATIVE._current_values(self.read_fake_config(), self.plugin_id),
+            )
+        )
+
+    @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
+    def test_update_publish_rename_interrupt_keeps_config_state_paired(self) -> None:
+        self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "high",
+            "--apply",
+        )
+        real_rename = NATIVE._rename_noreplace
+        calls = 0
+
+        def interrupt_after_replacement(source: Path, destination: Path) -> None:
+            nonlocal calls
+            calls += 1
+            real_rename(source, destination)
+            if calls == 2:
+                raise KeyboardInterrupt("after replacement publication rename")
+
+        argv = [
+            str(self.installed_script),
+            "--codex-bin",
+            str(self.codex),
+            "--codex-home",
+            str(self.home),
+            "--allow-incompatible-client",
+            "--executor-model",
+            "gpt-5.6-terra",
+            "--executor-effort",
+            "high",
+            "--apply",
+        ]
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(
+                NATIVE, "_rename_noreplace", side_effect=interrupt_after_replacement
+            ),
+            mock.patch.object(sys, "stdout", io.StringIO()),
+            mock.patch.object(sys, "stderr", io.StringIO()),
+            mock.patch.dict(os.environ, self.fake_env()),
+        ):
+            result = NATIVE.main()
+
+        self.assertEqual(result, 0)
+        self.assertEqual(calls, 2)
+        state = NATIVE._read_state(self.home / NATIVE.STATE_FILENAME)
+        self.assertIsNotNone(state)
+        self.assertEqual(state["executor"]["model"], "gpt-5.6-terra")
+        self.assertTrue(
+            NATIVE._managed_matches(
+                state,
+                NATIVE._current_values(self.read_fake_config(), self.plugin_id),
+            )
+        )
+
+    def test_existing_state_publication_failure_restores_prior_bytes(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        prior = self.valid_state()
+        prior_digest = NATIVE._write_state(
+            state_path, prior, identity_guard, None
+        )
+        prior_bytes = state_path.read_bytes()
+        real_rename = NATIVE._rename_noreplace
+        calls = 0
+
+        def fail_publication_then_restore(source: Path, destination: Path) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise PermissionError("publication")
+            real_rename(source, destination)
+
+        with mock.patch.object(
+            NATIVE, "_rename_noreplace", side_effect=fail_publication_then_restore
+        ):
+            with self.assertRaisesRegex(NATIVE.ConfigurationError, "appeared during publication"):
+                NATIVE._write_state(
+                    state_path,
+                    self.valid_state("gpt-5.6-terra"),
+                    identity_guard,
+                    prior_digest,
+                )
+
+        self.assertEqual(calls, 3)
+        self.assertEqual(state_path.read_bytes(), prior_bytes)
+        self.assertEqual(state_path.lstat().st_nlink, 1)
+
+    def test_prior_capture_cleanup_failure_keeps_published_state(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        prior_digest = NATIVE._write_state(
+            state_path, self.valid_state(), identity_guard, None
+        )
+        original_unlink = Path.unlink
+        capture_unlinks = 0
+
+        def fail_final_capture_unlink(candidate: Path, missing_ok: bool = False) -> None:
+            nonlocal capture_unlinks
+            if candidate.name.endswith(".cas-backup"):
+                capture_unlinks += 1
+                if capture_unlinks == 2:
+                    raise PermissionError("cleanup")
+            original_unlink(candidate, missing_ok=missing_ok)
+
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(Path, "unlink", new=fail_final_capture_unlink),
+            mock.patch.object(sys, "stderr", stderr),
+        ):
+            digest = NATIVE._write_state(
+                state_path,
+                self.valid_state("gpt-5.6-terra"),
+                identity_guard,
+                prior_digest,
+            )
+
+        self.assertEqual(NATIVE._read_state_snapshot(state_path)[1], digest)
+        self.assertEqual(state_path.lstat().st_nlink, 1)
+        self.assertIn("WARNING: routing state was published", stderr.getvalue())
+        captures = list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.cas-backup"))
+        self.assertEqual(len(captures), 1)
+        self.assertEqual(captures[0].lstat().st_nlink, 1)
+
+    def test_absent_state_directory_fsync_failure_is_committed(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        state = self.valid_state()
+        stderr = io.StringIO()
+
+        with (
+            mock.patch.object(
+                NATIVE,
+                "_fsync_directory",
+                side_effect=PermissionError("durability"),
+            ),
+            mock.patch.object(sys, "stderr", stderr),
+        ):
+            digest = NATIVE._write_state(state_path, state, identity_guard, None)
+
+        self.assertEqual(NATIVE._read_state_snapshot(state_path)[1], digest)
+        self.assertEqual(NATIVE._read_state(state_path), state)
+        self.assertIn("routing state was published", stderr.getvalue())
+        self.assertIn("durability could not be confirmed", stderr.getvalue())
+
+    def test_interrupt_like_postcommit_maintenance_cannot_escape(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        state = self.valid_state()
+
+        with (
+            mock.patch.object(
+                NATIVE,
+                "_fsync_directory",
+                side_effect=KeyboardInterrupt("maintenance interrupt"),
+            ),
+            mock.patch.object(sys, "stderr", io.StringIO()),
+        ):
+            digest = NATIVE._write_state(state_path, state, identity_guard, None)
+
+        self.assertEqual(NATIVE._read_state_snapshot(state_path)[1], digest)
+        self.assertEqual(NATIVE._read_state(state_path), state)
+
+    def test_replacement_directory_fsync_failure_retains_prior_capture(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        prior_digest = NATIVE._write_state(
+            state_path, self.valid_state(), identity_guard, None
+        )
+        prior_bytes = state_path.read_bytes()
+        replacement = self.valid_state("gpt-5.6-terra")
+        stderr = io.StringIO()
+
+        with (
+            mock.patch.object(
+                NATIVE,
+                "_fsync_directory",
+                side_effect=PermissionError("durability"),
+            ),
+            mock.patch.object(sys, "stderr", stderr),
+        ):
+            digest = NATIVE._write_state(
+                state_path, replacement, identity_guard, prior_digest
+            )
+
+        self.assertEqual(NATIVE._read_state_snapshot(state_path)[1], digest)
+        self.assertEqual(NATIVE._read_state(state_path), replacement)
+        captures = list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.cas-backup"))
+        self.assertEqual(len(captures), 1)
+        self.assertEqual(captures[0].read_bytes(), prior_bytes)
+        self.assertIn(f"recovery remains at {captures[0]}", stderr.getvalue())
+
+    def test_removal_directory_fsync_failure_retains_prior_capture(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        prior_digest = NATIVE._write_state(
+            state_path, self.valid_state(), identity_guard, None
+        )
+        prior_bytes = state_path.read_bytes()
+        stderr = io.StringIO()
+
+        with (
+            mock.patch.object(
+                NATIVE,
+                "_fsync_directory",
+                side_effect=PermissionError("durability"),
+            ),
+            mock.patch.object(sys, "stderr", stderr),
+        ):
+            NATIVE._remove_state(state_path, identity_guard, prior_digest)
+
+        self.assertFalse(state_path.exists())
+        captures = list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.cas-backup"))
+        self.assertEqual(len(captures), 1)
+        self.assertEqual(captures[0].read_bytes(), prior_bytes)
+        self.assertIn("routing state was removed", stderr.getvalue())
+        self.assertIn(f"recovery remains at {captures[0]}", stderr.getvalue())
+
+    def test_replacement_cleanup_fsync_failure_does_not_fail_publication(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        prior_digest = NATIVE._write_state(
+            state_path, self.valid_state(), identity_guard, None
+        )
+        replacement = self.valid_state("gpt-5.6-terra")
+        stderr = io.StringIO()
+
+        with (
+            mock.patch.object(
+                NATIVE,
+                "_fsync_directory",
+                side_effect=[None, PermissionError("cleanup durability")],
+            ),
+            mock.patch.object(sys, "stderr", stderr),
+        ):
+            digest = NATIVE._write_state(
+                state_path, replacement, identity_guard, prior_digest
+            )
+
+        self.assertEqual(NATIVE._read_state_snapshot(state_path)[1], digest)
+        self.assertEqual(
+            list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.cas-backup")), []
+        )
+        self.assertIn("cleanup directory durability", stderr.getvalue())
+
+    def test_removal_cleanup_failure_does_not_restore_canonical(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        prior_digest = NATIVE._write_state(
+            state_path, self.valid_state(), identity_guard, None
+        )
+        original_unlink = Path.unlink
+        capture_unlinks = 0
+
+        def fail_capture_unlink(candidate: Path, missing_ok: bool = False) -> None:
+            nonlocal capture_unlinks
+            if candidate.name.endswith(".cas-backup"):
+                capture_unlinks += 1
+                if capture_unlinks == 2:
+                    raise PermissionError("cleanup")
+            original_unlink(candidate, missing_ok=missing_ok)
+
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(Path, "unlink", new=fail_capture_unlink),
+            mock.patch.object(sys, "stderr", stderr),
+        ):
+            NATIVE._remove_state(state_path, identity_guard, prior_digest)
+
+        self.assertFalse(state_path.exists())
+        captures = list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.cas-backup"))
+        self.assertEqual(len(captures), 1)
+        self.assertIn("routing state was removed", stderr.getvalue())
+        self.assertIn("recovery artifact remains", stderr.getvalue())
+
+    def test_complete_restore_failure_retains_captured_prior_bytes(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        prior_digest = NATIVE._write_state(
+            state_path, self.valid_state(), identity_guard, None
+        )
+        prior_bytes = state_path.read_bytes()
+
+        real_rename = NATIVE._rename_noreplace
+        calls = 0
+
+        def capture_then_block(source: Path, destination: Path) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                real_rename(source, destination)
+                return
+            raise PermissionError("blocked")
+
+        with mock.patch.object(
+            NATIVE, "_rename_noreplace", side_effect=capture_then_block
+        ):
+            with self.assertRaisesRegex(
+                NATIVE.ConfigurationError, "restoration failed"
+            ):
+                NATIVE._write_state(
+                    state_path,
+                    self.valid_state("gpt-5.6-terra"),
+                    identity_guard,
+                    prior_digest,
+                )
+
+        self.assertFalse(state_path.exists())
+        captures = list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.cas-backup"))
+        self.assertEqual(len(captures), 1)
+        self.assertEqual(captures[0].read_bytes(), prior_bytes)
+        self.assertEqual(captures[0].lstat().st_nlink, 1)
+
+    @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
+    def test_publication_failure_restores_state_and_rolls_back_config(self) -> None:
+        self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "high",
+            "--apply",
+        )
+        state_path = self.home / NATIVE.STATE_FILENAME
+        prior_state = state_path.read_bytes()
+        prior_config = self.read_fake_config()
+        real_rename = NATIVE._rename_noreplace
+        calls = 0
+
+        def fail_publication_then_restore(source: Path, destination: Path) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise PermissionError("forced publication failure")
+            real_rename(source, destination)
+
+        argv = [
+            str(self.installed_script),
+            "--codex-bin",
+            str(self.codex),
+            "--codex-home",
+            str(self.home),
+            "--allow-incompatible-client",
+            "--executor-model",
+            "gpt-5.6-terra",
+            "--executor-effort",
+            "high",
+            "--apply",
+        ]
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(
+                NATIVE,
+                "_rename_noreplace",
+                side_effect=fail_publication_then_restore,
+            ),
+            mock.patch.object(sys, "stderr", stderr),
+            mock.patch.dict(os.environ, self.fake_env()),
+        ):
+            result = NATIVE.main()
+
+        self.assertEqual(result, 2)
+        self.assertEqual(calls, 3)
+        self.assertIn("config write was rolled back", stderr.getvalue())
+        self.assertEqual(self.read_fake_config(), prior_config)
+        self.assertEqual(state_path.read_bytes(), prior_state)
+        self.assertEqual(state_path.lstat().st_nlink, 1)
+
+    @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
+    def test_postcommit_fsync_and_stderr_failures_keep_config_state_consistent(
+        self,
+    ) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+
+        class BrokenStderr:
+            def __init__(self) -> None:
+                self.writes = 0
+
+            def write(self, _message: str) -> None:
+                self.writes += 1
+                raise BrokenPipeError("closed diagnostic stream")
+
+            def flush(self) -> None:
+                raise BrokenPipeError("closed diagnostic stream")
+
+        real_app_server_close = NATIVE.AppServer.close
+
+        def close_app_server_streams(app: NATIVE.AppServer) -> None:
+            real_app_server_close(app)
+            app._stdin.close()
+            app._stdout.close()
+
+        def invoke(*arguments: str) -> tuple[int, str, BrokenStderr]:
+            stdout = io.StringIO()
+            stderr = BrokenStderr()
+            argv = [
+                str(self.installed_script),
+                "--codex-bin",
+                str(self.codex),
+                "--codex-home",
+                str(self.home),
+                "--allow-incompatible-client",
+                *arguments,
+            ]
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(sys, "stdout", stdout),
+                mock.patch.object(sys, "stderr", stderr),
+                mock.patch.dict(os.environ, self.fake_env()),
+                mock.patch.object(
+                    NATIVE.AppServer,
+                    "close",
+                    new=close_app_server_streams,
+                ),
+                mock.patch.object(
+                    NATIVE,
+                    "_fsync_directory",
+                    side_effect=PermissionError("forced directory fsync failure"),
+                ),
+            ):
+                result = NATIVE.main()
+            return result, stdout.getvalue(), stderr
+
+        result, stdout, stderr = invoke(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "high",
+            "--apply",
+        )
+        self.assertEqual(result, 0)
+        self.assertIn("Native routing policy installed", stdout)
+        self.assertGreater(stderr.writes, 0)
+        state = NATIVE._read_state(state_path)
+        self.assertIsNotNone(state)
+        self.assertTrue(
+            NATIVE._managed_matches(
+                state,
+                NATIVE._current_values(self.read_fake_config(), self.plugin_id),
+            )
+        )
+
+        prior_bytes = state_path.read_bytes()
+        result, stdout, stderr = invoke(
+            "--executor-model",
+            "gpt-5.6-terra",
+            "--executor-effort",
+            "high",
+            "--apply",
+        )
+        self.assertEqual(result, 0)
+        self.assertIn("Native routing policy installed", stdout)
+        self.assertGreater(stderr.writes, 0)
+        state = NATIVE._read_state(state_path)
+        self.assertIsNotNone(state)
+        self.assertEqual(state["executor"]["model"], "gpt-5.6-terra")
+        self.assertTrue(
+            NATIVE._managed_matches(
+                state,
+                NATIVE._current_values(self.read_fake_config(), self.plugin_id),
+            )
+        )
+        captures = list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.cas-backup"))
+        self.assertEqual(len(captures), 1)
+        self.assertEqual(captures[0].read_bytes(), prior_bytes)
+
+        removed_bytes = state_path.read_bytes()
+        result, stdout, stderr = invoke("--disable", "--apply")
+        self.assertEqual(result, 0)
+        self.assertIn("Native routing disabled", stdout)
+        self.assertGreater(stderr.writes, 0)
+        self.assertFalse(state_path.exists())
+        self.assertEqual(
+            self.read_fake_config()["features"]["multi_agent_v2"],
+            {"max_concurrent_threads_per_session": 5},
+        )
+        captures = list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.cas-backup"))
+        self.assertEqual(len(captures), 2)
+        self.assertIn(removed_bytes, [capture.read_bytes() for capture in captures])
+
+    def test_windows_transaction_mutex_uses_exact_global_name_and_fails_closed(
+        self,
+    ) -> None:
+        lock_identity = os.path.normcase(os.path.realpath(self.home))
+        name_hash = NATIVE.hashlib.sha256(lock_identity.encode("utf-8")).hexdigest()
+        expected_name = f"Global\\CodexOrchestrationNativeRouting-{name_hash}"
+
+        for create_result, wait_result, expected_error in (
+            (123, 0x00000000, None),
+            (0, 0x00000000, "Could not create"),
+            (123, 0xFFFFFFFF, "transaction is active"),
+        ):
+            with self.subTest(
+                create_result=create_result,
+                wait_result=wait_result,
+            ):
+                kernel32 = mock.Mock()
+                kernel32.CreateMutexW.return_value = create_result
+                kernel32.WaitForSingleObject.return_value = wait_result
+                with (
+                    mock.patch.object(NATIVE.os, "name", "nt"),
+                    mock.patch.object(
+                        NATIVE.ctypes,
+                        "WinDLL",
+                        create=True,
+                        return_value=kernel32,
+                    ),
+                ):
+                    if expected_error is None:
+                        with NATIVE._transaction_directory_lock(self.home):
+                            pass
+                    else:
+                        with self.assertRaisesRegex(
+                            NATIVE.ConfigurationError, expected_error
+                        ):
+                            with NATIVE._transaction_directory_lock(self.home):
+                                pass
+
+                kernel32.CreateMutexW.assert_called_once_with(
+                    None, False, expected_name
+                )
+                self.assertNotIn("Local\\", expected_name)
+
+    def test_transaction_lock_rejects_a_concurrent_process(self) -> None:
+        probe = textwrap.dedent(
+            """\
+            import importlib.util
+            from pathlib import Path
+            import sys
+
+            script = Path(sys.argv[1])
+            spec = importlib.util.spec_from_file_location("native_lock_probe", script)
+            module = importlib.util.module_from_spec(spec)
+            sys.path.insert(0, str(script.parent))
+            spec.loader.exec_module(module)
+            try:
+                with module._transaction_directory_lock(Path(sys.argv[2])):
+                    raise SystemExit(0)
+            except module.ConfigurationError as exc:
+                print(str(exc), file=sys.stderr)
+                raise SystemExit(23)
+            """
+        )
+        with NATIVE._transaction_directory_lock(self.home):
+            result = subprocess.run(
+                [sys.executable, "-c", probe, str(SCRIPT), str(self.home)],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+        self.assertEqual(result.returncode, 23, result.stderr)
+        self.assertIn("native-routing transaction is active", result.stderr)
+
+    def test_absent_state_cas_refuses_an_intervening_valid_state(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        state = self.valid_state()
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+
+        with self.assertRaisesRegex(
+            NATIVE.ConfigurationError, "changed concurrently"
+        ):
+            NATIVE._write_state(state_path, state, identity_guard, None)
+
+    def test_existing_state_cas_refuses_replacement_and_removal(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        original = self.valid_state()
+        original_digest = NATIVE._write_state(
+            state_path, original, identity_guard, None
+        )
+        intervening = self.valid_state("gpt-5.6-terra")
+        state_path.write_text(json.dumps(intervening), encoding="utf-8")
+
+        with self.assertRaisesRegex(
+            NATIVE.ConfigurationError, "changed concurrently"
+        ):
+            NATIVE._write_state(
+                state_path, original, identity_guard, original_digest
+            )
+        with self.assertRaisesRegex(
+            NATIVE.ConfigurationError, "changed concurrently"
+        ):
+            NATIVE._remove_state(state_path, identity_guard, original_digest)
+        self.assertEqual(
+            json.loads(state_path.read_text(encoding="utf-8")), intervening
+        )
+
+    def test_state_cas_rechecks_mutation_during_identity_guard(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        original = self.valid_state()
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        original_digest = NATIVE._write_state(
+            state_path, original, identity_guard, None
+        )
+        intervening = self.valid_state("gpt-5.6-terra")
+        intervening_bytes = json.dumps(intervening).encode("utf-8")
+
+        def mutate_during_guard(_phase: str) -> None:
+            state_path.write_bytes(intervening_bytes)
+
+        identity_guard.assert_unchanged.side_effect = mutate_during_guard
+        with self.assertRaisesRegex(NATIVE.ConfigurationError, "changed concurrently"):
+            NATIVE._remove_state(state_path, identity_guard, original_digest)
+        self.assertEqual(state_path.read_bytes(), intervening_bytes)
+
+        identity_guard.assert_unchanged.side_effect = None
+        state_path.write_bytes(json.dumps(original).encode("utf-8"))
+        original_digest = NATIVE._read_state_snapshot(state_path)[1]
+        identity_guard.assert_unchanged.side_effect = mutate_during_guard
+        with self.assertRaisesRegex(NATIVE.ConfigurationError, "changed concurrently"):
+            NATIVE._write_state(
+                state_path, self.valid_state("gpt-5.6-sol"), identity_guard, original_digest
+            )
+        self.assertEqual(state_path.read_bytes(), intervening_bytes)
+
+    def test_absent_state_publication_never_overwrites_intervening_state(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        replacement = self.valid_state("gpt-5.6-terra")
+        replacement_bytes = json.dumps(replacement).encode("utf-8")
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+
+        def publish_during_guard(_phase: str) -> None:
+            state_path.write_bytes(replacement_bytes)
+
+        identity_guard.assert_unchanged.side_effect = publish_during_guard
+        with self.assertRaisesRegex(NATIVE.ConfigurationError, "changed concurrently"):
+            NATIVE._write_state(state_path, self.valid_state(), identity_guard, None)
+        self.assertEqual(state_path.read_bytes(), replacement_bytes)
+
+
+    def test_state_cas_preserves_write_after_captured_validation(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        original = self.valid_state()
+        original_digest = NATIVE._write_state(
+            state_path, original, identity_guard, None
+        )
+        newer_bytes = json.dumps(self.valid_state("gpt-5.6-terra")).encode("utf-8")
+        original_assert = NATIVE._assert_state_digest
+
+        def mutate_after_validation(path: Path, digest: str | None) -> None:
+            original_assert(path, digest)
+            if path.name.endswith(".cas-backup"):
+                state_path.write_bytes(newer_bytes)
+
+        with mock.patch.object(
+            NATIVE, "_assert_state_digest", side_effect=mutate_after_validation
+        ):
+            with self.assertRaisesRegex(
+                NATIVE.ConfigurationError, "was not overwritten"
+            ):
+                NATIVE._write_state(
+                    state_path,
+                    self.valid_state("gpt-5.6-sol"),
+                    identity_guard,
+                    original_digest,
+                )
+        self.assertEqual(state_path.read_bytes(), newer_bytes)
+        self.assertEqual(len(list(self.home.glob("*.cas-backup"))), 1)
+
+    def test_state_cas_preserves_write_after_remove_validation(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        original_digest = NATIVE._write_state(
+            state_path, self.valid_state(), identity_guard, None
+        )
+        newer_bytes = json.dumps(self.valid_state("gpt-5.6-terra")).encode("utf-8")
+        original_assert = NATIVE._assert_state_digest
+
+        def mutate_after_validation(path: Path, digest: str | None) -> None:
+            original_assert(path, digest)
+            if path.name.endswith(".cas-backup"):
+                state_path.write_bytes(newer_bytes)
+
+        with mock.patch.object(
+            NATIVE, "_assert_state_digest", side_effect=mutate_after_validation
+        ):
+            with self.assertRaisesRegex(
+                NATIVE.ConfigurationError, "appeared during removal"
+            ):
+                NATIVE._remove_state(state_path, identity_guard, original_digest)
+        self.assertEqual(state_path.read_bytes(), newer_bytes)
+
+    @unittest.skipUnless(os.name == "posix", "requires dangling symlink support")
+    def test_remove_preserves_capture_when_dangling_symlink_recreates_path(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        original_digest = NATIVE._write_state(
+            state_path, self.valid_state(), identity_guard, None
+        )
+        original_bytes = state_path.read_bytes()
+        missing_target = self.home / "missing-state-target"
+        original_assert = NATIVE._assert_state_digest
+
+        def create_dangling_symlink(path: Path, digest: str | None) -> None:
+            original_assert(path, digest)
+            if path.name.endswith(".cas-backup"):
+                state_path.symlink_to(missing_target)
+
+        with mock.patch.object(
+            NATIVE,
+            "_assert_state_digest",
+            side_effect=create_dangling_symlink,
+        ):
+            with self.assertRaisesRegex(
+                NATIVE.ConfigurationError, "appeared during removal"
+            ):
+                NATIVE._remove_state(state_path, identity_guard, original_digest)
+
+        self.assertTrue(state_path.is_symlink())
+        self.assertEqual(state_path.readlink(), missing_target)
+        captures = list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.cas-backup"))
+        self.assertEqual(len(captures), 1)
+        self.assertEqual(captures[0].read_bytes(), original_bytes)
+
+    def test_remove_preserves_capture_when_directory_recreates_path(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        original_digest = NATIVE._write_state(
+            state_path, self.valid_state(), identity_guard, None
+        )
+        original_bytes = state_path.read_bytes()
+        original_assert = NATIVE._assert_state_digest
+
+        def create_directory(path: Path, digest: str | None) -> None:
+            original_assert(path, digest)
+            if path.name.endswith(".cas-backup"):
+                state_path.mkdir()
+
+        with mock.patch.object(
+            NATIVE, "_assert_state_digest", side_effect=create_directory
+        ):
+            with self.assertRaisesRegex(
+                NATIVE.ConfigurationError, "appeared during removal"
+            ):
+                NATIVE._remove_state(state_path, identity_guard, original_digest)
+
+        self.assertTrue(state_path.is_dir())
+        captures = list(self.home.glob(f".{NATIVE.STATE_FILENAME}.*.cas-backup"))
+        self.assertEqual(len(captures), 1)
+        self.assertEqual(captures[0].read_bytes(), original_bytes)
+
+    def test_state_entry_inspection_error_is_not_treated_as_absent(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        with mock.patch.object(
+            Path, "lstat", side_effect=PermissionError("inspection denied")
+        ):
+            with self.assertRaisesRegex(
+                NATIVE.ConfigurationError, "Could not inspect routing-state pathname"
+            ):
+                NATIVE._state_entry_exists(state_path)
+
+    def test_state_cas_digest_progression_binds_write_remove_and_rollback(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        identity_guard = mock.Mock(spec=["assert_unchanged"])
+        original = self.valid_state()
+        original_digest = NATIVE._write_state(
+            state_path, original, identity_guard, None
+        )
+        replacement = self.valid_state("gpt-5.6-terra")
+
+        replacement_digest = NATIVE._write_state(
+            state_path, replacement, identity_guard, original_digest
+        )
+        self.assertEqual(
+            NATIVE._read_state_snapshot(state_path)[1], replacement_digest
+        )
+        NATIVE._remove_state(state_path, identity_guard, replacement_digest)
+        self.assertFalse(state_path.exists())
+        republished_digest = NATIVE._write_state(
+            state_path, replacement, identity_guard, None
+        )
+        rollback_digest = NATIVE._write_state(
+            state_path, original, identity_guard, republished_digest
+        )
+        self.assertEqual(rollback_digest, original_digest)
+        self.assertEqual(NATIVE._read_state_snapshot(state_path)[1], original_digest)
 
     def test_effective_project_override_is_reported_and_blocks_setup(self) -> None:
         self.run_script(
@@ -1543,6 +4421,206 @@ class NativeRoutingTests(unittest.TestCase):
         )
         self.assertEqual(state["executor"]["model"], "gpt-5.6-luna")
 
+    @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
+    def test_first_install_interrupt_before_state_rollback_compensates_forward(
+        self,
+    ) -> None:
+        self.assert_effective_state_rollback_interrupt_pairing(
+            update=False, after_state_commit=False
+        )
+
+    @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
+    def test_first_install_interrupt_after_state_rollback_keeps_prior_pair(self) -> None:
+        self.assert_effective_state_rollback_interrupt_pairing(
+            update=False, after_state_commit=True
+        )
+
+    @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
+    def test_update_interrupt_before_state_rollback_compensates_forward(self) -> None:
+        self.assert_effective_state_rollback_interrupt_pairing(
+            update=True, after_state_commit=False
+        )
+
+    @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
+    def test_update_interrupt_after_state_rollback_keeps_prior_pair(self) -> None:
+        self.assert_effective_state_rollback_interrupt_pairing(
+            update=True, after_state_commit=True
+        )
+
+    @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
+    def test_effective_state_rollback_compensation_failure_is_actionable(self) -> None:
+        base_config = {
+            "features": {
+                "multi_agent_v2": {"max_concurrent_threads_per_session": 5}
+            },
+            "unrelated": {"keep": True},
+        }
+        (self.home / ".fake-effective-config.json").write_text(
+            json.dumps(base_config), encoding="utf-8"
+        )
+        real_batch_write = NATIVE._batch_write
+        calls = 0
+
+        def batch_write(*args: object, **kwargs: object) -> dict[str, object]:
+            nonlocal calls
+            calls += 1
+            if calls < 3:
+                return real_batch_write(*args, **kwargs)
+            raise KeyboardInterrupt("forced compensation failure")
+
+        argv = [
+            str(self.installed_script),
+            "--codex-bin",
+            str(self.codex),
+            "--codex-home",
+            str(self.home),
+            "--allow-incompatible-client",
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "high",
+            "--apply",
+        ]
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(NATIVE, "_batch_write", side_effect=batch_write),
+            mock.patch.object(
+                NATIVE,
+                "_remove_state",
+                side_effect=KeyboardInterrupt("before state rollback"),
+            ),
+            mock.patch.object(sys, "stdout", io.StringIO()),
+            mock.patch.object(sys, "stderr", stderr),
+            mock.patch.dict(os.environ, self.fake_env()),
+        ):
+            result = NATIVE.main()
+
+        self.assertEqual(result, 2)
+        self.assertEqual(calls, 3)
+        self.assertIn("forward config compensation failed", stderr.getvalue())
+        self.assertIn("may be inconsistent", stderr.getvalue())
+        self.assertIn("Run status", stderr.getvalue())
+        self.assertEqual(self.read_fake_config(), base_config)
+        self.assertEqual(
+            NATIVE._read_state(self.home / NATIVE.STATE_FILENAME)["executor"]["model"],
+            "gpt-5.6-luna",
+        )
+
+    @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
+    def test_effective_compensation_rechecks_state_after_config_write(self) -> None:
+        base_config = {
+            "features": {
+                "multi_agent_v2": {"max_concurrent_threads_per_session": 5}
+            },
+            "unrelated": {"keep": True},
+        }
+        (self.home / ".fake-effective-config.json").write_text(
+            json.dumps(base_config), encoding="utf-8"
+        )
+        state_path = self.home / NATIVE.STATE_FILENAME
+        external_state = self.valid_state("gpt-5.6-sol")
+        external_bytes = (
+            json.dumps(external_state, indent=2, sort_keys=True) + "\n"
+        ).encode("utf-8")
+        real_batch_write = NATIVE._batch_write
+        calls = 0
+
+        def batch_write(*args: object, **kwargs: object) -> dict[str, object]:
+            nonlocal calls
+            calls += 1
+            result = real_batch_write(*args, **kwargs)
+            if calls == 3:
+                state_path.write_bytes(external_bytes)
+            return result
+
+        argv = [
+            str(self.installed_script),
+            "--codex-bin",
+            str(self.codex),
+            "--codex-home",
+            str(self.home),
+            "--allow-incompatible-client",
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "high",
+            "--apply",
+        ]
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(NATIVE, "_batch_write", side_effect=batch_write),
+            mock.patch.object(
+                NATIVE,
+                "_remove_state",
+                side_effect=KeyboardInterrupt("before state rollback"),
+            ),
+            mock.patch.object(sys, "stdout", io.StringIO()),
+            mock.patch.object(sys, "stderr", stderr),
+            mock.patch.dict(os.environ, self.fake_env()),
+        ):
+            result = NATIVE.main()
+
+        self.assertEqual(result, 2)
+        self.assertEqual(calls, 3)
+        self.assertIn("forward config compensation failed", stderr.getvalue())
+        self.assertIn("may be inconsistent", stderr.getvalue())
+        self.assertIn("Run status", stderr.getvalue())
+        self.assertNotIn("re-paired", stderr.getvalue())
+        self.assertEqual(state_path.read_bytes(), external_bytes)
+
+    @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
+    def test_effective_state_rollback_unknown_digest_is_actionable(self) -> None:
+        base_config = {
+            "features": {
+                "multi_agent_v2": {"max_concurrent_threads_per_session": 5}
+            },
+            "unrelated": {"keep": True},
+        }
+        (self.home / ".fake-effective-config.json").write_text(
+            json.dumps(base_config), encoding="utf-8"
+        )
+        state_path = self.home / NATIVE.STATE_FILENAME
+        unknown_state = self.valid_state("gpt-5.6-sol")
+
+        def publish_unknown_state(*_args: object, **_kwargs: object) -> None:
+            state_path.write_text(
+                json.dumps(unknown_state, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            raise KeyboardInterrupt("unknown rollback outcome")
+
+        argv = [
+            str(self.installed_script),
+            "--codex-bin",
+            str(self.codex),
+            "--codex-home",
+            str(self.home),
+            "--allow-incompatible-client",
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "high",
+            "--apply",
+        ]
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(NATIVE, "_remove_state", side_effect=publish_unknown_state),
+            mock.patch.object(sys, "stdout", io.StringIO()),
+            mock.patch.object(sys, "stderr", stderr),
+            mock.patch.dict(os.environ, self.fake_env()),
+        ):
+            result = NATIVE.main()
+
+        self.assertEqual(result, 2)
+        self.assertIn("matched neither the exact prior", stderr.getvalue())
+        self.assertIn("may be inconsistent", stderr.getvalue())
+        self.assertIn("Run status", stderr.getvalue())
+        self.assertEqual(self.read_fake_config(), base_config)
+        self.assertEqual(NATIVE._read_state(state_path), unknown_state)
+
     def test_effective_readback_rejects_unexpected_rollback_status(self) -> None:
         effective = {
             "features": {
@@ -1566,7 +4644,7 @@ class NativeRoutingTests(unittest.TestCase):
             return {"status": "unexpected", "version": "sha256:unknown"}
 
         argv = [
-            str(SCRIPT),
+            str(self.installed_script),
             "--codex-bin",
             str(self.codex),
             "--codex-home",
@@ -1583,6 +4661,7 @@ class NativeRoutingTests(unittest.TestCase):
             mock.patch.object(sys, "argv", argv),
             mock.patch.object(NATIVE, "_batch_write", side_effect=batch_write),
             mock.patch.object(sys, "stderr", stderr),
+            mock.patch.dict(os.environ, self.fake_env()),
         ):
             result = NATIVE.main()
 
@@ -1613,6 +4692,56 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertNotIn("automatic rollback failed", result.stderr)
         self.assertEqual(self.read_fake_config(), initial)
         self.assertFalse((self.home / NATIVE.STATE_FILENAME).exists())
+
+    def test_source_only_bootstrap_ignores_valid_plugin_local_bytecode(self) -> None:
+        control = self.root / "bytecode-control"
+        control.mkdir()
+        control_source = control / "victim.py"
+        control_source.write_text("value = 'source'\n", encoding="utf-8")
+        control_sentinel = self.root / "control-bytecode-executed"
+        control_malicious = self.root / "control-malicious.py"
+        control_malicious.write_text(
+            "from pathlib import Path\n"
+            f"Path({str(control_sentinel)!r}).write_text('executed', encoding='utf-8')\n",
+            encoding="utf-8",
+        )
+        control_cache = Path(importlib.util.cache_from_source(str(control_source)))
+        control_cache.parent.mkdir()
+        py_compile.compile(
+            str(control_malicious),
+            cfile=str(control_cache),
+            doraise=True,
+            invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH,
+        )
+        control_result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                f"import sys; sys.path.insert(0, {str(control)!r}); import victim",
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=20,
+            check=False,
+        )
+        self.assertEqual(control_result.returncode, 0, control_result.stderr)
+        self.assertTrue(control_sentinel.exists())
+
+        sentinels: list[Path] = []
+        for module_name in (
+            "external_cli_trust",
+            "external_credentials",
+            "plugin_identity",
+            "routing_state",
+        ):
+            source = self.installed_script.with_name(f"{module_name}.py")
+            sentinel = self.root / f"{module_name}-bytecode-executed"
+            self.write_unchecked_bytecode(source, sentinel, module_name)
+            sentinels.append(sentinel)
+
+        self.run_script("--executor-model", "gpt-5.6-luna")
+        self.assertTrue(all(not sentinel.exists() for sentinel in sentinels))
 
     def test_ok_overridden_rollback_failure_is_reported_truthfully(self) -> None:
         (self.home / ".fake-ok-overridden").touch()
@@ -1646,7 +4775,7 @@ class NativeRoutingTests(unittest.TestCase):
             return {"status": "unexpected", "version": "sha256:unknown"}
 
         argv = [
-            str(SCRIPT),
+            str(self.installed_script),
             "--codex-bin",
             str(self.codex),
             "--codex-home",
@@ -1668,6 +4797,7 @@ class NativeRoutingTests(unittest.TestCase):
             ),
             mock.patch.object(NATIVE, "_batch_write", side_effect=batch_write),
             mock.patch.object(sys, "stderr", stderr),
+            mock.patch.dict(os.environ, self.fake_env()),
         ):
             result = NATIVE.main()
 
@@ -1677,6 +4807,104 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertIn("unexpected rollback status", stderr.getvalue())
         feature = self.read_fake_config()["features"]["multi_agent_v2"]
         self.assertIn(NATIVE.MANAGED_MARKER, feature["usage_hint_text"])
+
+    @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
+    def test_state_interrupt_repropagates_only_after_config_rollback(self) -> None:
+        real_batch_write = NATIVE._batch_write
+        events: list[str] = []
+
+        def batch_write(*args: object, **kwargs: object) -> dict[str, object]:
+            events.append("config-write")
+            return real_batch_write(*args, **kwargs)
+
+        def interrupt_state_write(*_args: object, **_kwargs: object) -> str:
+            events.append("state-interrupt")
+            raise KeyboardInterrupt("forced pre-state interrupt")
+
+        argv = [
+            str(self.installed_script),
+            "--codex-bin",
+            str(self.codex),
+            "--codex-home",
+            str(self.home),
+            "--allow-incompatible-client",
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "high",
+            "--apply",
+        ]
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(NATIVE, "_batch_write", side_effect=batch_write),
+            mock.patch.object(NATIVE, "_write_state", side_effect=interrupt_state_write),
+            mock.patch.object(sys, "stdout", io.StringIO()),
+            mock.patch.object(sys, "stderr", io.StringIO()),
+            mock.patch.dict(os.environ, self.fake_env()),
+        ):
+            with self.assertRaisesRegex(KeyboardInterrupt, "forced pre-state"):
+                NATIVE.main()
+
+        self.assertEqual(events, ["config-write", "state-interrupt", "config-write"])
+        self.assertEqual(
+            self.read_fake_config(),
+            {
+                "features": {
+                    "multi_agent_v2": {"max_concurrent_threads_per_session": 5}
+                },
+                "unrelated": {"keep": True},
+            },
+        )
+        self.assertFalse((self.home / NATIVE.STATE_FILENAME).exists())
+
+    @unittest.skipUnless(os.name == "posix", "fake Codex fixture is executable on POSIX")
+    def test_state_interrupt_rollback_interrupt_is_actionable_error(self) -> None:
+        real_batch_write = NATIVE._batch_write
+        calls = 0
+
+        def batch_write(*args: object, **kwargs: object) -> dict[str, object]:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return real_batch_write(*args, **kwargs)
+            raise KeyboardInterrupt("forced rollback interrupt")
+
+        argv = [
+            str(self.installed_script),
+            "--codex-bin",
+            str(self.codex),
+            "--codex-home",
+            str(self.home),
+            "--allow-incompatible-client",
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "high",
+            "--apply",
+        ]
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(NATIVE, "_batch_write", side_effect=batch_write),
+            mock.patch.object(
+                NATIVE,
+                "_write_state",
+                side_effect=KeyboardInterrupt("forced pre-state interrupt"),
+            ),
+            mock.patch.object(sys, "stdout", io.StringIO()),
+            mock.patch.object(sys, "stderr", stderr),
+            mock.patch.dict(os.environ, self.fake_env()),
+        ):
+            result = NATIVE.main()
+
+        self.assertEqual(result, 2)
+        self.assertEqual(calls, 2)
+        self.assertIn("state persistence and automatic rollback both failed", stderr.getvalue())
+        self.assertIn("may still contain managed fields", stderr.getvalue())
+        self.assertIn("Run status before continuing", stderr.getvalue())
+        feature = self.read_fake_config()["features"]["multi_agent_v2"]
+        self.assertIn(NATIVE.MANAGED_MARKER, feature["usage_hint_text"])
+        self.assertFalse((self.home / NATIVE.STATE_FILENAME).exists())
 
     def test_custom_agent_route_and_optional_advisor(self) -> None:
         self.write_personal_agent("codex_orchestration_executor")
@@ -1738,7 +4966,7 @@ class NativeRoutingTests(unittest.TestCase):
         shadowed = subprocess.run(
             [
                 sys.executable,
-                str(SCRIPT),
+                str(self.installed_script),
                 "--codex-bin",
                 str(self.codex),
                 "--codex-home",
@@ -1756,6 +4984,7 @@ class NativeRoutingTests(unittest.TestCase):
             stderr=subprocess.PIPE,
             timeout=20,
             check=False,
+            env=self.fake_env(),
         )
         self.assertEqual(shadowed.returncode, 2)
         self.assertIn("Planner personal agent", shadowed.stderr)
@@ -1840,7 +5069,7 @@ class NativeRoutingTests(unittest.TestCase):
         initial = {
             "features": {"multi_agent_v2": {}},
             "plugins": {
-                NATIVE.PLUGIN_ID: {
+                self.plugin_id: {
                     "mcp_servers": {
                         "fable-advisor-python3": {"enabled": False},
                         "fable-advisor-python": {"enabled": True},
@@ -1871,7 +5100,7 @@ class NativeRoutingTests(unittest.TestCase):
         managed_mcp = state["managed"]["mcp"]
         self.assertEqual(sum(value is True for value in managed_mcp.values()), 1)
         self.assertTrue(managed_mcp["fable-advisor-python3"])
-        servers = self.read_fake_config()["plugins"][NATIVE.PLUGIN_ID]["mcp_servers"]
+        servers = self.read_fake_config()["plugins"][self.plugin_id]["mcp_servers"]
         self.assertEqual(
             sum(entry["enabled"] is True for entry in servers.values()), 1
         )
@@ -1887,7 +5116,7 @@ class NativeRoutingTests(unittest.TestCase):
             "--apply",
         )
         self.assertIn("Advisor: Claude Fable 5 high", moved.stdout)
-        moved_servers = self.read_fake_config()["plugins"][NATIVE.PLUGIN_ID][
+        moved_servers = self.read_fake_config()["plugins"][self.plugin_id][
             "mcp_servers"
         ]
         self.assertTrue(moved_servers["fable-advisor-python3"]["enabled"])
@@ -1923,7 +5152,7 @@ class NativeRoutingTests(unittest.TestCase):
                 "multi_agent_v2": {"max_concurrent_threads_per_session": 5}
             },
             "plugins": {
-                NATIVE.PLUGIN_ID: {
+                self.plugin_id: {
                     "mcp_servers": {
                         "fable-advisor-python3": {"enabled": False},
                         "fable-advisor-python": {"enabled": True},
@@ -1947,7 +5176,7 @@ class NativeRoutingTests(unittest.TestCase):
         )
         self.assertIn("Claude Fable 5 max", setup.stdout)
         config = self.read_fake_config()
-        servers = config["plugins"][NATIVE.PLUGIN_ID]["mcp_servers"]
+        servers = config["plugins"][self.plugin_id]["mcp_servers"]
         self.assertTrue(servers["fable-advisor-python3"]["enabled"])
         self.assertFalse(servers["fable-advisor-python"]["enabled"])
         self.assertNotIn("fable-advisor-py", servers)
@@ -1970,7 +5199,7 @@ class NativeRoutingTests(unittest.TestCase):
             "--apply",
         )
         self.assertIn("Advisor: none", update.stdout)
-        servers = self.read_fake_config()["plugins"][NATIVE.PLUGIN_ID]["mcp_servers"]
+        servers = self.read_fake_config()["plugins"][self.plugin_id]["mcp_servers"]
         self.assertTrue(all(not entry["enabled"] for entry in servers.values()))
 
         self.run_script("--disable", "--apply")
@@ -2028,6 +5257,12 @@ class NativeRoutingTests(unittest.TestCase):
             NATIVE.ConfigurationError, "low.*medium.*high.*xhigh.*max.*ultra"
         ):
             NATIVE.normalize_fable_effort("extreme")
+
+    def test_bytecode_write_suppression_is_transaction_scoped(self) -> None:
+        previous = sys.dont_write_bytecode
+        with NATIVE._suppress_bytecode_writes():
+            self.assertTrue(sys.dont_write_bytecode)
+        self.assertEqual(sys.dont_write_bytecode, previous)
 
     def test_fable_setup_rejects_effort_missing_from_installed_claude(self) -> None:
         self.claude.write_text(
@@ -2143,7 +5378,7 @@ class NativeRoutingTests(unittest.TestCase):
         shadowed = subprocess.run(
             [
                 sys.executable,
-                str(SCRIPT),
+                str(self.installed_script),
                 "--codex-bin",
                 str(self.codex),
                 "--codex-home",
@@ -2159,6 +5394,7 @@ class NativeRoutingTests(unittest.TestCase):
             stderr=subprocess.PIPE,
             timeout=20,
             check=False,
+            env=self.fake_env(),
         )
         self.assertEqual(shadowed.returncode, 2)
         self.assertIn("shadowed by a project role", shadowed.stderr)

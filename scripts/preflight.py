@@ -7,6 +7,7 @@ import argparse
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 from typing import NamedTuple
@@ -213,7 +214,14 @@ def quick_checks(root: Path, *, base_sha: str, head_sha: str | None) -> list[Che
 
 
 def _codex_available(root: Path) -> CheckResult:
-    return run_command("codex-available", ["codex", "--version"], root=root, timeout=15)
+    executable = shutil.which("codex")
+    if executable is None:
+        return CheckResult(
+            "codex-available", "FAIL", "could not start Codex: not found on PATH"
+        )
+    return run_command(
+        "codex-available", [executable, "--version"], root=root, timeout=15
+    )
 
 
 def full_local_checks(

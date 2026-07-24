@@ -24,6 +24,56 @@
       ],
       "cwd": ".",
       "enabled": false
+    },
+    "kimi-designer-python3": {
+      "command": "python3",
+      "args": [
+        "skills/codex-orchestration/scripts/kimi_designer_mcp.py"
+      ],
+      "cwd": ".",
+      "enabled": false
+    },
+    "kimi-designer-python": {
+      "command": "python",
+      "args": [
+        "skills/codex-orchestration/scripts/kimi_designer_mcp.py"
+      ],
+      "cwd": ".",
+      "enabled": false
+    },
+    "kimi-designer-py": {
+      "command": "py",
+      "args": [
+        "-3.11",
+        "skills/codex-orchestration/scripts/kimi_designer_mcp.py"
+      ],
+      "cwd": ".",
+      "enabled": false
+    },
+    "qwen-advisor-python3": {
+      "command": "python3",
+      "args": [
+        "skills/codex-orchestration/scripts/qwen_advisor_mcp.py"
+      ],
+      "cwd": ".",
+      "enabled": false
+    },
+    "qwen-advisor-python": {
+      "command": "python",
+      "args": [
+        "skills/codex-orchestration/scripts/qwen_advisor_mcp.py"
+      ],
+      "cwd": ".",
+      "enabled": false
+    },
+    "qwen-advisor-py": {
+      "command": "py",
+      "args": [
+        "-3.11",
+        "skills/codex-orchestration/scripts/qwen_advisor_mcp.py"
+      ],
+      "cwd": ".",
+      "enabled": false
     }
   }
 }

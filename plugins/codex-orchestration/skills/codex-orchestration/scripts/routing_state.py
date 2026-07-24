@@ -22,11 +22,43 @@ FABLE_SERVERS = frozenset(
         "fable-advisor-py",
     }
 )
+KIMI_MODEL = "kimi-code/k3"
+KIMI_EFFORTS = frozenset({"max"})
+KIMI_SERVERS = frozenset(
+    {
+        "kimi-designer-python3",
+        "kimi-designer-python",
+        "kimi-designer-py",
+    }
+)
+QWEN_MODEL = "qwen3.8-max-preview"
+QWEN_EFFORTS = frozenset({"native"})
+QWEN_REGION_CONFIG = {
+    "global": {
+        "endpoint": "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+        "credential_provider": "qwen-token-plan-global",
+    },
+    "china": {
+        "endpoint": "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+        "credential_provider": "qwen-token-plan-china",
+    },
+}
+QWEN_REGIONS = frozenset(QWEN_REGION_CONFIG)
+QWEN_SERVERS = frozenset(
+    {
+        "qwen-advisor-python3",
+        "qwen-advisor-python",
+        "qwen-advisor-py",
+    }
+)
+BUNDLED_MCP_SERVERS = FABLE_SERVERS | KIMI_SERVERS | QWEN_SERVERS
+PLUGIN_NAME = "codex-orchestration"
 
-_SCHEMA_POLICY_PAIRS = {1: 1, 2: 2, 3: 3, 4: 4}
+_SCHEMA_POLICY_PAIRS = {1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7}
 _MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+/@-]{0,199}$")
 _AGENT_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 _EFFORT_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+_MARKETPLACE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _BASE_TOP_LEVEL_KEYS = frozenset(
     {
         "schema",
@@ -52,6 +84,26 @@ class RoutingStateError(ValueError):
 def _require(condition: bool, detail: str) -> None:
     if not condition:
         raise RoutingStateError(detail)
+
+
+def validate_plugin_id(value: Any) -> str:
+    """Return one exact Codex-Orchestration plugin namespace or fail closed."""
+
+    _require(type(value) is str, "plugin identity must be a string")
+    _require("\x00" not in value, "plugin identity contains a control character")
+    _require(
+        all(ord(character) >= 0x20 and ord(character) != 0x7F for character in value),
+        "plugin identity contains a control character",
+    )
+    parts = value.split("@")
+    _require(len(parts) == 2, "plugin identity must contain exactly one marketplace")
+    plugin_name, marketplace_name = parts
+    _require(plugin_name == PLUGIN_NAME, "plugin identity owner is invalid")
+    _require(
+        _MARKETPLACE_RE.fullmatch(marketplace_name) is not None,
+        "plugin marketplace identity is invalid",
+    )
+    return value
 
 
 def _has_marker_first_line(value: Any) -> bool:
@@ -135,6 +187,46 @@ def _validate_route(route: Any, *, seat: str, schema: int) -> str:
             type(route["server"]) is str and route["server"] in FABLE_SERVERS,
             "Fable server is unsupported",
         )
+    elif kind == "kimi_cli":
+        _require(
+            seat == "designer" and schema >= 5,
+            f"{seat} cannot use Kimi CLI in schema {schema}",
+        )
+        _require(
+            set(route) == {"kind", "model", "effort", "server"},
+            f"{seat} Kimi CLI route has the wrong shape",
+        )
+        _require(route["model"] == KIMI_MODEL, "Kimi CLI model is not pinned")
+        _require(
+            type(route["effort"]) is str and route["effort"] in KIMI_EFFORTS,
+            "Kimi CLI effort is unsupported",
+        )
+        _require(
+            type(route["server"]) is str and route["server"] in KIMI_SERVERS,
+            "Kimi Designer server is unsupported",
+        )
+    elif kind == "qwen_cli":
+        _require(
+            seat == "advisor" and schema >= 6,
+            f"{seat} cannot use Qwen CLI in schema {schema}",
+        )
+        _require(
+            set(route) == {"kind", "model", "effort", "region", "server"},
+            f"{seat} Qwen CLI route has the wrong shape",
+        )
+        _require(route["model"] == QWEN_MODEL, "Qwen CLI model is not pinned")
+        _require(
+            type(route["effort"]) is str and route["effort"] in QWEN_EFFORTS,
+            "Qwen CLI effort is unsupported",
+        )
+        _require(
+            type(route["region"]) is str and route["region"] in QWEN_REGIONS,
+            "Qwen CLI region is unsupported",
+        )
+        _require(
+            type(route["server"]) is str and route["server"] in QWEN_SERVERS,
+            "Qwen Advisor server is unsupported",
+        )
     else:
         raise RoutingStateError(f"{seat} route kind is unsupported")
     return kind
@@ -151,7 +243,11 @@ def _validate_route_separation(planner: Any, advisor: Any) -> None:
     ) or (
         planner_kind == advisor_kind == "agent"
         and planner["agent"] == advisor["agent"]
-    ) or planner_kind == advisor_kind == "fable"
+    ) or planner_kind == advisor_kind == "fable" or (
+        planner_kind == "model"
+        and advisor_kind == "qwen_cli"
+        and planner["model"] == advisor["model"]
+    )
     _require(not same_route, "Planner and Advisor routes are not independent")
 
 
@@ -203,7 +299,7 @@ def _validate_scalar_conversion(state: dict[str, Any], managed: dict[str, Any]) 
 
 
 def validate_routing_state(value: Any) -> dict[str, Any]:
-    """Validate and return one exact, complete persisted schema 1 through 4.
+    """Validate and return one exact, complete persisted schema 1 through 7.
 
     Unknown keys and future extensions are rejected intentionally. Callers must
     perform their own secure file read and any caller-specific path/seat checks.
@@ -227,6 +323,8 @@ def validate_routing_state(value: Any) -> dict[str, Any]:
         expected_top.add("planner")
     if schema >= 4:
         expected_top.add("designer")
+    if schema >= 7:
+        expected_top.add("plugin_id")
     _require(set(value) == expected_top, "top-level state shape is unsupported")
     _require(value["managed_by"] == "codex-orchestration", "state owner is invalid")
     _require(
@@ -235,6 +333,8 @@ def validate_routing_state(value: Any) -> dict[str, Any]:
         and "\x00" not in value["config_file"],
         "config path is invalid",
     )
+    if schema >= 7:
+        validate_plugin_id(value["plugin_id"])
 
     _validate_route(value["executor"], seat="executor", schema=schema)
     planner = value.get("planner")
@@ -247,8 +347,8 @@ def validate_routing_state(value: Any) -> dict[str, Any]:
     if designer is not None:
         designer_kind = _validate_route(designer, seat="designer", schema=schema)
         _require(
-            designer_kind == "model",
-            "persistent Designer must use a direct model route",
+            designer_kind in {"model", "kimi_cli"},
+            "persistent Designer must use a direct model or audited Kimi CLI route",
         )
     _validate_route_separation(planner, advisor)
 
@@ -297,7 +397,7 @@ def validate_routing_state(value: Any) -> dict[str, Any]:
         _require(type(previous_mcp) is dict, "MCP restore state must be an object")
         _require(
             set(managed_mcp) == set(previous_mcp)
-            and set(managed_mcp).issubset(FABLE_SERVERS),
+            and set(managed_mcp).issubset(BUNDLED_MCP_SERVERS),
             "MCP state has unsupported or unpaired servers",
         )
         _require(
@@ -310,14 +410,17 @@ def validate_routing_state(value: Any) -> dict[str, Any]:
     else:
         true_servers = []
 
-    if fable_routes:
-        selected_server = fable_routes[0]["server"]
-        _require(
-            true_servers == [selected_server],
-            "MCP state must enable exactly the selected Fable launcher",
-        )
-    else:
-        _require(not true_servers, "MCP state enables a launcher without a Fable seat")
+    selected_servers = {
+        route["server"] for route in fable_routes
+    }
+    if type(advisor) is dict and advisor.get("kind") == "qwen_cli":
+        selected_servers.add(advisor["server"])
+    if type(designer) is dict and designer.get("kind") == "kimi_cli":
+        selected_servers.add(designer["server"])
+    _require(
+        set(true_servers) == selected_servers,
+        "MCP state must enable exactly the selected bundled launchers",
+    )
 
     _validate_scalar_conversion(value, managed)
     return value

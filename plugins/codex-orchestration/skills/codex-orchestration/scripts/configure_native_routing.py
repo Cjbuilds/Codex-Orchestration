@@ -10,11 +10,19 @@ readback verification.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import ctypes
+import errno
+import hashlib
+import io
+import importlib.abc
+import importlib.util
 import json
 import os
 from pathlib import Path
 import queue
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -24,14 +32,141 @@ import threading
 import time
 from typing import Any
 
-from routing_state import (
-    FABLE_EFFORTS,
-    FABLE_MODEL,
-    MANAGED_MARKER,
-    ROUTING_TOOL_NAMESPACE,
-    RoutingStateError,
-    validate_routing_state,
+
+_LOCAL_SOURCE_MODULES = frozenset(
+    {
+        "external_cli_trust",
+        "external_credentials",
+        "fable_advisor_mcp",
+        "kimi_designer_mcp",
+        "plugin_identity",
+        "qwen_advisor_mcp",
+        "routing_state",
+    }
 )
+_LOCAL_SOURCE_ROOT = Path(__file__).resolve().parent
+_LOCAL_SOURCE_ATTESTATIONS: dict[str, dict[str, Any]] = {}
+_MAX_LOCAL_SOURCE_BYTES = 4 * 1024 * 1024
+
+
+def _source_identity(info: os.stat_result) -> tuple[int, int]:
+    return int(info.st_dev), int(info.st_ino)
+
+
+def _read_local_source(path: Path) -> tuple[bytes, dict[str, Any]]:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    try:
+        before = path.lstat()
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise ImportError("Plugin-local source could not be opened safely.") from exc
+    try:
+        opened = os.fstat(descriptor)
+        reparse = bool(
+            getattr(before, "st_file_attributes", 0)
+            & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        )
+        if (
+            reparse
+            or not stat.S_ISREG(before.st_mode)
+            or not stat.S_ISREG(opened.st_mode)
+            or before.st_nlink != 1
+            or opened.st_nlink != 1
+            or _source_identity(before) != _source_identity(opened)
+            or opened.st_size > _MAX_LOCAL_SOURCE_BYTES
+        ):
+            raise ImportError("Plugin-local source identity is unsafe.")
+        payload = bytearray()
+        while True:
+            chunk = os.read(descriptor, 1024 * 128)
+            if not chunk:
+                break
+            payload.extend(chunk)
+            if len(payload) > _MAX_LOCAL_SOURCE_BYTES:
+                raise ImportError("Plugin-local source is too large.")
+        after = path.lstat()
+        if (
+            _source_identity(after) != _source_identity(opened)
+            or after.st_mode != opened.st_mode
+            or after.st_size != opened.st_size
+            or after.st_nlink != opened.st_nlink
+        ):
+            raise ImportError("Plugin-local source changed while it was read.")
+    finally:
+        os.close(descriptor)
+    source = bytes(payload)
+    return source, {
+        "path": str(path),
+        "device": int(opened.st_dev),
+        "inode": int(opened.st_ino),
+        "size": len(source),
+        "sha256": hashlib.sha256(source).hexdigest(),
+    }
+
+
+class _SourceOnlyLoader(importlib.abc.Loader):
+    def __init__(self, name: str, path: Path) -> None:
+        self.name = name
+        self.path = path
+
+    def create_module(self, spec: Any) -> None:
+        return None
+
+    def exec_module(self, module: Any) -> None:
+        source, attestation = _read_local_source(self.path)
+        code = compile(source, str(self.path), "exec", dont_inherit=True)
+        module.__file__ = str(self.path)
+        module.__cached__ = None
+        exec(code, module.__dict__)
+        _LOCAL_SOURCE_ATTESTATIONS[self.name] = attestation
+
+
+class _SourceOnlyFinder(importlib.abc.MetaPathFinder):
+    def find_spec(
+        self, fullname: str, path: Any = None, target: Any = None
+    ) -> Any:
+        del path, target
+        if fullname not in _LOCAL_SOURCE_MODULES:
+            return None
+        source = _LOCAL_SOURCE_ROOT / f"{fullname}.py"
+        return importlib.util.spec_from_loader(
+            fullname,
+            _SourceOnlyLoader(fullname, source),
+            origin=str(source),
+        )
+
+
+@contextlib.contextmanager
+def _source_only_local_imports():
+    finder = _SourceOnlyFinder()
+    previous_dont_write = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    sys.meta_path.insert(0, finder)
+    try:
+        yield
+    finally:
+        with contextlib.suppress(ValueError):
+            sys.meta_path.remove(finder)
+        sys.dont_write_bytecode = previous_dont_write
+
+
+with _source_only_local_imports():
+    import external_credentials
+    import plugin_identity
+    from routing_state import (
+        BUNDLED_MCP_SERVERS,
+        FABLE_EFFORTS,
+        FABLE_MODEL,
+        KIMI_MODEL,
+        MANAGED_MARKER,
+        QWEN_MODEL,
+        QWEN_REGION_CONFIG,
+        QWEN_REGIONS,
+        ROUTING_TOOL_NAMESPACE,
+        RoutingStateError,
+        validate_routing_state,
+    )
 
 try:
     import tomllib
@@ -39,11 +174,11 @@ except ModuleNotFoundError as exc:  # pragma: no cover - Python < 3.11
     raise SystemExit("Python 3.11 or newer is required (missing tomllib).") from exc
 
 
-POLICY_VERSION = 4
-STATE_SCHEMA = 4
+POLICY_VERSION = 7
+STATE_SCHEMA = 7
 STATE_FILENAME = ".codex-orchestration-routing.json"
 PROBE_VALUE = "CODEX_ORCHESTRATION_CAPABILITY_PROBE"
-PLUGIN_ID = "codex-orchestration@codex-orchestration"
+LEGACY_PLUGIN_ID = plugin_identity.LEGACY_PLUGIN_ID
 FABLE_DEFAULT_EFFORT = "high"
 FABLE_EFFORT_CHOICES = ("low", "medium", "high", "xhigh", "max")
 FABLE_EFFORT_ALIASES = {"ultra": "max"}
@@ -51,6 +186,16 @@ FABLE_SERVERS = {
     "fable-advisor-python3": ("python3", []),
     "fable-advisor-python": ("python", []),
     "fable-advisor-py": ("py", ["-3.11"]),
+}
+KIMI_SERVERS = {
+    "kimi-designer-python3": ("python3", []),
+    "kimi-designer-python": ("python", []),
+    "kimi-designer-py": ("py", ["-3.11"]),
+}
+QWEN_SERVERS = {
+    "qwen-advisor-python3": ("python3", []),
+    "qwen-advisor-python": ("python", []),
+    "qwen-advisor-py": ("py", ["-3.11"]),
 }
 RPC_TIMEOUT_SECONDS = 20
 PROBE_TIMEOUT_SECONDS = 15
@@ -64,10 +209,96 @@ CUSTOM_AGENT_MANAGED_MARKER = (
     "# Managed by codex-orchestration. Standalone custom agent v2."
 )
 MISSING = object()
+EXECUTING_PLUGIN_ROOT = Path(__file__).resolve().parents[3]
 
 
 class ConfigurationError(RuntimeError):
     pass
+
+
+class StateTransactionIndeterminateError(ConfigurationError):
+    pass
+
+
+@contextlib.contextmanager
+def _suppress_bytecode_writes():
+    """Load optional plugin modules from source without reading local bytecode."""
+
+    with _source_only_local_imports():
+        yield
+
+
+@contextlib.contextmanager
+def _transaction_directory_lock(root: Path):
+    """Serialize one native-routing transaction per effective CODEX_HOME."""
+
+    if os.name == "posix":
+        try:
+            import fcntl
+        except ImportError as exc:  # pragma: no cover - POSIX always provides it
+            raise ConfigurationError("POSIX transaction locking is unavailable.") from exc
+        flags = os.O_RDONLY
+        if hasattr(os, "O_DIRECTORY"):
+            flags |= os.O_DIRECTORY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(root, flags)
+        locked = False
+        try:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+            except BlockingIOError as exc:
+                raise ConfigurationError(
+                    "Another Codex-Orchestration native-routing transaction is "
+                    "active; wait for it to finish and retry."
+                ) from exc
+            yield
+        finally:
+            try:
+                if locked:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
+        return
+    if os.name == "nt":  # pragma: no cover - exercised on Windows hosts
+        import ctypes
+        from ctypes import wintypes
+
+        lock_identity = os.path.normcase(os.path.realpath(root))
+        name_hash = hashlib.sha256(lock_identity.encode("utf-8")).hexdigest()
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.argtypes = (
+            ctypes.c_void_p,
+            wintypes.BOOL,
+            wintypes.LPCWSTR,
+        )
+        kernel32.CreateMutexW.restype = wintypes.HANDLE
+        kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        kernel32.ReleaseMutex.argtypes = (wintypes.HANDLE,)
+        kernel32.ReleaseMutex.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        mutex = kernel32.CreateMutexW(
+            None, False, f"Global\\CodexOrchestrationNativeRouting-{name_hash}"
+        )
+        if not mutex:
+            raise ConfigurationError("Could not create the Windows transaction mutex.")
+        wait_result = kernel32.WaitForSingleObject(mutex, 0)
+        if wait_result not in {0x00000000, 0x00000080}:
+            kernel32.CloseHandle(mutex)
+            raise ConfigurationError(
+                "Another Codex-Orchestration native-routing transaction is active; "
+                "wait for it to finish and retry."
+            )
+        try:
+            yield
+        finally:
+            kernel32.ReleaseMutex(mutex)
+            kernel32.CloseHandle(mutex)
+        return
+    raise ConfigurationError(f"Unsupported transaction-locking platform: {os.name}.")
 
 
 def parse_args() -> argparse.Namespace:
@@ -88,6 +319,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     action.add_argument("--disable", action="store_true")
+    action.add_argument(
+        "--prepare-qwen",
+        action="store_true",
+        help=(
+            "Install the stable OS-credential helper for Qwen Advisor and print "
+            "the trusted-terminal enrollment command."
+        ),
+    )
     parser.add_argument(
         "--require-effective",
         action="store_true",
@@ -131,13 +370,30 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use the bundled Claude Fable 5 advisor through Claude Code.",
     )
+    advisor.add_argument(
+        "--advisor-qwen",
+        action="store_true",
+        help="Use Qwen 3.8 Max Preview as a sealed Token Plan API Advisor.",
+    )
     parser.add_argument(
         "--advisor-effort",
         default="auto",
         help="Exact supported advisor effort, or auto.",
     )
+    parser.add_argument(
+        "--qwen-region",
+        choices=tuple(sorted(QWEN_REGIONS)),
+        default="global",
+        help="Alibaba plan region for --advisor-qwen (default: global).",
+    )
 
-    parser.add_argument("--designer-model", help="Optional exact designer model ID.")
+    designer = parser.add_mutually_exclusive_group()
+    designer.add_argument("--designer-model", help="Optional exact designer model ID.")
+    designer.add_argument(
+        "--designer-kimi",
+        action="store_true",
+        help="Use the installed Kimi Code subscription as K3 Designer through ACP.",
+    )
     parser.add_argument(
         "--designer-effort",
         default="auto",
@@ -190,7 +446,9 @@ def _validate_args(args: argparse.Namespace) -> None:
             args.advisor_model,
             args.advisor_agent,
             args.advisor_fable,
+            args.advisor_qwen,
             args.designer_model,
+            args.designer_kimi,
             args.executor_effort != "auto",
             args.planner_effort != "auto",
             args.advisor_effort != "auto",
@@ -201,6 +459,7 @@ def _validate_args(args: argparse.Namespace) -> None:
         ("--status", args.status),
         ("--repair", args.repair),
         ("--disable", args.disable),
+        ("--prepare-qwen", args.prepare_qwen),
     ):
         if selected and seat_settings:
             raise ConfigurationError(f"{action} does not accept seat settings.")
@@ -210,7 +469,15 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ConfigurationError(
             "--repair cannot be combined with setup replacement or model controls."
         )
-    if not args.status and not args.repair and not args.disable and not (
+    if args.prepare_qwen and (
+        args.replace_existing_policy
+        or args.confirm_unlisted_models
+        or args.allow_incompatible_client
+    ):
+        raise ConfigurationError(
+            "--prepare-qwen does not accept routing replacement or client controls."
+        )
+    if not args.status and not args.repair and not args.disable and not args.prepare_qwen and not (
         args.executor_model or args.executor_agent
     ):
         raise ConfigurationError(
@@ -233,10 +500,19 @@ def _validate_args(args: argparse.Namespace) -> None:
         normalize_fable_effort(args.planner_effort)
     if args.advisor_fable:
         normalize_fable_effort(args.advisor_effort)
+    if args.advisor_qwen and args.advisor_effort not in {"auto", "native"}:
+        raise ConfigurationError(
+            "Qwen 3.8 Max Preview uses provider-native reasoning; omit "
+            "--advisor-effort or use native."
+        )
+    if not (args.advisor_qwen or args.prepare_qwen) and args.qwen_region != "global":
+        raise ConfigurationError("--qwen-region requires --advisor-qwen or --prepare-qwen.")
     if args.planner_fable and args.advisor_fable:
         raise ConfigurationError(
             "Planner and Advisor routes must be distinct; both cannot use Claude Fable 5."
         )
+    if args.designer_kimi and args.designer_effort not in {"auto", "max"}:
+        raise ConfigurationError("Kimi K3 Designer supports only max effort.")
     for label, value, pattern in (
         ("executor model", args.executor_model, MODEL_RE),
         ("planner model", args.planner_model, MODEL_RE),
@@ -410,7 +686,7 @@ class AppServer:
                     "clientInfo": {
                         "name": "codex_orchestration_installer",
                         "title": "Codex Orchestration Installer",
-                        "version": "0.8.0",
+                        "version": "0.9.3",
                     },
                     "capabilities": {"experimentalApi": True},
                 },
@@ -580,11 +856,17 @@ def snapshot_edit(key_path: str, saved: dict[str, Any]) -> dict[str, Any] | None
     }
 
 
-def fable_key_path(server: str) -> str:
+def mcp_key_path(plugin_id: str, server: str) -> str:
     return (
-        f"plugins.{json.dumps(PLUGIN_ID)}.mcp_servers."
+        f"plugins.{json.dumps(plugin_id)}.mcp_servers."
         f"{json.dumps(server)}.enabled"
     )
+
+
+def _state_plugin_id(state: dict[str, Any]) -> str:
+    if state["schema"] >= 7:
+        return state["plugin_id"]
+    return LEGACY_PLUGIN_ID
 
 
 def validate_planning_routes(
@@ -603,19 +885,26 @@ def validate_planning_routes(
     ) or (
         planner_kind == advisor_kind == "agent"
         and planner.get("agent") == advisor.get("agent")
-    ) or planner_kind == advisor_kind == "fable"
+    ) or planner_kind == advisor_kind == "fable" or (
+        planner_kind == "model"
+        and advisor_kind == "qwen_cli"
+        and planner.get("model") == advisor.get("model")
+    )
     if identical:
         raise ConfigurationError(
             "Planner and Advisor routes must be distinct (different direct model IDs, "
-            "different custom-agent names, and at most one Claude Fable 5 seat)."
+            "different custom-agent names, at most one Claude Fable 5 seat, and "
+            "no direct Planner duplicate of the sealed Qwen Advisor)."
         )
 
 
-def _read_state(path: Path) -> dict[str, Any] | None:
+def _read_state_snapshot(path: Path) -> tuple[dict[str, Any] | None, str | None]:
+    """Return validated state and the digest of its exact observed bytes."""
+
     try:
         info = path.lstat()
     except FileNotFoundError:
-        return None
+        return None, None
     except OSError as exc:
         raise ConfigurationError(f"Could not inspect routing state {path}: {exc}") from exc
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
@@ -623,13 +912,232 @@ def _read_state(path: Path) -> dict[str, Any] | None:
     if info.st_nlink != 1:
         raise ConfigurationError(f"Routing state has multiple hard links: {path}")
     try:
-        state = json.loads(path.read_text(encoding="utf-8"))
+        payload = path.read_bytes()
+        state = json.loads(payload.decode("utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ConfigurationError(f"Could not read routing state {path}: {exc}") from exc
     try:
-        return validate_routing_state(state)
+        validated = validate_routing_state(state)
     except RoutingStateError as exc:
         raise ConfigurationError("Saved routing state is invalid.") from exc
+    return validated, hashlib.sha256(payload).hexdigest()
+
+
+def _read_state(path: Path) -> dict[str, Any] | None:
+    state, _ = _read_state_snapshot(path)
+    return state
+
+
+def _state_entry_exists(path: Path) -> bool:
+    """Return whether the pathname entry exists without following its target."""
+
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise ConfigurationError(
+            f"Could not inspect routing-state pathname {path}: {exc}"
+        ) from exc
+    return True
+
+
+def _assert_state_digest(path: Path, expected_digest: str | None) -> None:
+    _, observed_digest = _read_state_snapshot(path)
+    if observed_digest != expected_digest:
+        raise ConfigurationError(
+            "Saved routing state changed concurrently; refusing state publication."
+        )
+
+
+def _rename_noreplace(src: Path, dst: Path) -> None:
+    """Atomically consume *src* only when *dst* does not exist.
+
+    State transactions use same-directory paths, which keeps the operation on
+    one filesystem.  POSIX ``rename`` is deliberately not a fallback because
+    it replaces an existing destination.
+    """
+
+    src = Path(src)
+    dst = Path(dst)
+    if os.path.abspath(src.parent) != os.path.abspath(dst.parent):
+        raise OSError(
+            errno.EXDEV,
+            "atomic no-replace rename requires paths in the same directory",
+            str(src),
+            None,
+            str(dst),
+        )
+
+    if sys.platform == "win32":
+        try:
+            # On Windows Python's os.rename maps to a native rename that fails
+            # when the destination exists; unlike os.replace, it never opts in
+            # to replacement.
+            os.rename(src, dst)
+        except OSError as exc:
+            if exc.errno == errno.EEXIST or getattr(exc, "winerror", None) in {
+                80,  # ERROR_FILE_EXISTS
+                183,  # ERROR_ALREADY_EXISTS
+            }:
+                raise FileExistsError(
+                    errno.EEXIST, os.strerror(errno.EEXIST), str(dst)
+                ) from exc
+            raise
+        return
+
+    if sys.platform.startswith("linux"):
+        symbol_name = "renameat2"
+        flags = 1  # RENAME_NOREPLACE
+        arguments = (-100, os.fsencode(src), -100, os.fsencode(dst), flags)
+    elif sys.platform == "darwin":
+        symbol_name = "renamex_np"
+        flags = 0x00000004  # RENAME_EXCL
+        arguments = (os.fsencode(src), os.fsencode(dst), flags)
+    else:
+        raise ConfigurationError(
+            f"Atomic no-replace rename is unsupported on {sys.platform}."
+        )
+
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        rename = getattr(libc, symbol_name)
+    except (OSError, AttributeError) as exc:
+        raise ConfigurationError(
+            f"Atomic no-replace rename is unavailable on {sys.platform}."
+        ) from exc
+    rename.restype = ctypes.c_int
+    if symbol_name == "renameat2":
+        rename.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+    else:
+        rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+
+    ctypes.set_errno(0)
+    if rename(*arguments) == 0:
+        return
+    error = ctypes.get_errno()
+    if error == errno.EEXIST:
+        raise FileExistsError(error, os.strerror(error), str(dst))
+    unsupported = {errno.ENOSYS, errno.EINVAL}
+    if hasattr(errno, "EOPNOTSUPP"):
+        unsupported.add(errno.EOPNOTSUPP)
+    if error in unsupported:
+        raise ConfigurationError(
+            f"Atomic no-replace rename is unsupported by this {sys.platform} "
+            f"filesystem or kernel: {os.strerror(error)}."
+        )
+    raise OSError(error, os.strerror(error), str(src), None, str(dst))
+
+
+def _private_state_capture_path(path: Path) -> Path:
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".cas-backup", dir=path.parent
+    )
+    os.close(descriptor)
+    captured = Path(temporary)
+    captured.unlink()
+    return captured
+
+
+def _restore_captured_state(
+    path: Path, captured: Path, message: str, cause: BaseException
+) -> None:
+    """Restore by no-overwrite creation or retain a diagnosed recovery artifact."""
+
+    try:
+        _, captured_digest = _read_state_snapshot(captured)
+    except BaseException as exc:
+        raise StateTransactionIndeterminateError(
+            f"{message} Could not establish the captured recovery digest; state "
+            "is indeterminate. Run status before continuing."
+        ) from exc
+    try:
+        _rename_noreplace(captured, path)
+    except FileExistsError:
+        raise ConfigurationError(
+            f"{message} A newer routing-state pathname was preserved; captured "
+            f"bytes remain at {captured}."
+        ) from cause
+    except BaseException as exc:
+        try:
+            _, canonical_digest = _read_state_snapshot(path)
+            _, remaining_capture_digest = _read_state_snapshot(captured)
+        except BaseException as read_exc:
+            raise StateTransactionIndeterminateError(
+                f"{message} Restoration outcome is indeterminate; recovery artifacts "
+                "were preserved. Run status before continuing."
+            ) from read_exc
+        if (
+            canonical_digest == captured_digest
+            and remaining_capture_digest is None
+        ):
+            raise ConfigurationError(message) from cause
+        raise ConfigurationError(
+            f"{message} Automatic no-overwrite restoration failed; captured bytes "
+            f"remain at {captured}: {exc}"
+        ) from cause
+    raise ConfigurationError(message) from cause
+
+
+def _reconcile_state_capture(
+    path: Path,
+    captured: Path,
+    expected_digest: str,
+    cause: BaseException,
+) -> None:
+    try:
+        _, canonical_digest = _read_state_snapshot(path)
+        _, captured_digest = _read_state_snapshot(captured)
+    except BaseException as read_exc:
+        raise StateTransactionIndeterminateError(
+            "Routing-state capture outcome is indeterminate; canonical and recovery "
+            "paths were preserved. Run status before continuing."
+        ) from read_exc
+    if canonical_digest is None and captured_digest == expected_digest:
+        return
+    if canonical_digest == expected_digest and captured_digest is None:
+        if not isinstance(cause, Exception):
+            raise cause
+        raise ConfigurationError(
+            "Saved routing state changed concurrently; refusing state publication."
+        ) from cause
+    raise StateTransactionIndeterminateError(
+        "Saved routing state changed concurrently; capture matched neither a "
+        "completed nor a precommit move. All paths were preserved. Run status "
+        "before continuing."
+    ) from cause
+
+
+def _capture_expected_state(
+    path: Path, captured: Path, expected_digest: str
+) -> None:
+    """Move into a caller-owned capture pathname and validate exact captured bytes."""
+
+    try:
+        _rename_noreplace(path, captured)
+    except FileExistsError as exc:
+        raise ConfigurationError(
+            "Saved routing state changed concurrently; refusing state publication."
+        ) from exc
+    except BaseException as exc:
+        _reconcile_state_capture(path, captured, expected_digest, exc)
+    try:
+        _assert_state_digest(captured, expected_digest)
+    except (ConfigurationError, OSError) as exc:
+        _restore_captured_state(
+            path,
+            captured,
+            "Saved routing state changed concurrently; refusing state publication.",
+            exc,
+        )
+    except BaseException as exc:
+        _reconcile_state_capture(path, captured, expected_digest, exc)
 
 
 def _validate_state_config(state: dict[str, Any] | None, config_path: Path) -> None:
@@ -644,15 +1152,47 @@ def _validate_state_config(state: dict[str, Any] | None, config_path: Path) -> N
         )
 
 
-def _write_state(path: Path, state: dict[str, Any]) -> None:
+def _fsync_directory(path: Path) -> None:
+    if sys.platform == "win32":
+        # Python does not expose a supported directory-fsync handle on Windows.
+        # Preserve the prior best-effort behavior instead of warning on every
+        # successful Windows state transaction.
+        return
+    directory_fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _safe_warning(*parts: object) -> None:
+    """Best-effort post-commit diagnostic that can never change the outcome."""
+
+    try:
+        sys.stderr.write("WARNING: " + "".join(str(part) for part in parts) + "\n")
+        sys.stderr.flush()
+    except BaseException:
+        pass
+
+
+def _write_state(
+    path: Path,
+    state: dict[str, Any],
+    identity_guard: plugin_identity.PluginIdentityGuard,
+    expected_digest: str | None,
+) -> str:
+    identity_guard.assert_unchanged("routing-state publication")
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists() or path.is_symlink():
-        _read_state(path)
     payload = json.dumps(state, indent=2, sort_keys=True) + "\n"
+    payload_bytes = payload.encode("utf-8")
+    payload_digest = hashlib.sha256(payload_bytes).hexdigest()
     fd, temporary = tempfile.mkstemp(
         prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
     )
     temp_path = Path(temporary)
+    captured: Path | None = None
+    committed = False
+    preserve_transaction_evidence = False
     try:
         fchmod = getattr(os, "fchmod", None)
         if callable(fchmod):
@@ -661,37 +1201,226 @@ def _write_state(path: Path, state: dict[str, Any]) -> None:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temp_path, path)
-        try:
-            directory_fd = os.open(path.parent, os.O_RDONLY)
-        except OSError:
-            directory_fd = None
-        if directory_fd is not None:
+        if expected_digest is None:
             try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+                _rename_noreplace(temp_path, path)
+            except FileExistsError as exc:
+                raise ConfigurationError(
+                    "Saved routing state changed concurrently; refusing state "
+                    "publication."
+                ) from exc
+            except BaseException as exc:
+                try:
+                    _, canonical_digest = _read_state_snapshot(path)
+                    _, remaining_temp_digest = _read_state_snapshot(temp_path)
+                except BaseException as read_exc:
+                    raise StateTransactionIndeterminateError(
+                        "Routing-state publication outcome is indeterminate; state "
+                        "paths were preserved. Run status before continuing."
+                    ) from read_exc
+                if (
+                    canonical_digest == payload_digest
+                    and remaining_temp_digest is None
+                ):
+                    committed = True
+                    _safe_warning(
+                        "routing state publication committed despite an interrupted "
+                        "atomic rename: ",
+                        exc,
+                    )
+                elif canonical_digest is None and remaining_temp_digest == payload_digest:
+                    raise
+                else:
+                    raise StateTransactionIndeterminateError(
+                        "Routing-state publication matched neither a completed nor a "
+                        "precommit move; state paths were preserved. Run status before "
+                        "continuing."
+                    ) from exc
+            else:
+                committed = True
+        else:
+            captured = _private_state_capture_path(path)
+            try:
+                _capture_expected_state(path, captured, expected_digest)
+            except StateTransactionIndeterminateError:
+                raise
+            except (ConfigurationError, OSError):
+                raise
+            except BaseException as exc:
+                _reconcile_state_capture(path, captured, expected_digest, exc)
+            try:
+                _rename_noreplace(temp_path, path)
+            except FileExistsError as exc:
+                _restore_captured_state(
+                    path,
+                    captured,
+                    "A newer routing-state pathname appeared during publication; "
+                    "it was not overwritten.",
+                    exc,
+                )
+            except BaseException as exc:
+                try:
+                    _, canonical_digest = _read_state_snapshot(path)
+                    _, remaining_temp_digest = _read_state_snapshot(temp_path)
+                    _, captured_digest = _read_state_snapshot(captured)
+                except BaseException as read_exc:
+                    raise StateTransactionIndeterminateError(
+                        "Routing-state replacement outcome is indeterminate; state "
+                        "and recovery paths were preserved. Run status before continuing."
+                    ) from read_exc
+                if (
+                    canonical_digest == payload_digest
+                    and remaining_temp_digest is None
+                    and captured_digest == expected_digest
+                ):
+                    committed = True
+                    _safe_warning(
+                        "routing state replacement committed despite an interrupted "
+                        "atomic rename: ",
+                        exc,
+                    )
+                elif (
+                    canonical_digest is None
+                    and remaining_temp_digest == payload_digest
+                    and captured_digest == expected_digest
+                ):
+                    _restore_captured_state(
+                        path,
+                        captured,
+                        "A newer routing-state pathname appeared during publication; "
+                        "it was not overwritten.",
+                        exc,
+                    )
+                elif (
+                    canonical_digest == expected_digest
+                    and remaining_temp_digest == payload_digest
+                    and captured_digest is None
+                ):
+                    raise
+                else:
+                    raise StateTransactionIndeterminateError(
+                        "Routing-state replacement matched neither a completed nor a "
+                        "recoverable precommit move; all paths were preserved. Run "
+                        "status before continuing."
+                    ) from exc
+            else:
+                committed = True
+        try:
+            _fsync_directory(path.parent)
+        except BaseException as exc:
+            recovery: tuple[object, ...] = ()
+            if captured is not None:
+                recovery = (
+                    " Prior-state recovery remains at ",
+                    captured,
+                    ".",
+                )
+            _safe_warning(
+                "routing state was published, but directory durability could not "
+                "be confirmed.",
+                *recovery,
+                " Error: ",
+                exc,
+            )
+        else:
+            if captured is None:
+                return payload_digest
+            try:
+                captured.unlink()
+            except BaseException as exc:
+                _safe_warning(
+                    "routing state was published, but the prior-state recovery "
+                    "artifact remains at ",
+                    captured,
+                    ": ",
+                    exc,
+                )
+            else:
+                try:
+                    _fsync_directory(path.parent)
+                except BaseException as exc:
+                    _safe_warning(
+                        "routing state was published and prior-state "
+                        "recovery cleanup completed, but cleanup directory durability "
+                        "could not be confirmed: ",
+                        exc,
+                    )
+    except StateTransactionIndeterminateError:
+        preserve_transaction_evidence = True
+        raise
     finally:
         try:
             os.close(fd)
         except OSError:
             pass
-        temp_path.unlink(missing_ok=True)
+        except BaseException:
+            if not committed:
+                raise
+        if not preserve_transaction_evidence:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                # Never mask the publication result or its primary failure. A
+                # successful rename already consumed this path.
+                pass
+            except BaseException:
+                if not committed:
+                    raise
+    return payload_digest
 
 
-def _remove_state(path: Path) -> None:
-    if not path.exists():
+def _remove_state(
+    path: Path,
+    identity_guard: plugin_identity.PluginIdentityGuard,
+    expected_digest: str | None,
+) -> None:
+    identity_guard.assert_unchanged("routing-state removal")
+    if expected_digest is None:
+        _assert_state_digest(path, None)
         return
-    _read_state(path)
-    path.unlink()
+    captured = _private_state_capture_path(path)
     try:
-        directory_fd = os.open(path.parent, os.O_RDONLY)
-    except OSError:
+        _capture_expected_state(path, captured, expected_digest)
+    except StateTransactionIndeterminateError:
+        raise
+    except (ConfigurationError, OSError):
+        raise
+    except BaseException as exc:
+        _reconcile_state_capture(path, captured, expected_digest, exc)
+    if _state_entry_exists(path):
+        raise ConfigurationError(
+            "A newer routing-state pathname appeared during removal; it was preserved."
+        )
+    try:
+        _fsync_directory(path.parent)
+    except BaseException as exc:
+        _safe_warning(
+            "routing state was removed, but directory durability could not "
+            "be confirmed. Prior-state recovery remains at ",
+            captured,
+            ". Error: ",
+            exc,
+        )
         return
     try:
-        os.fsync(directory_fd)
-    finally:
-        os.close(directory_fd)
+        captured.unlink()
+    except BaseException as exc:
+        _safe_warning(
+            "routing state was removed, but the prior-state recovery artifact "
+            "remains at ",
+            captured,
+            ": ",
+            exc,
+        )
+        return
+    try:
+        _fsync_directory(path.parent)
+    except BaseException as exc:
+        _safe_warning(
+            "routing state was removed and prior-state recovery cleanup "
+            "completed, but cleanup directory durability could not be confirmed: ",
+            exc,
+        )
 
 
 def _agent_files_with_name(directory: Path, name: str) -> list[Path]:
@@ -849,6 +1578,54 @@ def select_fable_server() -> str:
     )
 
 
+def select_kimi_server() -> str:
+    for server, (launcher, prefix) in KIMI_SERVERS.items():
+        executable = shutil.which(launcher)
+        if not executable:
+            continue
+        try:
+            result = subprocess.run(
+                [executable, *prefix, "--version"],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=PROBE_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        match = re.search(r"Python\s+(\d+)\.(\d+)", result.stdout)
+        if result.returncode == 0 and match and tuple(map(int, match.groups())) >= (3, 11):
+            return server
+    raise ConfigurationError(
+        "Kimi K3 Designer requires a Python 3.11+ launcher named python3, python, or py."
+    )
+
+
+def select_qwen_server() -> str:
+    for server, (launcher, prefix) in QWEN_SERVERS.items():
+        executable = shutil.which(launcher)
+        if not executable:
+            continue
+        try:
+            result = subprocess.run(
+                [executable, *prefix, "--version"],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=PROBE_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        match = re.search(r"Python\s+(\d+)\.(\d+)", result.stdout)
+        if result.returncode == 0 and match and tuple(map(int, match.groups())) >= (3, 11):
+            return server
+    raise ConfigurationError(
+        "Qwen Advisor requires a Python 3.11+ launcher named python3, python, or py."
+    )
+
+
 def verify_fable_prerequisites(effort: str) -> dict[str, str]:
     try:
         from fable_advisor_mcp import AdvisorError, check_claude_auth, resolve_claude
@@ -904,11 +1681,77 @@ def verify_fable_prerequisites(effort: str) -> dict[str, str]:
     return {"claude": str(claude), **auth}
 
 
+def verify_kimi_prerequisites() -> dict[str, str]:
+    try:
+        from kimi_designer_mcp import KimiDesignerError, check_prerequisites
+    except ImportError as exc:  # pragma: no cover - corrupt package
+        raise ConfigurationError("The bundled Kimi K3 Designer bridge is missing.") from exc
+    try:
+        return check_prerequisites()
+    except KimiDesignerError as exc:
+        raise ConfigurationError(str(exc)) from exc
+
+
+def verify_qwen_prerequisites(region: str) -> dict[str, str]:
+    try:
+        from qwen_advisor_mcp import QwenAdvisorError, check_prerequisites
+    except ImportError as exc:  # pragma: no cover - corrupt package
+        raise ConfigurationError("The bundled Qwen Advisor bridge is missing.") from exc
+    try:
+        return check_prerequisites(region)
+    except QwenAdvisorError as exc:
+        raise ConfigurationError(str(exc)) from exc
+
+
+def prepare_qwen_credential(
+    codex_home_override: Path | None,
+    region: str,
+    *,
+    apply: bool,
+) -> int:
+    home = (
+        codex_home_override.expanduser().absolute()
+        if codex_home_override is not None
+        else Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
+        .expanduser()
+        .absolute()
+    )
+    selected = QWEN_REGION_CONFIG[region]
+    provider = selected["credential_provider"]
+    target = home / "codex-orchestration" / "bin" / external_credentials.HELPER_NAME
+    print(f"Qwen Advisor region: {region}")
+    print(f"Credential store label: {provider}")
+    print(f"Stable helper: {target}")
+    if not apply:
+        print(
+            "Dry run only. Re-run with --prepare-qwen --apply to install or verify "
+            "the helper and receive the trusted-terminal enrollment command."
+        )
+        return 0
+    try:
+        helper, _ = external_credentials.install_stable_helper(home)
+    except external_credentials.CredentialSetupError as exc:
+        raise ConfigurationError(f"Could not prepare the Qwen credential helper: {exc}") from exc
+    if external_credentials.credential_ready(helper, provider):
+        print("Qwen Advisor credential: configured in the OS credential store")
+        return 0
+    command = external_credentials.enrollment_command(helper, provider)
+    rendered = subprocess.list2cmdline(command) if os.name == "nt" else shlex.join(command)
+    print("Qwen Advisor credential: not configured")
+    print("Run this command in a trusted local terminal; the secret prompt is hidden:")
+    print(rendered)
+    return 0
+
+
 def _route_summary(route: dict[str, Any]) -> str:
     if route["kind"] == "agent":
         return f"custom agent {route['agent']}"
     if route["kind"] == "fable":
         return f"Claude Fable 5 {route['effort']}"
+    if route["kind"] == "kimi_cli":
+        return "Kimi K3 max (Kimi Code subscription)"
+    if route["kind"] == "qwen_cli":
+        return f"Qwen 3.8 Max Preview native ({route['region']} plan)"
     return f"{route['model']}@{route['effort']}"
 
 
@@ -1045,9 +1888,9 @@ On PLAN_REVISE, record the latest finding IDs before revision. After the Planner
 
 When executor delegation materially improves speed, cost, quality, or context isolation, use only the configured executor route. Give each executor one bounded, self-contained packet with objective, relevant facts, constraints, owned files or read-only scope, dependencies, acceptance criteria, verification, and handoff format. Inspect every handoff, integrate it, and run final checks yourself.
 
-Explicit user instructions win, including no-subagents and task-local seat overrides. Persistent and task-local Planner and Advisor routes must remain distinct: reject the same direct model ID, the same custom-agent name, or Fable in both seats. This policy does not create or change a Goal, weaken approvals, alter permissions, or force a worker count.
+Explicit user instructions win, including no-subagents and task-local seat overrides. An explicit current-task choice may override a saved Advisor or Executor model, effort, or agent route. When no Planner route is configured, the root owns planning; a fresh direct Advisor using the same model ID as the root is not a duplicate configured Planner route. Persistent and task-local Planner and Advisor routes that are both configured must still remain distinct: reject two configured direct routes with the same model ID, the same custom-agent name, Fable in both seats, or a direct Qwen Planner paired with the sealed Qwen Advisor. This policy does not create or change a Goal, weaken approvals, alter permissions, or force a worker count.
 
-Planner and Advisor are policy-isolated, root-directed seats: they cannot contact each other, Designer, or Executors, spawn descendants, edit files, execute work, or release Executor. They return only to the root. Designer is also root-directed: it cannot contact Planner, Advisor, or Executor, spawn descendants, redesign the root plan, change implementation code, or release Executor. Designer may edit only explicitly delegated design artifacts. Fable MCP requests do not carry caller identity, so caller isolation is instruction-enforced even though the bridge itself disables tools and persistence. If you are a spawned child, stay inside the supplied packet, report only to the root, never call planning tools, and never spawn descendants. An Executor never redesigns the root plan or contacts Planner, Advisor, or Designer.
+Planner and Advisor are policy-isolated, root-directed seats: they cannot contact each other, Designer, or Executors, spawn descendants, edit files, execute work, or release Executor. They return only to the root. Designer is also root-directed: it cannot contact Planner, Advisor, or Executor, spawn descendants, redesign the root plan, change implementation code, or release Executor. Designer may edit only explicitly delegated design artifacts. Bundled MCP requests do not carry caller identity, so caller isolation is instruction-enforced even when a bridge disables tools and persistence. If you are a spawned child, stay inside the supplied packet, report only to the root, never call planning tools, and never spawn descendants. An Executor never redesigns the root plan or contacts Planner, Advisor, or Designer.
 """
     if planner is not None and planner["kind"] == "fable":
         planner_hint = (
@@ -1067,7 +1910,17 @@ Planner and Advisor are policy-isolated, root-directed seats: they cannot contac
         )
     else:
         planner_hint = "No Planner route is configured; the root drafts and revises."
-    if advisor is not None and advisor["kind"] == "fable":
+    if advisor is not None and advisor["kind"] == "qwen_cli":
+        advisor_hint = (
+            "For an advisor review, call `review_plan` from MCP server "
+            f"{json.dumps(advisor['server'])} with the round's self-contained packet. "
+            "This is a sealed read-only root tool call through Alibaba's Token Plan "
+            "JSON API, not a "
+            "spawned child. Require PLAN_APPROVED or PLAN_REVISE and runtime model "
+            "qwen3.8-max-preview; fail closed unless the user explicitly made "
+            "Advisor failure best-effort for the current task."
+        )
+    elif advisor is not None and advisor["kind"] == "fable":
         advisor_hint = (
             "For an advisor review, call `review_plan` from MCP server "
             f"{json.dumps(advisor['server'])} with the round's self-contained packet. "
@@ -1083,7 +1936,15 @@ Planner and Advisor are policy-isolated, root-directed seats: they cannot contac
         )
     else:
         advisor_hint = "No advisor route is configured."
-    if designer is not None:
+    if designer is not None and designer["kind"] == "kimi_cli":
+        designer_hint = (
+            "For delegated design work, call `create_design_handoff` from MCP server "
+            f"{json.dumps(designer['server'])}. This is a read-only root tool call, "
+            "not a spawned child. Send approved requirements, bounded deliverables, "
+            "constraints, and the required handoff format. Require DESIGN_HANDOFF and "
+            "runtime_model kimi-code/k3; fail closed on bridge or identity failure."
+        )
+    elif designer is not None:
         designer_hint = (
             "For delegated design work, call this tool with "
             f"{_spawn_route(designer)}, fork_turns = \"none\". Send approved "
@@ -1105,7 +1966,7 @@ For delegated executor work, call this tool with {_spawn_route(executor)}, fork_
 
 {provider_guard}
 
-Never use fork_turns = "all" with model, reasoning_effort, or agent_type: a full-history fork inherits the root route and rejects those overrides. Never silently substitute the root model when an exact child route is unavailable. Report the unavailable route to the root. A user's explicit current-task model, effort, agent, or no-subagents instruction overrides this saved default, but a task-local Planner and Advisor must still be distinct: reject the same direct model ID, the same custom-agent name, or Fable in both seats.
+Never use fork_turns = "all" with model, reasoning_effort, or agent_type: a full-history fork inherits the root route and rejects those overrides. Never invent or substitute GPT-5.5, Terra, Qwen, Fable, or any other model solely to create provider or model diversity. If the exact explicit route is unavailable, report it unavailable. A user's explicit current-task model, effort, agent, or no-subagents instruction overrides this saved default. When no Planner route is configured, root-owned planning is not a configured Planner route, even if the root and a fresh direct Advisor use the same model ID. A task-local Planner and Advisor must still be distinct when both are configured; persistent configured Planner/Advisor routes remain distinct too: reject the same direct model ID, the same custom-agent name, Fable in both seats, or a direct Qwen Planner paired with the sealed Qwen Advisor.
 
 If you are a spawned child, do not call this tool or create descendants. Finish only your assigned packet and return to the root.
 """
@@ -1142,7 +2003,7 @@ def _compatibility_report(
     return results
 
 
-def _current_values(config: dict[str, Any]) -> dict[str, Any]:
+def _current_values(config: dict[str, Any], plugin_id: str) -> dict[str, Any]:
     return {
         "feature": nested_get(config, "features", "multi_agent_v2"),
         "mode": nested_get(
@@ -1161,12 +2022,12 @@ def _current_values(config: dict[str, Any]) -> dict[str, Any]:
             server: nested_get(
                 config,
                 "plugins",
-                PLUGIN_ID,
+                plugin_id,
                 "mcp_servers",
                 server,
                 "enabled",
             )
-            for server in FABLE_SERVERS
+            for server in BUNDLED_MCP_SERVERS
         },
     }
 
@@ -1190,6 +2051,197 @@ def _strict_equal(left: Any, right: Any) -> bool:
             for left_item, right_item in zip(left, right, strict=True)
         )
     return left == right
+
+
+def _restored_snapshot_value(saved: Any, fallback: Any) -> Any:
+    if not isinstance(saved, dict) or not saved.get("known"):
+        return fallback
+    return saved.get("value") if saved.get("present") else MISSING
+
+
+def _disable_expected_values(
+    state: dict[str, Any] | None, current: dict[str, Any]
+) -> tuple[dict[str, Any], bool]:
+    expected = dict(current)
+    expected["mcp"] = dict(current["mcp"])
+    compare_feature = False
+    if state is None:
+        for field in ("mode", "usage"):
+            if _is_managed(current[field]):
+                expected[field] = MISSING
+        return expected, compare_feature
+
+    previous = state.get("previous")
+    if not isinstance(previous, dict):
+        raise ConfigurationError("Routing state has no restore data.")
+    scalar_origin = state.get("scalar_origin")
+    if isinstance(scalar_origin, bool):
+        expected["feature"] = scalar_origin
+        compare_feature = True
+        for field in ("mode", "usage", "metadata", "namespace"):
+            expected[field] = MISSING
+    else:
+        for field in ("mode", "usage", "metadata", "namespace"):
+            expected[field] = _restored_snapshot_value(
+                previous.get(field), current[field]
+            )
+    previous_mcp = previous.get("mcp")
+    if isinstance(previous_mcp, dict):
+        for server, saved in previous_mcp.items():
+            expected["mcp"][server] = _restored_snapshot_value(
+                saved, current["mcp"].get(server, MISSING)
+            )
+    return expected, compare_feature
+
+
+def _disable_values_match(
+    expected: dict[str, Any], observed: dict[str, Any], compare_feature: bool
+) -> bool:
+    fields = ("mode", "usage", "metadata", "namespace")
+    if compare_feature and not _strict_equal(expected["feature"], observed["feature"]):
+        return False
+    if any(not _strict_equal(expected[field], observed[field]) for field in fields):
+        return False
+    return all(
+        _strict_equal(expected_value, observed["mcp"].get(server, MISSING))
+        for server, expected_value in expected["mcp"].items()
+    )
+
+
+def _explicit_layers_omit_mcp_enabled(
+    read_result: dict[str, Any], plugin_id: str, server: str
+) -> bool:
+    """Prove one effective MCP leaf is absent from every explicit config layer."""
+
+    layers = read_result.get("layers")
+    if not isinstance(layers, list) or not layers:
+        return False
+    user_layers = 0
+    for layer in layers:
+        if not isinstance(layer, dict):
+            return False
+        name = layer.get("name")
+        config = layer.get("config")
+        if (
+            not isinstance(name, dict)
+            or not isinstance(name.get("type"), str)
+            or not isinstance(config, dict)
+        ):
+            return False
+        if name["type"] == "user" and name.get("profile") is None:
+            user_layers += 1
+        value = _current_values(config, plugin_id)["mcp"].get(server, MISSING)
+        if value is not MISSING:
+            return False
+    return user_layers == 1
+
+
+def _disabled_plugin_synthetic_mcp_match(
+    expected: dict[str, Any],
+    user_observed: dict[str, Any],
+    effective_observed: dict[str, Any],
+    compare_feature: bool,
+    state: dict[str, Any] | None,
+    read_result: dict[str, Any],
+    plugin_id: str,
+    identity_guard: plugin_identity.PluginIdentityGuard,
+) -> bool:
+    """Accept only attested effective-only MCP defaults from a disabled plugin."""
+
+    if (
+        state is None
+        or state.get("schema") != 7
+        or state.get("plugin_id") != plugin_id
+        or identity_guard.selected_plugin_id != plugin_id
+        or identity_guard.selected_plugin_enabled()
+        or not _disable_values_match(expected, user_observed, compare_feature)
+    ):
+        return False
+    managed = state.get("managed")
+    previous = state.get("previous")
+    managed_mcp = managed.get("mcp") if isinstance(managed, dict) else None
+    previous_mcp = previous.get("mcp") if isinstance(previous, dict) else None
+    if not isinstance(managed_mcp, dict) or not isinstance(previous_mcp, dict):
+        return False
+
+    mismatched = {
+        server
+        for server, expected_value in expected["mcp"].items()
+        if not _strict_equal(
+            expected_value, effective_observed["mcp"].get(server, MISSING)
+        )
+    }
+    if not mismatched:
+        return False
+    normalized = dict(effective_observed)
+    normalized["mcp"] = dict(effective_observed["mcp"])
+    for server in mismatched:
+        saved = previous_mcp.get(server)
+        if (
+            managed_mcp.get(server) is not True
+            or not isinstance(saved, dict)
+            or set(saved) != {"known", "present"}
+            or saved.get("known") is not True
+            or saved.get("present") is not False
+            or expected["mcp"].get(server, MISSING) is not MISSING
+            or user_observed["mcp"].get(server, MISSING) is not MISSING
+            or effective_observed["mcp"].get(server, MISSING) is not True
+            or identity_guard.selected_mcp_default_enabled(server) is not False
+            or not _explicit_layers_omit_mcp_enabled(
+                read_result, plugin_id, server
+            )
+        ):
+            return False
+        normalized["mcp"][server] = MISSING
+    return _disable_values_match(expected, normalized, compare_feature)
+
+
+def _managed_compensation_edits(
+    state: dict[str, Any], current: dict[str, Any], plugin_id: str
+) -> list[dict[str, Any]]:
+    """Recreate exactly the validated managed config without crossing namespaces."""
+
+    if isinstance(state.get("scalar_origin"), bool):
+        edits = [
+            {
+                "keyPath": "features.multi_agent_v2",
+                "value": current["feature"],
+                "mergeStrategy": "replace",
+            }
+        ]
+    else:
+        paths = {
+            "metadata": "features.multi_agent_v2.hide_spawn_agent_metadata",
+            "namespace": "features.multi_agent_v2.tool_namespace",
+            "mode": "features.multi_agent_v2.multi_agent_mode_hint_text",
+            "usage": "features.multi_agent_v2.usage_hint_text",
+        }
+        edits = [
+            {
+                "keyPath": path,
+                "value": current[field],
+                "mergeStrategy": "replace",
+            }
+            for field, path in paths.items()
+        ]
+
+    managed = state.get("managed")
+    managed_mcp = managed.get("mcp") if isinstance(managed, dict) else None
+    if isinstance(managed_mcp, dict):
+        for server in managed_mcp:
+            if server not in BUNDLED_MCP_SERVERS:
+                raise ConfigurationError(
+                    f"Saved routing state names an unmanaged MCP server: {server}"
+                )
+            value = current["mcp"].get(server, MISSING)
+            edits.append(
+                {
+                    "keyPath": mcp_key_path(plugin_id, server),
+                    "value": None if value is MISSING else value,
+                    "mergeStrategy": "replace",
+                }
+            )
+    return edits
 
 
 def _managed_matches(state: dict[str, Any], current: dict[str, Any]) -> bool:
@@ -1220,9 +2272,12 @@ def _batch_write(
     edits: list[dict[str, Any]],
     version: str | None,
     *,
+    identity_guard: plugin_identity.PluginIdentityGuard,
+    identity_phase: str,
     reload_user_config: bool,
 ) -> dict[str, Any]:
-    return app.request(
+    identity_guard.assert_unchanged(identity_phase)
+    result = app.request(
         "config/batchWrite",
         {
             "edits": edits,
@@ -1230,13 +2285,23 @@ def _batch_write(
             "reloadUserConfig": reload_user_config,
         },
     )
+    try:
+        identity_guard.assert_unchanged(f"{identity_phase} completion")
+    except plugin_identity.PluginIdentityError as exc:
+        raise StateTransactionIndeterminateError(
+            "Codex accepted the configuration write, but plugin identity drifted "
+            "before completion could be verified. No automatic compensation was "
+            "attempted under the changed package. Run status before continuing."
+        ) from exc
+    return result
 
 
-def _status(
+def _status_unbuffered(
     target: Path,
     codex_home: Path | None,
     binaries: list[Path],
     require_effective: bool,
+    publish: Any = None,
 ) -> int:
     clients_compatible = True
     for binary in binaries:
@@ -1244,25 +2309,46 @@ def _status(
         label = "compatible" if supported else f"incompatible ({detail})"
         print(f"Client: {binary} ({binary_version(binary)}) — {label}")
         clients_compatible = clients_compatible and supported
-    with AppServer(target, codex_home) as app:
+    with contextlib.ExitStack() as stack:
+        app = stack.enter_context(AppServer(target, codex_home))
+        stack.enter_context(_transaction_directory_lock(app.codex_home))
+        state_path = app.codex_home / STATE_FILENAME
+        state, state_digest = _read_state_snapshot(state_path)
+        _validate_state_config(state, app.config_path)
+        saved_plugin_id = _state_plugin_id(state) if state is not None else None
+        identity_guard = stack.enter_context(
+            plugin_identity.guard_plugin_identity(
+                target,
+                EXECUTING_PLUGIN_ROOT,
+                "status",
+                saved_plugin_id=saved_plugin_id,
+                codex_home=app.codex_home,
+                loaded_sources=dict(_LOCAL_SOURCE_ATTESTATIONS),
+            )
+        )
+        plugin_id = identity_guard.selected_plugin_id
+        executing_plugin_id = identity_guard.executing_plugin_id
         workspace = Path.cwd().resolve()
         read_result = app.request(
             "config/read",
             {"includeLayers": True, "cwd": str(workspace)},
         )
         config, _ = _user_layer(read_result)
-        current = _current_values(config)
+        current = _current_values(config, plugin_id)
         effective_config = read_result.get("config")
         effective = _current_values(
-            effective_config if isinstance(effective_config, dict) else {}
+            effective_config if isinstance(effective_config, dict) else {}, plugin_id
         )
-        state_path = app.codex_home / STATE_FILENAME
-        state = _read_state(state_path)
-        _validate_state_config(state, app.config_path)
+        state_owner_matches = state is None or _state_plugin_id(state) == plugin_id
+        execution_matches = plugin_id == executing_plugin_id
         managed_pair = _is_managed(current["mode"]) and _is_managed(
             current["usage"]
         )
-        state_matches = state is not None and _managed_matches(state, current)
+        state_matches = (
+            state is not None
+            and state_owner_matches
+            and _managed_matches(state, current)
+        )
         if state is not None and managed_pair and not state_matches:
             routing_state = "managed fields conflict with local restore state"
         elif managed_pair:
@@ -1286,6 +2372,13 @@ def _status(
         else:
             routing_state = "partial or user-authored"
         print(f"Native policy: {routing_state}")
+        print(f"Plugin identity: {plugin_id}")
+        print(f"Executing plugin identity: {executing_plugin_id}")
+        if not execution_matches:
+            print(
+                "Plugin identity mismatch: saved namespace owner "
+                f"{plugin_id}; executing cache owner {executing_plugin_id}"
+            )
         if routing_state == "managed fields conflict with local restore state":
             print(
                 "Recovery: run --repair as a dry run only when the saved plugin "
@@ -1297,6 +2390,8 @@ def _status(
         )
         print(f"Config: {app.config_path}")
         fable_available = True
+        kimi_available = True
+        qwen_available = True
         if state_matches:
             print(f"Executor: {_route_summary(state['executor'])}")
             planner = state.get("planner")
@@ -1319,6 +2414,30 @@ def _status(
                 else:
                     print(
                         "Claude Fable 5: ready — first-party login; no model call made"
+                    )
+            if isinstance(advisor, dict) and advisor.get("kind") == "qwen_cli":
+                try:
+                    ready = verify_qwen_prerequisites(advisor["region"])
+                except ConfigurationError as exc:
+                    qwen_available = False
+                    print(f"Qwen Advisor: unavailable — {exc}")
+                else:
+                    print(
+                        "Qwen Advisor: ready — OS credential store and sealed "
+                        f"{ready['protocol']} {advisor['region']} route; "
+                        "no model call made"
+                    )
+            if isinstance(designer, dict) and designer.get("kind") == "kimi_cli":
+                try:
+                    ready = verify_kimi_prerequisites()
+                except ConfigurationError as exc:
+                    kimi_available = False
+                    print(f"Kimi K3 Designer: unavailable — {exc}")
+                else:
+                    print(
+                        "Kimi K3 Designer: ready — Kimi Code OAuth subscription via "
+                        f"ACP; Kimi {ready['kimi_version']}, acpx {ready['acpx_version']}; "
+                        "no model call made"
                     )
             try:
                 verified = verify_agent_routes(
@@ -1379,17 +2498,47 @@ def _status(
             clients_compatible
             and routing_state.startswith("installed and effective")
             and state_matches
+            and state_owner_matches
+            and execution_matches
             and agent_routes_available
             and fable_available
+            and kimi_available
+            and qwen_available
             and not role_issues
             and not orphaned_roles
         )
+        identity_guard.assert_unchanged("status publication")
+        _assert_state_digest(state_path, state_digest)
+        if publish is not None:
+            publish()
     return 1 if require_effective and not healthy else 0
+
+
+def _status(
+    target: Path,
+    codex_home: Path | None,
+    binaries: list[Path],
+    require_effective: bool,
+) -> int:
+    """Publish status only after the identity guard's final recheck succeeds."""
+
+    output = io.StringIO()
+    destination = sys.stdout
+    with contextlib.redirect_stdout(output):
+        result = _status_unbuffered(
+            target,
+            codex_home,
+            binaries,
+            require_effective,
+            lambda: print(output.getvalue(), end="", file=destination),
+        )
+    return result
 
 
 def _prepare_setup_state(
     config: dict[str, Any],
     existing_state: dict[str, Any] | None,
+    plugin_id: str,
     mode: str,
     usage: str,
     executor: dict[str, Any],
@@ -1399,11 +2548,28 @@ def _prepare_setup_state(
     config_path: Path,
     replace_existing: bool,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
-    current = _current_values(config)
+    current = _current_values(config, plugin_id)
     feature = current["feature"]
     scalar_feature = isinstance(feature, bool)
 
     if existing_state is not None:
+        existing_plugin_id = _state_plugin_id(existing_state)
+        existing_managed = existing_state.get("managed")
+        legacy_mcp = (
+            existing_state["schema"] < 7
+            and isinstance(existing_managed, dict)
+            and isinstance(existing_managed.get("mcp"), dict)
+        )
+        if existing_state["schema"] >= 7 and existing_plugin_id != plugin_id:
+            raise ConfigurationError(
+                "Saved routing state belongs to a different plugin identity; "
+                "refusing to move restore data between marketplace namespaces."
+            )
+        if legacy_mcp and plugin_id != LEGACY_PLUGIN_ID:
+            raise ConfigurationError(
+                "Legacy MCP restore state belongs to the historical canonical plugin "
+                "identity. Disable it before setting up a different marketplace identity."
+            )
         if not _managed_matches(existing_state, current):
             raise ConfigurationError(
                 "The managed routing fields changed outside this plugin. Refusing "
@@ -1554,11 +2720,14 @@ def _prepare_setup_state(
         managed_feature = None
 
     existing_managed = existing_state.get("managed", {}) if existing_state else {}
+    bundled_routes = [
+        route
+        for route in (planner, advisor, designer)
+        if isinstance(route, dict)
+        and route.get("kind") in {"fable", "kimi_cli", "qwen_cli"}
+    ]
     manage_mcp = (
-        any(
-            isinstance(route, dict) and route.get("kind") == "fable"
-            for route in (planner, advisor)
-        )
+        bool(bundled_routes)
         or isinstance(existing_managed, dict)
         and isinstance(existing_managed.get("mcp"), dict)
     )
@@ -1567,15 +2736,7 @@ def _prepare_setup_state(
         previous_mcp = previous.get("mcp")
         if not isinstance(previous_mcp, dict):
             previous_mcp = {}
-        fable_route = next(
-            (
-                route
-                for route in (planner, advisor)
-                if isinstance(route, dict) and route.get("kind") == "fable"
-            ),
-            None,
-        )
-        selected = fable_route.get("server") if fable_route is not None else None
+        selected_servers = {route["server"] for route in bundled_routes}
         existing_mcp = (
             existing_managed.get("mcp")
             if isinstance(existing_managed, dict)
@@ -1586,23 +2747,26 @@ def _prepare_setup_state(
         touched.update(
             server for server, value in current["mcp"].items() if value is not MISSING
         )
-        if isinstance(selected, str):
-            touched.add(selected)
+        touched.update(selected_servers)
         for server in touched:
             if server not in previous_mcp:
                 previous_mcp[server] = snapshot(current["mcp"][server])
         previous["mcp"] = previous_mcp
-        managed_mcp = {server: server == selected for server in FABLE_SERVERS if server in touched}
+        managed_mcp = {
+            server: server in selected_servers
+            for server in BUNDLED_MCP_SERVERS
+            if server in touched
+        }
         for server, enabled in managed_mcp.items():
             edits.append(
                 {
-                    "keyPath": fable_key_path(server),
+                    "keyPath": mcp_key_path(plugin_id, server),
                     "value": enabled,
                     "mergeStrategy": "replace",
                 }
             )
             rollback_edit = snapshot_edit(
-                fable_key_path(server), snapshot(current["mcp"][server])
+                mcp_key_path(plugin_id, server), snapshot(current["mcp"][server])
             )
             if rollback_edit is not None:
                 rollback.append(rollback_edit)
@@ -1621,6 +2785,7 @@ def _prepare_setup_state(
         "policy_version": POLICY_VERSION,
         "managed_by": "codex-orchestration",
         "config_file": str(config_path),
+        "plugin_id": plugin_id,
         "executor": executor,
         "planner": planner,
         "advisor": advisor,
@@ -1639,8 +2804,17 @@ def _restore_pre_repair_hints(
     expected: dict[str, Any],
     version: str | None,
     workspace: Path,
+    identity_guard: plugin_identity.PluginIdentityGuard,
+    plugin_id: str,
 ) -> None:
-    result = _batch_write(app, rollback, version, reload_user_config=True)
+    result = _batch_write(
+        app,
+        rollback,
+        version,
+        identity_guard=identity_guard,
+        identity_phase="repair rollback",
+        reload_user_config=True,
+    )
     if result.get("status") not in {"ok", "okOverridden"}:
         raise ConfigurationError(
             f"unexpected rollback status {result.get('status')!r}"
@@ -1650,7 +2824,7 @@ def _restore_pre_repair_hints(
         {"includeLayers": True, "cwd": str(workspace)},
     )
     user_config, _ = _user_layer(read_result)
-    current = _current_values(user_config)
+    current = _current_values(user_config, plugin_id)
     if any(current[field] != value for field, value in expected.items()):
         raise ConfigurationError("pre-repair hint restoration could not be verified")
 
@@ -1660,7 +2834,10 @@ def _repair(
     config: dict[str, Any],
     version: str | None,
     state: dict[str, Any] | None,
+    state_digest: str | None,
     workspace: Path,
+    identity_guard: plugin_identity.PluginIdentityGuard,
+    plugin_id: str,
     apply: bool,
 ) -> int:
     """Restore only saved managed hint bytes after exact drift validation."""
@@ -1669,15 +2846,21 @@ def _repair(
         raise ConfigurationError(
             "Routing repair requires valid saved plugin state; run status first."
         )
+    if _state_plugin_id(state) != plugin_id:
+        raise ConfigurationError(
+            "Routing repair state belongs to a different plugin identity; refusing "
+            "to repair across marketplace namespaces."
+        )
     managed = state.get("managed")
     if not isinstance(managed, dict):
         raise ConfigurationError("Routing repair state has no managed values.")
-    current = _current_values(config)
+    current = _current_values(config, plugin_id)
     drifted = [
         field for field in ("mode", "usage") if current[field] != managed[field]
     ]
     if not drifted:
         if _managed_matches(state, current):
+            identity_guard.assert_unchanged("repair no-op publication")
             print("Native routing policy already matches its saved managed state.")
             return 0
         raise ConfigurationError(
@@ -1759,10 +2942,18 @@ def _repair(
             "re-authentication."
         )
     if not apply:
+        identity_guard.assert_unchanged("repair dry-run publication")
         print("Dry run only. Re-run with --repair --apply after reviewing this preview.")
         return 0
 
-    result = _batch_write(app, edits, version, reload_user_config=True)
+    result = _batch_write(
+        app,
+        edits,
+        version,
+        identity_guard=identity_guard,
+        identity_phase="repair write",
+        reload_user_config=True,
+    )
     if result.get("status") == "okOverridden":
         try:
             _restore_pre_repair_hints(
@@ -1771,6 +2962,8 @@ def _repair(
                 {field: current[field] for field in drifted},
                 result.get("version"),
                 workspace,
+                identity_guard,
+                plugin_id,
             )
         except ConfigurationError as rollback_exc:
             raise ConfigurationError(
@@ -1791,10 +2984,10 @@ def _repair(
         {"includeLayers": True, "cwd": str(workspace)},
     )
     verify_config, verify_version = _user_layer(verify_result)
-    verify_current = _current_values(verify_config)
+    verify_current = _current_values(verify_config, plugin_id)
     effective_config = verify_result.get("config")
     effective_current = _current_values(
-        effective_config if isinstance(effective_config, dict) else {}
+        effective_config if isinstance(effective_config, dict) else {}, plugin_id
     )
     if not _managed_matches(state, verify_current):
         raise ConfigurationError(
@@ -1809,6 +3002,8 @@ def _repair(
                 {field: current[field] for field in drifted},
                 verify_version,
                 workspace,
+                identity_guard,
+                plugin_id,
             )
         except ConfigurationError as rollback_exc:
             raise ConfigurationError(
@@ -1821,12 +3016,14 @@ def _repair(
         )
 
     state_path = app.codex_home / STATE_FILENAME
-    if _read_state(state_path) != state:
+    _, current_state_digest = _read_state_snapshot(state_path)
+    if current_state_digest != state_digest:
         raise ConfigurationError(
             "Saved routing state changed concurrently during repair. It was not "
             "overwritten; run status before any further routing change."
         )
 
+    identity_guard.assert_unchanged("repair success publication")
     print(
         "Native routing policy repaired; fully quit and reopen Codex, then start a "
         "new task so the current policy and MCP bridge are loaded together."
@@ -1839,14 +3036,20 @@ def _disable(
     config: dict[str, Any],
     version: str | None,
     state: dict[str, Any] | None,
+    state_digest: str | None,
+    workspace: Path,
+    identity_guard: plugin_identity.PluginIdentityGuard,
+    plugin_id: str,
     apply: bool,
 ) -> int:
-    current = _current_values(config)
+    current = _current_values(config, plugin_id)
     state_path = app.codex_home / STATE_FILENAME
+    managed_compensation: list[dict[str, Any]] | None = None
     if state is None:
         managed_mode = _is_managed(current["mode"])
         managed_usage = _is_managed(current["usage"])
         if not (managed_mode or managed_usage):
+            identity_guard.assert_unchanged("disable inactive publication")
             print("Native routing is already inactive.")
             return 0
         edits = []
@@ -1878,6 +3081,9 @@ def _disable(
                 "Managed routing fields were edited after setup. Refusing to erase "
                 "those changes; restore the managed values or remove them manually."
             )
+        managed_compensation = _managed_compensation_edits(
+            state, current, plugin_id
+        )
         previous = state.get("previous")
         if not isinstance(previous, dict):
             raise ConfigurationError("Routing state has no restore data.")
@@ -1923,19 +3129,204 @@ def _disable(
             edits.extend(
                 edit
                 for edit in (
-                    snapshot_edit(fable_key_path(server), previous_mcp[server])
+                    snapshot_edit(
+                        mcp_key_path(plugin_id, server), previous_mcp[server]
+                    )
                     for server in previous_mcp
                 )
                 if edit is not None
             )
         print("Will restore the pre-setup values of every owned routing field.")
     if not apply:
+        identity_guard.assert_unchanged("disable dry-run publication")
         print("Dry run only. Re-run with --disable --apply after reviewing this preview.")
         return 0
-    result = _batch_write(app, edits, version, reload_user_config=True)
-    if result.get("status") not in {"ok", "okOverridden"}:
+    result = _batch_write(
+        app,
+        edits,
+        version,
+        identity_guard=identity_guard,
+        identity_phase="disable write",
+        reload_user_config=True,
+    )
+    if result.get("status") == "okOverridden":
+        if state is not None:
+            try:
+                if managed_compensation is None:
+                    raise ConfigurationError(
+                        "managed compensation edits were unavailable"
+                    )
+                compensation_result = _batch_write(
+                    app,
+                    managed_compensation,
+                    result.get("version"),
+                    identity_guard=identity_guard,
+                    identity_phase="disable override compensation",
+                    reload_user_config=True,
+                )
+                if compensation_result.get("status") not in {
+                    "ok",
+                    "okOverridden",
+                }:
+                    raise ConfigurationError(
+                        "unexpected compensation status "
+                        f"{compensation_result.get('status')!r}"
+                    )
+                compensation_read = app.request(
+                    "config/read",
+                    {"includeLayers": True, "cwd": str(workspace)},
+                )
+                compensation_config, _ = _user_layer(compensation_read)
+                compensation_current = _current_values(
+                    compensation_config, plugin_id
+                )
+                if not _managed_matches(state, compensation_current):
+                    raise ConfigurationError(
+                        "forward-compensated user config did not match saved managed "
+                        "state"
+                    )
+                _, retained_state_digest = _read_state_snapshot(state_path)
+                if retained_state_digest != state_digest:
+                    raise ConfigurationError(
+                        "saved routing state changed during override compensation"
+                    )
+            except BaseException as compensation_exc:
+                raise ConfigurationError(
+                    "A higher-priority layer overrides the restored routing values, "
+                    "and managed-config compensation or verification failed. Config "
+                    "and state may be inconsistent. Run status before continuing."
+                ) from compensation_exc
+            raise ConfigurationError(
+                "A higher-priority layer overrides the restored routing values; the "
+                "managed user config and saved restore state were re-paired and "
+                "retained."
+            )
+        raise ConfigurationError(
+            "A higher-priority layer overrides the restored routing values; saved "
+            "restore state was retained."
+        )
+    if result.get("status") != "ok":
         raise ConfigurationError(f"Unexpected config write status: {result.get('status')!r}")
-    _remove_state(state_path)
+    expected, compare_feature = _disable_expected_values(state, current)
+    read_result = app.request(
+        "config/read", {"includeLayers": True, "cwd": str(workspace)}
+    )
+    user_config, post_disable_version = _user_layer(read_result)
+    user_current = _current_values(user_config, plugin_id)
+    if not _disable_values_match(expected, user_current, compare_feature):
+        raise ConfigurationError(
+            "The user routing fields changed after Codex accepted disable; the newer "
+            "edit was preserved and saved restore state remains available."
+        )
+    effective_config = read_result.get("config")
+    effective_current = _current_values(
+        effective_config if isinstance(effective_config, dict) else {}, plugin_id
+    )
+    effective_matches = _disable_values_match(
+        expected, effective_current, compare_feature
+    )
+    if not effective_matches:
+        identity_guard.assert_unchanged("disable effective verification")
+        effective_matches = _disabled_plugin_synthetic_mcp_match(
+            expected,
+            user_current,
+            effective_current,
+            compare_feature,
+            state,
+            read_result,
+            plugin_id,
+            identity_guard,
+        )
+    if not effective_matches:
+        raise ConfigurationError(
+            "The restored routing values are overridden in this workspace; saved "
+            "restore state remains available."
+        )
+    if state is None:
+        _remove_state(state_path, identity_guard, state_digest)
+    else:
+        try:
+            _remove_state(state_path, identity_guard, state_digest)
+        except BaseException as removal_exc:
+            try:
+                _, observed_state_digest = _read_state_snapshot(state_path)
+            except BaseException as state_read_exc:
+                raise ConfigurationError(
+                    "Disable config restoration completed, but routing-state removal "
+                    "and canonical-state readback failed. Config and state may be "
+                    "inconsistent. Run status before continuing."
+                ) from state_read_exc
+
+            if observed_state_digest is None:
+                if not isinstance(removal_exc, Exception):
+                    raise
+                raise ConfigurationError(
+                    "Native routing config was disabled and canonical restore state "
+                    "was removed despite a removal diagnostic; config and state are "
+                    "paired."
+                ) from removal_exc
+
+            if observed_state_digest == state_digest:
+                try:
+                    if managed_compensation is None:
+                        raise ConfigurationError(
+                            "managed compensation edits were unavailable"
+                        )
+                    compensation_result = _batch_write(
+                        app,
+                        managed_compensation,
+                        post_disable_version,
+                        identity_guard=identity_guard,
+                        identity_phase="disable state-failure compensation",
+                        reload_user_config=True,
+                    )
+                    if compensation_result.get("status") not in {
+                        "ok",
+                        "okOverridden",
+                    }:
+                        raise ConfigurationError(
+                            "unexpected compensation status "
+                            f"{compensation_result.get('status')!r}"
+                        )
+                    compensation_read = app.request(
+                        "config/read",
+                        {"includeLayers": True, "cwd": str(workspace)},
+                    )
+                    compensation_config, _ = _user_layer(compensation_read)
+                    compensation_current = _current_values(
+                        compensation_config, plugin_id
+                    )
+                    if not _managed_matches(state, compensation_current):
+                        raise ConfigurationError(
+                            "forward-compensated config did not match saved managed "
+                            "state"
+                        )
+                    _, compensated_state_digest = _read_state_snapshot(state_path)
+                    if compensated_state_digest != state_digest:
+                        raise ConfigurationError(
+                            "canonical routing state changed during managed-config "
+                            "compensation"
+                        )
+                except BaseException as compensation_exc:
+                    raise ConfigurationError(
+                        "Disable config restoration completed, but state removal did "
+                        "not commit and forward managed-config compensation failed. "
+                        "Config and state may be inconsistent. Run status before "
+                        "continuing."
+                    ) from compensation_exc
+                if not isinstance(removal_exc, Exception):
+                    raise
+                raise ConfigurationError(
+                    "Routing-state removal failed before commit; the exact managed "
+                    "config and saved state were re-paired."
+                ) from removal_exc
+
+            raise ConfigurationError(
+                "Disable config restoration completed, but canonical routing state "
+                "matched neither the exact saved state nor committed removal. Config "
+                "and state may be inconsistent. Run status before continuing."
+            ) from removal_exc
+    identity_guard.assert_unchanged("disable success publication")
     print("Native routing disabled. Start a new Codex task to clear the loaded policy.")
     return 0
 
@@ -1944,15 +3335,22 @@ def main() -> int:
     args = parse_args()
     try:
         _validate_args(args)
+        if args.prepare_qwen:
+            return prepare_qwen_credential(
+                args.codex_home,
+                args.qwen_region,
+                apply=args.apply,
+            )
         target = resolve_binary(args.codex_bin)
         binaries = discover_compatibility_binaries(target, args.compat_bin)
         if args.status:
-            return _status(
-                target,
-                args.codex_home,
-                binaries,
-                args.require_effective,
-            )
+            with _suppress_bytecode_writes():
+                return _status(
+                    target,
+                    args.codex_home,
+                    binaries,
+                    args.require_effective,
+                )
         # Disable must remain available when the policy itself is what makes an
         # older shared-config client incompatible.
         _compatibility_report(
@@ -1960,7 +3358,10 @@ def main() -> int:
             args.allow_incompatible_client or args.disable,
         )
 
-        with AppServer(target, args.codex_home) as app:
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(_suppress_bytecode_writes())
+            app = stack.enter_context(AppServer(target, args.codex_home))
+            stack.enter_context(_transaction_directory_lock(app.codex_home))
             workspace = Path.cwd().resolve()
             read_result = app.request(
                 "config/read",
@@ -1972,17 +3373,58 @@ def main() -> int:
                     "Could not obtain the user config version needed for a safe write."
                 )
             state_path = app.codex_home / STATE_FILENAME
-            state = _read_state(state_path)
+            state, state_digest = _read_state_snapshot(state_path)
             _validate_state_config(state, app.config_path)
+            if args.disable and state is not None:
+                if state["schema"] >= 7:
+                    identity_selector = "disable-schema7"
+                    saved_plugin_id = _state_plugin_id(state)
+                    if saved_plugin_id is None:
+                        raise ConfigurationError(
+                            "Schema-7 routing state is missing its saved plugin identity."
+                        )
+                else:
+                    identity_selector = "disable-legacy"
+                    saved_plugin_id = None
+            elif args.repair:
+                identity_selector = "repair" if state is not None else "setup"
+                saved_plugin_id = _state_plugin_id(state) if state is not None else None
+            else:
+                identity_selector = "setup"
+                saved_plugin_id = None
+            identity_guard = stack.enter_context(
+                plugin_identity.guard_plugin_identity(
+                    target,
+                    EXECUTING_PLUGIN_ROOT,
+                    identity_selector,
+                    saved_plugin_id=saved_plugin_id,
+                    codex_home=app.codex_home,
+                    loaded_sources=dict(_LOCAL_SOURCE_ATTESTATIONS),
+                )
+            )
+            plugin_id = identity_guard.selected_plugin_id
             if args.disable:
-                return _disable(app, config, version, state, args.apply)
+                return _disable(
+                    app,
+                    config,
+                    version,
+                    state,
+                    state_digest,
+                    workspace,
+                    identity_guard,
+                    plugin_id,
+                    args.apply,
+                )
             if args.repair:
                 return _repair(
                     app,
                     config,
                     version,
                     state,
+                    state_digest,
                     workspace,
+                    identity_guard,
+                    plugin_id,
                     args.apply,
                 )
 
@@ -2024,6 +3466,8 @@ def main() -> int:
                 if args.planner_fable or args.advisor_fable
                 else None
             )
+            kimi_server = select_kimi_server() if args.designer_kimi else None
+            qwen_server = select_qwen_server() if args.advisor_qwen else None
             if args.planner_model:
                 planner_effort = resolve_model_effort(
                     "Planner",
@@ -2069,6 +3513,14 @@ def main() -> int:
                     "effort": normalize_fable_effort(args.advisor_effort),
                     "server": fable_server,
                 }
+            elif args.advisor_qwen:
+                advisor = {
+                    "kind": "qwen_cli",
+                    "model": QWEN_MODEL,
+                    "effort": "native",
+                    "region": args.qwen_region,
+                    "server": qwen_server,
+                }
 
             if args.designer_model:
                 designer_effort = resolve_model_effort(
@@ -2083,6 +3535,13 @@ def main() -> int:
                     "model": args.designer_model,
                     "effort": designer_effort,
                 }
+            elif args.designer_kimi:
+                designer = {
+                    "kind": "kimi_cli",
+                    "model": KIMI_MODEL,
+                    "effort": "max",
+                    "server": kimi_server,
+                }
             validate_planning_routes(planner, advisor)
             fable_efforts = {
                 route["effort"]
@@ -2091,6 +3550,12 @@ def main() -> int:
             }
             for effort in sorted(fable_efforts):
                 fable_auth = verify_fable_prerequisites(effort)
+            qwen_ready = (
+                verify_qwen_prerequisites(args.qwen_region)
+                if args.advisor_qwen
+                else None
+            )
+            kimi_ready = verify_kimi_prerequisites() if args.designer_kimi else None
 
             verified_agents = verify_agent_routes(
                 app.codex_home,
@@ -2103,6 +3568,7 @@ def main() -> int:
             new_state, edits, rollback = _prepare_setup_state(
                 config,
                 state,
+                plugin_id,
                 mode,
                 usage,
                 executor,
@@ -2133,6 +3599,18 @@ def main() -> int:
                     "Claude Fable 5 login: ready — first-party; "
                     "setup makes no model call"
                 )
+            if qwen_ready is not None:
+                print(
+                    "Qwen Advisor: ready — OS credential store and sealed "
+                    f"{qwen_ready['protocol']} {args.qwen_region} route; "
+                    "setup makes no model call"
+                )
+            if kimi_ready is not None:
+                print(
+                    "Kimi K3 Designer: ready — existing Kimi Code OAuth subscription "
+                    f"via ACP; Kimi {kimi_ready['kimi_version']}, "
+                    f"acpx {kimi_ready['acpx_version']}; setup makes no model call"
+                )
             if verified_agents:
                 print(
                     "Custom-agent files: "
@@ -2145,16 +3623,26 @@ def main() -> int:
                 "(required for routed spawn metadata on current v2 clients)"
             )
             if not args.apply:
+                identity_guard.assert_unchanged("setup dry-run publication")
                 print("Dry run only. Re-run with --apply after reviewing this preview.")
                 return 0
 
-            result = _batch_write(app, edits, version, reload_user_config=True)
+            result = _batch_write(
+                app,
+                edits,
+                version,
+                identity_guard=identity_guard,
+                identity_phase="setup write",
+                reload_user_config=True,
+            )
             if result.get("status") == "okOverridden":
                 try:
                     rollback_result = _batch_write(
                         app,
                         rollback,
                         result.get("version"),
+                        identity_guard=identity_guard,
+                        identity_phase="setup override rollback",
                         reload_user_config=True,
                     )
                     if rollback_result.get("status") not in {"ok", "okOverridden"}:
@@ -2177,13 +3665,24 @@ def main() -> int:
                     f"Unexpected config write status: {result.get('status')!r}"
                 )
             try:
-                _write_state(state_path, new_state)
-            except (ConfigurationError, OSError) as state_exc:
+                published_state_digest = _write_state(
+                    state_path,
+                    new_state,
+                    identity_guard,
+                    state_digest,
+                )
+            except StateTransactionIndeterminateError:
+                # The canonical state may already reflect the new config. Retain the
+                # accepted config rather than making an unsafe rollback guess.
+                raise
+            except BaseException as state_exc:
                 try:
                     rollback_result = _batch_write(
                         app,
                         rollback,
                         result.get("version"),
+                        identity_guard=identity_guard,
+                        identity_phase="setup state-failure rollback",
                         reload_user_config=True,
                     )
                     if rollback_result.get("status") not in {"ok", "okOverridden"}:
@@ -2191,12 +3690,19 @@ def main() -> int:
                             "unexpected rollback status "
                             f"{rollback_result.get('status')!r}"
                         )
-                except ConfigurationError as rollback_exc:
+                except BaseException as rollback_exc:
+                    try:
+                        rollback_detail = str(rollback_exc)
+                    except BaseException:
+                        rollback_detail = type(rollback_exc).__name__
                     raise ConfigurationError(
                         "Config was written but state persistence and automatic rollback "
                         "both failed; the user config may still contain managed fields. "
-                        f"State error: {state_exc}; rollback: {rollback_exc}"
-                    ) from state_exc
+                        "Run status before continuing. Rollback error: "
+                        f"{rollback_detail}"
+                    ) from rollback_exc
+                if not isinstance(state_exc, Exception):
+                    raise
                 raise ConfigurationError(
                     f"Could not persist restore state; config write was rolled back: {state_exc}"
                 ) from state_exc
@@ -2206,10 +3712,11 @@ def main() -> int:
                 {"includeLayers": True, "cwd": str(workspace)},
             )
             verify_config, verify_version = _user_layer(verify_result)
-            verify_current = _current_values(verify_config)
+            verify_current = _current_values(verify_config, plugin_id)
             effective_config = verify_result.get("config")
             effective_current = _current_values(
-                effective_config if isinstance(effective_config, dict) else {}
+                effective_config if isinstance(effective_config, dict) else {},
+                plugin_id,
             )
             user_matches = _managed_matches(new_state, verify_current)
             effective_matches = _managed_matches(new_state, effective_current)
@@ -2226,6 +3733,8 @@ def main() -> int:
                         app,
                         rollback,
                         verify_version,
+                        identity_guard=identity_guard,
+                        identity_phase="setup readback rollback",
                         reload_user_config=True,
                     )
                     if rollback_result.get("status") not in {"ok", "okOverridden"}:
@@ -2233,28 +3742,132 @@ def main() -> int:
                             "unexpected rollback status "
                             f"{rollback_result.get('status')!r}"
                         )
-                    if state is None:
-                        _remove_state(state_path)
-                    else:
-                        _write_state(state_path, state)
-                except (ConfigurationError, OSError) as rollback_exc:
+                except BaseException as rollback_exc:
+                    try:
+                        rollback_detail = str(rollback_exc)
+                    except BaseException:
+                        rollback_detail = type(rollback_exc).__name__
                     raise ConfigurationError(
-                        "Codex accepted the write but current-workspace effective "
-                        "readback did not match, and "
-                        f"automatic rollback failed: {rollback_exc}"
+                        "Codex accepted the write but effective readback did not match, "
+                        "and automatic rollback failed before config rollback "
+                        "completed. The newly published restore state was retained; "
+                        "config and state may be inconsistent. Run status before "
+                        f"continuing. Rollback error: {rollback_detail}"
                     ) from rollback_exc
+                try:
+                    if state is None:
+                        _remove_state(
+                            state_path,
+                            identity_guard,
+                            published_state_digest,
+                        )
+                    else:
+                        _write_state(
+                            state_path,
+                            state,
+                            identity_guard,
+                            published_state_digest,
+                        )
+                except BaseException as state_rollback_exc:
+                    try:
+                        _, observed_state_digest = _read_state_snapshot(state_path)
+                    except BaseException as state_read_exc:
+                        raise ConfigurationError(
+                            "Config rollback completed after effective readback failed, "
+                            "but restore-state rollback and canonical-state readback "
+                            "failed. Config and state may be inconsistent. Run status "
+                            "before continuing."
+                        ) from state_read_exc
+
+                    prior_state_digest = None if state is None else state_digest
+                    if observed_state_digest == prior_state_digest:
+                        if not isinstance(state_rollback_exc, Exception):
+                            raise
+                        raise ConfigurationError(
+                            "Codex accepted the user-layer write, but effective "
+                            "readback did not match. The prior config and exact prior "
+                            "restore state were reinstated despite a rollback error."
+                        ) from state_rollback_exc
+
+                    if observed_state_digest == published_state_digest:
+                        try:
+                            compensation_result = _batch_write(
+                                app,
+                                edits,
+                                rollback_result.get("version"),
+                                identity_guard=identity_guard,
+                                identity_phase="setup readback compensation",
+                                reload_user_config=True,
+                            )
+                            if compensation_result.get("status") not in {
+                                "ok",
+                                "okOverridden",
+                            }:
+                                raise ConfigurationError(
+                                    "unexpected compensation status "
+                                    f"{compensation_result.get('status')!r}"
+                                )
+                            compensation_read = app.request(
+                                "config/read",
+                                {"includeLayers": True, "cwd": str(workspace)},
+                            )
+                            compensation_config, _ = _user_layer(compensation_read)
+                            compensation_current = _current_values(
+                                compensation_config, plugin_id
+                            )
+                            if not _managed_matches(new_state, compensation_current):
+                                raise ConfigurationError(
+                                    "forward-compensated user config did not match the "
+                                    "newly published restore state"
+                                )
+                            _, compensated_state_digest = _read_state_snapshot(
+                                state_path
+                            )
+                            if compensated_state_digest != published_state_digest:
+                                raise ConfigurationError(
+                                    "canonical routing state changed during forward "
+                                    "config compensation"
+                                )
+                        except BaseException as compensation_exc:
+                            raise ConfigurationError(
+                                "Config rollback completed after effective readback "
+                                "failed, but restore-state rollback did not commit and "
+                                "forward config compensation failed. Config and state "
+                                "may be inconsistent. Run status before continuing."
+                            ) from compensation_exc
+                        if not isinstance(state_rollback_exc, Exception):
+                            raise
+                        raise ConfigurationError(
+                            "Codex accepted the write but effective readback did not "
+                            "match. The newly published config and restore state were "
+                            "re-paired after state rollback failed before commit."
+                        ) from state_rollback_exc
+
+                    raise ConfigurationError(
+                        "Config rollback completed after effective readback failed, "
+                        "but canonical restore state matched neither the exact prior "
+                        "state nor the newly published state. Config and state may be "
+                        "inconsistent. Run status before continuing."
+                    ) from state_rollback_exc
                 raise ConfigurationError(
                     "Codex accepted the user-layer write, but current-workspace "
                     "effective readback did not match; the prior config and restore "
                     "state were reinstated."
                 )
+            identity_guard.assert_unchanged("setup success publication")
             print(
                 "Native routing policy installed. Start a new Codex task, select a "
                 "v2 model such as current Sol or Terra as orchestrator, and use "
                 "Codex normally."
             )
             return 0
-    except (ConfigurationError, OSError, KeyError, TypeError) as exc:
+    except (
+        ConfigurationError,
+        plugin_identity.PluginIdentityError,
+        OSError,
+        KeyError,
+        TypeError,
+    ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 

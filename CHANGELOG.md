@@ -1,13 +1,113 @@
 # Changelog
 
+## 0.9.3 — 2026-07-24
+
+- Repair provider-enabled teardown after the exact installed plugin is disabled.
+  Codex 0.145 can materialize selected Fable, Qwen, or Kimi launcher `enabled`
+  leaves as effective `true` after their user overrides are deleted, even though
+  every explicit config layer omits those leaves and only empty MCP table headers
+  remain. Disable now recognizes only that provenance-attested plugin contribution
+  and removes the saved restore state normally.
+- Keep the exception fail-closed: it requires the exact schema-7 saved identity,
+  a guard-attested disabled inventory record, a retained package manifest default
+  of `enabled=false`, known prior absence, exact user restoration, absence from
+  every explicit config layer, and an effective-only boolean `true`. Workspace or
+  managed overrides, enabled or drifted identities, unexpected values, concurrent
+  user edits, state-digest races, and `okOverridden` writes remain failures.
+- Add faithful positive, workspace-override, user-race, and state-race regressions,
+  plus manifest and explicit-layer rejection coverage for the new proof boundary.
+
+## 0.9.2 — 2026-07-23
+
+- Decode Kimi Code CLI and ACP subprocess output explicitly as UTF-8 on Windows,
+  preventing Unicode punctuation in Designer handoffs from being misread through
+  the active console code page.
+- Resolve the enabled executing Codex Orchestration installation from the native
+  plugin inventory instead of writing MCP overrides beneath a hard-coded marketplace
+  ID. The guard binds the executing package to Codex's documented marketplace/name/
+  version cache coordinates while independently retaining the inventory source.
+  Missing, disabled, malformed, ambiguous, cache-mismatched, or concurrently changed
+  identity now fails closed before publication.
+- Add routing schema/policy version 7 with an exact persisted `plugin_id`. Unmigrated
+  schemas 1–6 remain bound to the historical canonical namespace. A legacy state
+  with no plugin-scoped MCP snapshot may upgrade after its global managed fields
+  match exactly; a legacy MCP snapshot is never moved across marketplace namespaces.
+  Disable restores the saved historical namespace even when it is currently disabled.
+- Guard setup, status, repair, rollback, disable, and state publication with separate
+  full-inventory and operation-identity digests. Windows source and executing-cache
+  identity, stat, and payload hashes are rechecked through retained strict handles
+  rather than weaker path reopens. POSIX live path identities are independently
+  reopened with no-follow semantics to catch same-name replacement, while an
+  allowlisted source-only loader makes package-local bytecode unreachable and binds
+  the loaded security modules into the operation digest.
+- Serialize native routing operations with one nonblocking per-`CODEX_HOME`
+  transaction lock. State replacement/removal atomically captures the prior pathname,
+  validates its exact originally observed bytes, and publishes with a platform-native
+  atomic no-overwrite rename on Windows, Linux, and macOS. No hard-link cleanup is
+  required, so a successful publication is always a single-link state; a
+  non-cooperating newer writer is preserved rather than clobbered.
+  Disable now retains recovery state unless both user and effective config readback
+  prove the intended restore, including explicit refusal of `okOverridden` writes.
+- Clear Git's repository-local environment before versioned pre-commit and pre-push
+  preflight so linked-worktree hooks cannot redirect nested Git fixture tests into
+  the parent repository metadata.
+
+## 0.9.1 — Unreleased
+
+- Clarify that omitted Planner means root-owned planning, so a fresh direct Sol
+  Advisor may match a Sol root without becoming a duplicate configured Planner
+  route. Preserve fail-closed separation for two configured Planner/Advisor routes.
+- Make explicit current-task Advisor and Executor routing authoritative, and forbid
+  inventing or substituting models solely to manufacture provider or model diversity.
+- Treat explicit Windows executable paths as paths rather than command names, and
+  keep lifecycle/negative-path fixtures portable without weakening production checks.
+
+## 0.9.0 — Unreleased
+
+- Add Qwen 3.8 Max Preview as a sealed, independent Advisor through the official
+  Qwen Code CLI and an existing Alibaba Token Plan subscription. The route pins
+  the exact runtime model, uses provider-native reasoning, disables custom context,
+  tools, and chat recording, and requires structured runtime/model evidence plus a
+  `PLAN_APPROVED` or `PLAN_REVISE` decision.
+- Keep the plan credential outside plugin state and routing hints in the operating
+  system credential store. Each call scrubs ambient provider overrides, injects an
+  allowlisted regional Token Plan endpoint only into the child process, runs from a
+  disposable empty directory, and rejects tool-linked, malformed, or wrong-model
+  output.
+- Add routing schema/policy version 6, reversible plugin-scoped Qwen MCP launcher
+  management, Global and China plan-region selection, no-call readiness status,
+  negative security tests, and exact Qwen Code 0.20.0 capability pinning.
+
+## 0.8.1 — Unreleased
+
+- Keep the subscription-backed Kimi K3 Designer pinned to `max` when the
+  managed Kimi catalog changes its UI default. The bridge now verifies that
+  `max` remains supported, scrubs ambient model overrides, and injects its own
+  documented `KIMI_MODEL_THINKING_EFFORT=max` wire override for every ACP call.
+
 ## 0.8.0 — Unreleased
 
+- Add a sealed, subscription-backed Kimi K3 Designer route through the official
+  Kimi Code CLI and ACP. `Designer: Kimi K3` now uses the existing Kimi Code OAuth
+  login and never asks for an API key, prepares OpenRouter, or runs a billable Gate
+  0.
+- Pin Kimi Code CLI 0.27.0+, `acpx` 0.12.0+, model `kimi-code/k3`, and catalog
+  support for `max`. Each design call uses a fresh deny-all, no-terminal ACP
+  session in an empty temporary directory and rejects tool, permission, filesystem,
+  terminal, malformed-transcript, or wrong-model activity.
+- Add routing schema/policy version 5, reversible plugin-scoped Kimi MCP launcher
+  management, prerequisite/status diagnostics without a model call, sanitized
+  runtime evidence, negative tests, and threat-model documentation. Explicit
+  OpenRouter Kimi requests remain available through the separate API-backed
+  External Model lifecycle.
 - Replace READY External Model execution through Desktop native agents with a
   sealed direct `codex exec` transport. Packets travel only on bounded stdin;
   output is a bounded safe last-message artifact; model-facing tools, provider
   streams, retries, fallback, and lifecycle writes are disabled.
 - Re-attest the explicit absolute active-host Codex executable before launch and
   preserve exact schema-1 registries and managed role files without migration.
+
+## 0.7.2 — 2026-07-18
 
 - Enable implicit skill discovery for natural-language Kimi K3, External Model,
   and model-role availability questions. The previous metadata required an explicit

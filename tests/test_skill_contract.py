@@ -74,6 +74,7 @@ class SkillContractTests(unittest.TestCase):
     def test_ready_role_selection_uses_concise_activation_confirmation(self) -> None:
         expected = """```text
 Planner — Fable 5 high: Activated
+Advisor — Qwen 3.8 Max Preview: Activated
 Designer — Kimi K3: Activated
 Executor — GPT-5.6 Sol high: Activated
 ```"""
@@ -93,7 +94,11 @@ Executor — GPT-5.6 Sol high: Activated
         self.assertIn("--designer-model", SKILL)
         self.assertIn("--designer-effort", SKILL)
         self.assertNotIn("--designer-agent", SKILL)
-        self.assertIn("Persistent Designer accepts only a direct same-provider model", SKILL)
+        self.assertIn(
+            "Persistent Designer accepts either a direct same-provider model or the audited Kimi",
+            SKILL,
+        )
+        self.assertIn("--designer-kimi", SKILL)
         self.assertIn("task-local External Model role named `designer`", SKILL)
         self.assertIn("Designer may edit only explicitly delegated design artifacts", SKILL)
         self.assertIn("never revises the canonical plan", SKILL)
@@ -101,48 +106,57 @@ Executor — GPT-5.6 Sol high: Activated
         self.assertIn("Designer: none", SKILL)
         self.assertIn('"designer"', ROUTING_STATE)
 
-    def test_bare_external_designer_label_enters_secure_role_lifecycle(self) -> None:
+    def test_bare_kimi_designer_label_uses_subscription_bridge(self) -> None:
         self.assertIn("Designer: Kimi K3", SKILL)
-        self.assertIn("explicit External Model seat assignment", SKILL)
-        self.assertIn("Explicit External Model seat labels are the exception", SKILL)
-        self.assertIn("never pass it to `--designer-model`", SKILL)
-        self.assertIn("inspect `external status` first", SKILL)
-        self.assertIn("role `designer`", SKILL)
-        self.assertIn("preview and apply `connect`", SKILL)
-        self.assertIn("RESTART_REQUIRED", SKILL)
-        self.assertIn("then use\n  sealed `invoke`", SKILL)
-        self.assertIn("Never execute an External Model role with `agents.spawn_agent`", SKILL)
-        self.assertIn("`resolve` remains a read-only diagnostic", SKILL)
-        self.assertNotIn("delegate only to the returned agent name", SKILL)
-        self.assertIn("do not report the requested external seat as unavailable", SKILL)
-        self.assertIn("never authorizes Gate 0 billing", SKILL)
-        self.assertIn("Never overwrite, repair, disconnect, or substitute", SKILL)
-        self.assertIn("preserve the original task", SKILL)
-        self.assertIn("must not be persisted in native routing state", SKILL)
-        self.assertIn("report its exact lifecycle state and next action, not unavailable", SKILL)
-        self.assertIn("only External Model seat labels", SKILL)
-        self.assertIn("also supplies any native seat", SKILL)
-        self.assertIn("collect a missing Executor", SKILL)
-        self.assertIn("never modifies or removes a pre-existing provider entry", SKILL)
-        self.assertIn("never modifies, replaces, or removes a pre-existing provider entry", EXTERNAL_REFERENCE)
+        self.assertIn("persistent audited\nsubscription route `--designer-kimi`", SKILL)
+        self.assertIn("Do not prepare OpenRouter, ask for an API\nkey", SKILL)
+        self.assertIn("Kimi Code CLI 0.27.0 or\nnewer", SKILL)
+        self.assertIn("acpx 0.12.0 or newer", SKILL)
+        self.assertIn("managed Kimi Code\nOAuth subscription", SKILL)
+        self.assertIn("fresh `acpx` ACP session", SKILL)
+        self.assertIn("rejects tool events and filesystem or terminal requests", SKILL)
+        self.assertIn("requires ACP runtime model `kimi-code/k3`", SKILL)
+        self.assertIn("KIMI_MODEL_THINKING_EFFORT=max", SKILL)
+        self.assertIn("never reads or copies the OAuth token", SKILL)
+        self.assertIn("Never silently substitute one lane for\nanother", EXTERNAL_REFERENCE)
 
-    def test_natural_kimi_availability_question_uses_read_only_external_status(self) -> None:
-        self.assertIn("is Kimi available to use as Designer?", SKILL)
-        self.assertIn("Implicit invocation is discovery, not mutation authority", SKILL)
-        self.assertIn("run `external status`", SKILL)
+    def test_literal_external_models_use_sealed_invoke_not_native_spawn(self) -> None:
         self.assertIn(
-            "Never infer External Model availability from the currently exposed MCP or subagent",
+            "Explicit forms that name `OpenRouter model moonshotai/kimi-k3`",
             SKILL,
         )
-        self.assertIn("A visible Fable tool is not an exhaustive provider", SKILL)
-        self.assertIn("`supported`", SKILL)
-        self.assertIn("`configured`", SKILL)
-        self.assertIn("`callable now`", SKILL)
-        self.assertIn("`locally ready`", SKILL)
-        self.assertIn("read-only `resolve` succeeds", SKILL)
-        self.assertIn("a sealed `invoke` has successfully attested", SKILL)
-        self.assertIn("Read-only discovery must report this as unconfirmed", SKILL)
-        self.assertIn("never authorizes configuration, credentials, or spend", README)
+        self.assertIn("Execute only with sealed\n`invoke`", SKILL)
+        self.assertIn("never a native spawn-agent tool", SKILL)
+        self.assertIn("maps the requested role and effort for diagnostics", SKILL)
+        self.assertNotIn("Delegate only to\nthat returned name", SKILL)
+        self.assertIn("Run sealed `invoke` with the bounded packet on stdin", EXTERNAL_REFERENCE)
+
+    def test_qwen_advisor_label_uses_sealed_subscription_bridge(self) -> None:
+        self.assertIn("Advisor: Qwen 3.8 Max Preview", SKILL)
+        self.assertIn("audited subscription route `--advisor-qwen`", SKILL)
+        self.assertIn("Token Plan JSON API", SKILL)
+        self.assertIn("--prepare-qwen", SKILL)
+        self.assertIn("operating-system credential store", SKILL)
+        self.assertIn("qwen3.8-max-preview", SKILL)
+        self.assertIn("it contains no tools", SKILL)
+        self.assertIn("PLAN_APPROVED", SKILL)
+        self.assertIn("PLAN_REVISE", SKILL)
+        self.assertIn('"qwen_cli"', ROUTING_STATE)
+
+    def test_natural_kimi_availability_question_uses_read_only_native_status(self) -> None:
+        self.assertIn("is Kimi available to use as Designer?", SKILL)
+        self.assertIn("Implicit invocation is discovery, not mutation authority", SKILL)
+        self.assertIn("run native `status`", SKILL)
+        self.assertIn(
+            "Never infer availability from\nthe visible tool list alone",
+            SKILL,
+        )
+        self.assertIn("`kimi_cli` Designer route", SKILL)
+        self.assertIn("managed:kimi-code", SKILL)
+        self.assertIn("support for effort `max`", SKILL)
+        self.assertIn("Status makes no model call", SKILL)
+        self.assertIn("read-only status inspection only and never", README)
+        self.assertIn("authorizes configuration, credentials, or spend", README)
 
     def test_plugin_update_is_canonical_non_destructive_and_restart_bound(self) -> None:
         self.assertIn("## Update the plugin", SKILL)
@@ -189,7 +203,7 @@ Executor — GPT-5.6 Sol high: Activated
     def test_routing_repair_is_narrow_and_restart_aware(self) -> None:
         self.assertIn("--repair --apply", SKILL)
         self.assertIn("both live hints to retain the plugin\nownership marker", SKILL)
-        self.assertIn("Fable launcher", SKILL)
+        self.assertIn("bundled MCP launcher", SKILL)
         self.assertIn("leaves the original\nrestore snapshot", SKILL)
         self.assertIn("preserves\na concurrent config or saved-state edit", SKILL)
         self.assertIn("fully quit and reopen Codex", SKILL)
@@ -291,7 +305,7 @@ Executor — GPT-5.6 Sol high: Activated
         self.assertIn("`Ultra` is a user-facing alias", SKILL)
         self.assertIn("--advisor-fable --advisor-effort <normalized-effort>", SKILL)
         self.assertIn("--planner-fable --planner-effort <normalized-effort>", SKILL)
-        self.assertIn("built-in cross-provider Planner or Advisor exception", SKILL)
+        self.assertIn("bundled cross-provider Planner or Advisor exception", SKILL)
         self.assertIn("All bundled variants are disabled by default", SKILL)
         self.assertIn("first-party Pro or Max account", SKILL)
         self.assertIn("never extracts a token", SKILL)
@@ -331,6 +345,15 @@ Executor — GPT-5.6 Sol high: Activated
         self.assertIn("explicitly made that seat best-effort", SKILL)
         self.assertIn("An unavailable Executor may leave work with the root", SKILL)
         self.assertIn("Planner and Advisor never contact one another directly", SKILL)
+
+    def test_root_planning_is_not_a_duplicate_configured_sol_route(self) -> None:
+        self.assertIn("root substrate is not a configured Planner route", SKILL)
+        self.assertIn("fresh direct Advisor may use the same model ID as the root", SKILL)
+        self.assertIn('use `fork_turns = "none"`', SKILL)
+        self.assertIn("current-task model, effort, or agent choice", SKILL)
+        self.assertIn("never invent or substitute GPT-5.5", SKILL)
+        self.assertIn("If that exact route is unavailable, report it unavailable", SKILL)
+        self.assertIn("two configured Planner and Advisor routes", SKILL)
 
     def test_route_reporting_is_truthful(self) -> None:
         self.assertIn("native policy installed", SKILL)

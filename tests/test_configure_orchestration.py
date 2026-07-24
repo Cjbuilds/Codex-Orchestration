@@ -168,7 +168,9 @@ class ConfigureOrchestrationTests(unittest.TestCase):
             staged = root / "staged.toml"
             path.write_bytes(b"old\n")
             real_open = os.open
+            real_binary_flag = getattr(os, "O_BINARY", 0)
             synthetic_binary_flag = 1 << 29
+            tracked_binary_flag = real_binary_flag | synthetic_binary_flag
             observed_flags: list[int] = []
 
             def tracked_open(
@@ -189,7 +191,7 @@ class ConfigureOrchestrationTests(unittest.TestCase):
                 mock.patch.object(
                     CONFIGURE.os,
                     "O_BINARY",
-                    synthetic_binary_flag,
+                    tracked_binary_flag,
                     create=True,
                 ),
                 mock.patch.object(CONFIGURE.os, "open", side_effect=tracked_open),
@@ -207,7 +209,7 @@ class ConfigureOrchestrationTests(unittest.TestCase):
         """Create a valid prepared journal whose original tombstone is unavailable."""
         transaction_id = "a" * 24
         path = root / "agent.toml"
-        path.write_text("old\n", encoding="utf-8")
+        path.write_bytes(b"old\n")
         path.chmod(0o600)
         original_identity = CONFIGURE._path_identity(path)
         prefix = f".codex-orchestration-txn-{transaction_id}-0"
@@ -740,6 +742,10 @@ multi_agent = true
             self.assertIn("Catalog source unavailable", stderr.getvalue())
 
     def test_direct_codex_bin_must_be_regular_and_executable(self) -> None:
+        self.assertEqual(
+            CONFIGURE.resolve_codex_executable(sys.executable),
+            str(Path(sys.executable).resolve()),
+        )
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             with self.assertRaises(CONFIGURE.ConfigurationError):
@@ -752,9 +758,12 @@ multi_agent = true
 
     def test_catalog_subprocesses_have_timeouts_and_json_shape_is_validated(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            binary = Path(temporary) / "codex"
-            binary.write_text("#!/bin/sh\n", encoding="utf-8")
-            binary.chmod(0o700)
+            if os.name == "nt":
+                binary = Path(sys.executable)
+            else:
+                binary = Path(temporary) / "codex"
+                binary.write_text("#!/bin/sh\n", encoding="utf-8")
+                binary.chmod(0o700)
             with mock.patch.object(
                 CONFIGURE.subprocess,
                 "run",
@@ -836,7 +845,12 @@ multi_agent = true
                     outside.mkdir()
                 path = root / target
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.symlink_to(outside, target_is_directory=outside.is_dir())
+                try:
+                    path.symlink_to(outside, target_is_directory=outside.is_dir())
+                except OSError as exc:
+                    if os.name == "nt" and exc.winerror == 1314:
+                        self.skipTest("Windows symlink privilege is unavailable")
+                    raise
 
                 result, _, stderr = self.run_main(root, "--apply")
                 self.assertEqual(result, 2)
@@ -851,7 +865,12 @@ multi_agent = true
             agents.mkdir(parents=True)
             outside = root / "outside.toml"
             outside.write_text('name = "other"\n', encoding="utf-8")
-            (agents / "linked.toml").symlink_to(outside)
+            try:
+                (agents / "linked.toml").symlink_to(outside)
+            except OSError as exc:
+                if os.name == "nt" and exc.winerror == 1314:
+                    self.skipTest("Windows symlink privilege is unavailable")
+                raise
 
             result, _, stderr = self.run_main(root, "--apply")
             self.assertEqual(result, 2)
@@ -1341,8 +1360,8 @@ multi_agent = true'''
             root = Path(temporary)
             first = root / "first.toml"
             second = root / "second.toml"
-            first.write_text("first-old\n", encoding="utf-8")
-            second.write_text("second-old\n", encoding="utf-8")
+            first.write_bytes(b"first-old\n")
+            second.write_bytes(b"second-old\n")
             real_replace = CONFIGURE._replace_staged_atomically
             real_restore = CONFIGURE._restore_original_from_tombstone
             second_failed = False
@@ -1439,8 +1458,8 @@ multi_agent = true'''
             root = Path(temporary)
             first = root / "first.toml"
             second = root / "second.toml"
-            first.write_text("first-old\n", encoding="utf-8")
-            second.write_text("second-old\n", encoding="utf-8")
+            first.write_bytes(b"first-old\n")
+            second.write_bytes(b"second-old\n")
             real_replace = CONFIGURE._replace_staged_atomically
             interrupted = False
 
@@ -1489,7 +1508,7 @@ multi_agent = true'''
     def test_atomic_update_preserves_security_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "agent.toml"
-            path.write_text("old\n", encoding="utf-8")
+            path.write_bytes(b"old\n")
             path.chmod(0o640)
             before = path.stat()
             xattr_name = "user.codex_orchestration_test"
@@ -1535,7 +1554,7 @@ multi_agent = true'''
             after = path.stat()
             self.assertEqual(path.read_text(encoding="utf-8"), "new\n")
             self.assertNotEqual(after.st_ino, before.st_ino)
-            self.assertEqual(after.st_mode & 0o777, 0o640)
+            self.assertEqual(after.st_mode & 0o777, before.st_mode & 0o777)
             if xattr_supported:
                 self.assertEqual(CONFIGURE._xattr_snapshot(path), xattrs_before)
             if acl_before is not None:
@@ -1703,8 +1722,8 @@ multi_agent = true'''
             root = Path(temporary)
             first = root / "first.toml"
             second = root / "second.toml"
-            first.write_text("first-old\n", encoding="utf-8")
-            second.write_text("second-old\n", encoding="utf-8")
+            first.write_bytes(b"first-old\n")
+            second.write_bytes(b"second-old\n")
             real_write_journal = CONFIGURE._write_transaction_journal
             interrupted = False
 
@@ -1797,31 +1816,36 @@ multi_agent = true'''
     def test_prepared_recovery_uses_verified_staged_backup(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            path, _, _ = self.prepared_fallback_state(root)
+            path, staged_old, _ = self.prepared_fallback_state(root)
+            expected_mode = staged_old.stat().st_mode & 0o777
 
             self.assertTrue(CONFIGURE.recover_incomplete_transaction(root))
 
             self.assertEqual(path.read_text(encoding="utf-8"), "old\n")
-            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(path.stat().st_mode & 0o777, expected_mode)
             self.assertFalse((root / CONFIGURE.TRANSACTION_JOURNAL).exists())
 
     def test_prepared_fallback_recovery_is_idempotent_after_replace(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             path, staged_old, _ = self.prepared_fallback_state(root)
-            real_replace = CONFIGURE.os.replace
+            real_replace = CONFIGURE._replace_exact
             interrupted = False
 
-            def interrupt_after_fallback_replace(source: object, target: object) -> None:
+            def interrupt_after_fallback_replace(
+                source: Path,
+                target: Path,
+                expected_identity: tuple[int, int],
+            ) -> None:
                 nonlocal interrupted
-                real_replace(source, target)
-                if Path(source) == staged_old and Path(target) == path:
+                real_replace(source, target, expected_identity)
+                if source == staged_old and target == path:
                     interrupted = True
                     raise KeyboardInterrupt()
 
             with mock.patch.object(
-                CONFIGURE.os,
-                "replace",
+                CONFIGURE,
+                "_replace_exact",
                 side_effect=interrupt_after_fallback_replace,
             ):
                 with self.assertRaises(KeyboardInterrupt):
@@ -1857,7 +1881,9 @@ multi_agent = true'''
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             path, staged_old, _ = self.prepared_fallback_state(root)
-            staged_old.chmod(0o777)
+            tampered_mode = 0o444 if os.name == "nt" else 0o777
+            staged_old.chmod(tampered_mode)
+            observed_tampered_mode = staged_old.stat().st_mode & 0o777
 
             with self.assertRaisesRegex(
                 CONFIGURE.ConfigurationError,
@@ -1866,7 +1892,9 @@ multi_agent = true'''
                 CONFIGURE.recover_incomplete_transaction(root)
 
             self.assertEqual(path.read_text(encoding="utf-8"), "new\n")
-            self.assertEqual(staged_old.stat().st_mode & 0o777, 0o777)
+            self.assertEqual(
+                staged_old.stat().st_mode & 0o777, observed_tampered_mode
+            )
             self.assertTrue((root / CONFIGURE.TRANSACTION_JOURNAL).exists())
 
     def test_journal_rejects_misdirected_transaction_temporary(self) -> None:
@@ -1933,7 +1961,7 @@ multi_agent = true'''
             root = Path(temporary)
             path = root / "agent.toml"
             outside = root / "outside.toml"
-            path.write_text("old\n", encoding="utf-8")
+            path.write_bytes(b"old\n")
             real_replace = CONFIGURE._replace_staged_atomically
             injected = False
 
@@ -2009,8 +2037,9 @@ multi_agent = true'''
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             path = root / "agent.toml"
-            path.write_text("old\n", encoding="utf-8")
-            path.chmod(0o640)
+            path.write_bytes(b"old\n")
+            changed_mode = 0o444 if os.name == "nt" else 0o600
+            path.chmod(0o666 if os.name == "nt" else 0o640)
             real_replace = CONFIGURE._replace_staged_atomically
             injected = False
 
@@ -2018,7 +2047,7 @@ multi_agent = true'''
                 nonlocal injected
                 destination = args[1]
                 if not injected:
-                    Path(destination).chmod(0o600)
+                    Path(destination).chmod(changed_mode)
                     injected = True
                 real_replace(*args)
 
@@ -2038,14 +2067,15 @@ multi_agent = true'''
 
             self.assertTrue(injected)
             self.assertEqual(path.read_text(encoding="utf-8"), "old\n")
-            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(path.stat().st_mode & 0o777, changed_mode)
 
     def test_metadata_change_in_final_prepublication_window_is_preserved(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             path = root / "agent.toml"
-            path.write_text("old\n", encoding="utf-8")
-            path.chmod(0o640)
+            path.write_bytes(b"old\n")
+            changed_mode = 0o444 if os.name == "nt" else 0o600
+            path.chmod(0o666 if os.name == "nt" else 0o640)
             real_signature = CONFIGURE._metadata_signature
             injected = False
 
@@ -2059,7 +2089,7 @@ multi_agent = true'''
                     and path.stat().st_nlink == 2
                     and not injected
                 ):
-                    path.chmod(0o600)
+                    path.chmod(changed_mode)
                     injected = True
                 return real_signature(candidate)
 
@@ -2079,14 +2109,14 @@ multi_agent = true'''
 
             self.assertTrue(injected)
             self.assertEqual(path.read_text(encoding="utf-8"), "old\n")
-            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(path.stat().st_mode & 0o777, changed_mode)
             self.assertFalse((root / CONFIGURE.TRANSACTION_JOURNAL).exists())
 
     def test_content_change_in_final_prepublication_window_is_preserved(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             path = root / "agent.toml"
-            path.write_text("old\n", encoding="utf-8")
+            path.write_bytes(b"old\n")
             original_stat = path.stat()
             real_signature = CONFIGURE._metadata_signature
             injected = False
@@ -2101,7 +2131,7 @@ multi_agent = true'''
                     and path.stat().st_nlink == 2
                     and not injected
                 ):
-                    path.write_text("usr\n", encoding="utf-8")
+                    path.write_bytes(b"usr\n")
                     os.utime(
                         path,
                         ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
@@ -2131,7 +2161,7 @@ multi_agent = true'''
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             path = root / "agent.toml"
-            path.write_text("old\n", encoding="utf-8")
+            path.write_bytes(b"old\n")
             real_replace = CONFIGURE._replace_staged_atomically
             injected = False
 
@@ -2358,8 +2388,8 @@ multi_agent = true'''
             root = Path(temporary)
             deleted = root / "delete.toml"
             failing = root / "failing.toml"
-            deleted.write_text("delete-old\n", encoding="utf-8")
-            failing.write_text("failing-old\n", encoding="utf-8")
+            deleted.write_bytes(b"delete-old\n")
+            failing.write_bytes(b"failing-old\n")
             deleted.chmod(0o640)
             before = deleted.stat()
             xattr_name = "user.codex_orchestration_delete_rollback"
@@ -2422,7 +2452,7 @@ multi_agent = true'''
                 (after.st_dev, after.st_ino),
                 (before.st_dev, before.st_ino),
             )
-            self.assertEqual(after.st_mode & 0o777, 0o640)
+            self.assertEqual(after.st_mode & 0o777, before.st_mode & 0o777)
             if xattr_supported:
                 self.assertEqual(os.getxattr(deleted, xattr_name), b"preserve")
 
@@ -2431,7 +2461,7 @@ multi_agent = true'''
             root = Path(temporary)
             path = root / "agent.toml"
             outside = root / "outside.toml"
-            path.write_text("old\n", encoding="utf-8")
+            path.write_bytes(b"old\n")
             real_sha256_file = CONFIGURE._sha256_file
             path_hash_reads = 0
             injected = False

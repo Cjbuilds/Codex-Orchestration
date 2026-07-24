@@ -1,0 +1,1218 @@
+"""Fail-closed transaction identity guard for Codex Orchestration.
+
+This module intentionally covers one plugin and one transaction lifetime.  It is
+not a general-purpose filesystem integrity or sandboxing API.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import ctypes
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import subprocess
+import sys
+import tempfile
+from typing import Any, Mapping, Sequence
+
+
+PLUGIN_NAME = "codex-orchestration"
+LEGACY_PLUGIN_ID = "codex-orchestration@codex-orchestration"
+MAX_OUTPUT_BYTES = 1024 * 1024
+DEFAULT_TIMEOUT_SECONDS = 15.0
+_MARKETPLACE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_SOURCE_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+_REQUIRED_LOADED_SOURCE_MODULES = frozenset(
+    {"external_cli_trust", "external_credentials", "plugin_identity", "routing_state"}
+)
+_ALLOWED_LOADED_SOURCE_MODULES = _REQUIRED_LOADED_SOURCE_MODULES | {
+    "fable_advisor_mcp",
+    "kimi_designer_mcp",
+    "qwen_advisor_mcp",
+}
+
+
+class PluginIdentityError(RuntimeError):
+    """Base class for sanitized, fail-closed identity failures."""
+
+
+class InventoryCommandError(PluginIdentityError):
+    pass
+
+
+class InventoryFormatError(PluginIdentityError):
+    pass
+
+
+class PackageIdentityError(PluginIdentityError):
+    pass
+
+
+class SelectionError(PluginIdentityError):
+    pass
+
+
+class IdentityDriftError(PluginIdentityError):
+    pass
+
+
+class _BytecodeIsolation:
+    """Make package-local bytecode non-executable for one guarded transaction."""
+
+    def __init__(self) -> None:
+        self.cache_root: Path | None = None
+        self._temporary: tempfile.TemporaryDirectory[str] | None = None
+        self._previous_prefix: str | None = None
+        self._previous_dont_write = False
+
+    def __enter__(self) -> "_BytecodeIsolation":
+        if self._temporary is not None:
+            raise PackageIdentityError("Bytecode isolation is already active.")
+        self._previous_prefix = sys.pycache_prefix
+        self._previous_dont_write = sys.dont_write_bytecode
+        self._temporary = tempfile.TemporaryDirectory(
+            prefix="codex-orchestration-bytecode-"
+        )
+        self.cache_root = Path(self._temporary.name).resolve()
+        sys.pycache_prefix = str(self.cache_root)
+        sys.dont_write_bytecode = True
+        return self
+
+    def close(self) -> None:
+        temporary = self._temporary
+        if temporary is None:
+            return
+        sys.pycache_prefix = self._previous_prefix
+        sys.dont_write_bytecode = self._previous_dont_write
+        self._temporary = None
+        self.cache_root = None
+        temporary.cleanup()
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        self.close()
+
+
+def _canonical_json(value: Any) -> bytes:
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+
+
+def _digest(value: Any) -> str:
+    return hashlib.sha256(_canonical_json(value)).hexdigest()
+
+
+def _text(value: Any, label: str, *, allow_empty: bool = False) -> str:
+    if not isinstance(value, str) or (not allow_empty and not value):
+        raise InventoryFormatError(f"Plugin inventory has an invalid {label}.")
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise InventoryFormatError(f"Plugin inventory has an invalid {label}.")
+    return value
+
+
+def _boolean(value: Any, label: str) -> bool:
+    if type(value) is not bool:
+        raise InventoryFormatError(f"Plugin inventory has an invalid {label}.")
+    return value
+
+
+def _inventory_plugin_id(value: Any) -> tuple[str, str, str]:
+    result = _text(value, "plugin ID")
+    if result.count("@") != 1:
+        raise InventoryFormatError("Plugin inventory has an invalid plugin ID.")
+    name, marketplace = result.split("@")
+    if (
+        _MARKETPLACE_RE.fullmatch(name) is None
+        or _MARKETPLACE_RE.fullmatch(marketplace) is None
+    ):
+        raise InventoryFormatError("Plugin inventory has an invalid plugin ID.")
+    return result, name, marketplace
+
+
+def _plugin_id(value: Any) -> str:
+    result, name, _ = _inventory_plugin_id(value)
+    if name != PLUGIN_NAME:
+        raise InventoryFormatError("Plugin inventory has an invalid plugin ID.")
+    return result
+
+
+def _record_identity(
+    raw: Mapping[str, Any],
+) -> tuple[str, str, str, bool, bool]:
+    plugin_id, identity_name, identity_marketplace = _inventory_plugin_id(
+        raw.get("pluginId")
+    )
+    name = _text(raw.get("name"), "plugin name")
+    marketplace = _text(raw.get("marketplaceName"), "marketplace name")
+    if name != identity_name or marketplace != identity_marketplace:
+        raise InventoryFormatError("Plugin inventory identity fields are inconsistent.")
+    installed = _boolean(raw.get("installed"), "installed state")
+    enabled = _boolean(raw.get("enabled"), "enabled state")
+    return plugin_id, name, marketplace, installed, enabled
+
+
+def _canonical_path(value: Any, label: str) -> Path:
+    raw = _text(value, label)
+    path = Path(raw)
+    if not path.is_absolute():
+        raise InventoryFormatError(f"Plugin inventory has an invalid {label}.")
+    # Do not resolve the leaf before it is opened with no-follow/reparse-point
+    # semantics; doing so would silently accept a linked source root.
+    return Path(os.path.abspath(path))
+
+
+def _cache_component(value: Any, label: str) -> str:
+    component = _text(value, label)
+    if (
+        component in {".", ".."}
+        or len(component) > 128
+        or component[0] in {".", "-"}
+        or any(character in component for character in ("/", "\\", ":"))
+        or not all(
+            character.isascii()
+            and (character.isalnum() or character in {".", "_", "+", "-"})
+            for character in component
+        )
+    ):
+        raise InventoryFormatError(f"Plugin inventory has an invalid {label}.")
+    return component
+
+
+def _expected_cache_path(
+    codex_home: str | os.PathLike[str] | None,
+    record: Mapping[str, Any],
+) -> Path:
+    if codex_home is None:
+        raise SelectionError("Effective CODEX_HOME is required for plugin cache identity.")
+    home = Path(codex_home)
+    if not home.is_absolute() or any(
+        ord(character) < 32 or ord(character) == 127 for character in str(home)
+    ):
+        raise SelectionError("Effective CODEX_HOME is invalid for plugin cache identity.")
+    marketplace = _cache_component(record["marketplace_name"], "marketplace cache component")
+    name = _cache_component(record["name"], "plugin cache component")
+    version = _cache_component(record["version"], "version cache component")
+    home = Path(os.path.abspath(home))
+    candidate = home / "plugins" / "cache" / marketplace / name / version
+    cache_root = home / "plugins" / "cache"
+    try:
+        if os.path.commonpath((str(cache_root), str(candidate))) != str(cache_root):
+            raise SelectionError("Plugin cache path escapes effective CODEX_HOME.")
+    except ValueError as error:
+        raise SelectionError("Plugin cache path escapes effective CODEX_HOME.") from error
+    return candidate
+
+
+def _path_key(path: str | os.PathLike[str]) -> str:
+    return os.path.normcase(os.path.normpath(os.path.abspath(path)))
+
+
+def _validate_exact_cache_path(path: Path) -> None:
+    if _path_key(os.path.realpath(path)) != _path_key(path):
+        raise SelectionError("Executing plugin cache path is aliased or reparsed.")
+
+
+if os.name == "nt":
+    from ctypes import wintypes
+    import msvcrt
+
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _INVALID_HANDLE = wintypes.HANDLE(-1).value
+    _GENERIC_READ = 0x80000000
+    _FILE_READ_ATTRIBUTES = 0x80
+    _FILE_SHARE_READ = 0x1
+    _OPEN_EXISTING = 3
+    _FILE_FLAG_SEQUENTIAL_SCAN = 0x08000000
+    _FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+    _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+    _FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+    _FILE_ID_INFO_CLASS = 18
+    _FILE_ATTRIBUTE_TAG_INFO_CLASS = 9
+
+    class _FILE_ID_128(ctypes.Structure):
+        _fields_ = [("Identifier", ctypes.c_ubyte * 16)]
+
+    class _FILE_ID_INFO(ctypes.Structure):
+        _fields_ = [("VolumeSerialNumber", ctypes.c_ulonglong), ("FileId", _FILE_ID_128)]
+
+    class _FILE_ATTRIBUTE_TAG_INFO(ctypes.Structure):
+        _fields_ = [("FileAttributes", wintypes.DWORD), ("ReparseTag", wintypes.DWORD)]
+
+    _kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    ]
+    _kernel32.CreateFileW.restype = wintypes.HANDLE
+    _kernel32.GetFileInformationByHandleEx.argtypes = [
+        wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD
+    ]
+    _kernel32.GetFileInformationByHandleEx.restype = wintypes.BOOL
+    _kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    _kernel32.CloseHandle.restype = wintypes.BOOL
+
+
+def _win_handle_identity(handle: int) -> str:
+    info = _FILE_ID_INFO()
+    if not _kernel32.GetFileInformationByHandleEx(
+        handle, _FILE_ID_INFO_CLASS, ctypes.byref(info), ctypes.sizeof(info)
+    ):
+        raise PackageIdentityError("Windows file identity inspection failed.")
+    return f"{info.VolumeSerialNumber:016x}:{bytes(info.FileId.Identifier).hex()}"
+
+
+def _win_reparse(handle: int) -> bool:
+    info = _FILE_ATTRIBUTE_TAG_INFO()
+    if not _kernel32.GetFileInformationByHandleEx(
+        handle,
+        _FILE_ATTRIBUTE_TAG_INFO_CLASS,
+        ctypes.byref(info),
+        ctypes.sizeof(info),
+    ):
+        raise PackageIdentityError("Windows file attribute inspection failed.")
+    return bool(info.FileAttributes & _FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+class _Retained:
+    """A path opened once; all identity reads are from its retained handle."""
+
+    def __init__(self, path: Path, *, directory: bool) -> None:
+        self.path = path
+        self.directory = directory
+        self.fd: int | None = None
+        self.handle: int | None = None
+        if os.name == "nt":
+            access = _FILE_READ_ATTRIBUTES if directory else _GENERIC_READ
+            flags = _FILE_FLAG_OPEN_REPARSE_POINT
+            flags |= _FILE_FLAG_BACKUP_SEMANTICS if directory else _FILE_FLAG_SEQUENTIAL_SCAN
+            handle = _kernel32.CreateFileW(
+                str(path), access, _FILE_SHARE_READ, None, _OPEN_EXISTING, flags, None
+            )
+            if handle == _INVALID_HANDLE:
+                raise PackageIdentityError("Plugin payload could not be opened safely.")
+            self.handle = int(handle)
+            try:
+                if _win_reparse(self.handle):
+                    raise PackageIdentityError("Plugin payload contains a reparse point.")
+                self.fd = msvcrt.open_osfhandle(self.handle, os.O_RDONLY)
+                self.handle = None  # descriptor now owns the native handle
+            except Exception:
+                self.close()
+                raise
+        else:
+            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            flags |= getattr(os, "O_DIRECTORY", 0) if directory else 0
+            try:
+                self.fd = os.open(path, flags)
+                try:
+                    import fcntl
+                    fcntl.flock(self.fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                except (ImportError, BlockingIOError, OSError) as error:
+                    raise PackageIdentityError("Plugin payload lock acquisition failed.") from error
+            except OSError as error:
+                raise PackageIdentityError("Plugin payload could not be opened safely.") from error
+        snapshot = self.snapshot(include_hash=not directory)
+        mode = snapshot["mode"]
+        if directory != stat.S_ISDIR(mode):
+            self.close()
+            raise PackageIdentityError("Plugin payload has an unexpected file type.")
+        if not directory and (not stat.S_ISREG(mode) or snapshot["links"] != 1):
+            self.close()
+            raise PackageIdentityError("Plugin payload has an unexpected hard link or type.")
+
+    def _native_handle(self) -> int:
+        if self.fd is not None and os.name == "nt":
+            return int(msvcrt.get_osfhandle(self.fd))
+        if self.handle is not None:
+            return self.handle
+        raise PackageIdentityError("Retained Windows handle is unavailable.")
+
+    def snapshot(self, *, include_hash: bool) -> dict[str, Any]:
+        if self.fd is not None:
+            info = os.fstat(self.fd)
+            identity = (
+                _win_handle_identity(self._native_handle())
+                if os.name == "nt"
+                else f"{info.st_dev:x}:{info.st_ino:x}"
+            )
+        else:
+            raise PackageIdentityError("Retained payload handle is unavailable.")
+        result: dict[str, Any] = {
+            "identity": identity,
+            "mode": info.st_mode,
+            "size": info.st_size,
+            "links": info.st_nlink,
+        }
+        if include_hash:
+            offset = os.lseek(self.fd, 0, os.SEEK_CUR)
+            hasher = hashlib.sha256()
+            try:
+                os.lseek(self.fd, 0, os.SEEK_SET)
+                while True:
+                    chunk = os.read(self.fd, 1024 * 128)
+                    if not chunk:
+                        break
+                    hasher.update(chunk)
+            finally:
+                os.lseek(self.fd, offset, os.SEEK_SET)
+            result["sha256"] = hasher.hexdigest()
+        return result
+
+    def live_snapshot(self, *, include_hash: bool) -> dict[str, Any]:
+        """Reopen the live POSIX pathname and bind it to the retained object."""
+
+        retained = self.snapshot(include_hash=include_hash)
+        if os.name == "nt":
+            # The retained Windows handle denies delete sharing, so same-name
+            # replacement cannot occur while the transaction is active.
+            return retained
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        if self.directory:
+            flags |= getattr(os, "O_DIRECTORY", 0)
+        try:
+            descriptor = os.open(self.path, flags)
+        except OSError as error:
+            raise IdentityDriftError(
+                "Plugin payload pathname could not be reopened safely."
+            ) from error
+        try:
+            info = os.fstat(descriptor)
+            live: dict[str, Any] = {
+                "identity": f"{info.st_dev:x}:{info.st_ino:x}",
+                "mode": info.st_mode,
+                "size": info.st_size,
+                "links": info.st_nlink,
+            }
+            if include_hash:
+                hasher = hashlib.sha256()
+                while True:
+                    chunk = os.read(descriptor, 1024 * 128)
+                    if not chunk:
+                        break
+                    hasher.update(chunk)
+                live["sha256"] = hasher.hexdigest()
+        finally:
+            os.close(descriptor)
+        if live != retained:
+            raise IdentityDriftError("Plugin payload pathname identity drifted.")
+        return retained
+
+    def read_payload(self) -> bytes:
+        """Read one retained regular file without reopening its pathname."""
+
+        if self.directory or self.fd is None:
+            raise PackageIdentityError("Retained plugin file is unavailable.")
+        snapshot = self.live_snapshot(include_hash=True)
+        size = snapshot["size"]
+        if size > MAX_OUTPUT_BYTES:
+            raise PackageIdentityError("Retained plugin file exceeded its bound.")
+        offset = os.lseek(self.fd, 0, os.SEEK_CUR)
+        chunks: list[bytes] = []
+        try:
+            os.lseek(self.fd, 0, os.SEEK_SET)
+            remaining = size
+            while remaining:
+                chunk = os.read(self.fd, min(remaining, 1024 * 128))
+                if not chunk:
+                    raise PackageIdentityError("Retained plugin file was truncated.")
+                chunks.append(chunk)
+                remaining -= len(chunk)
+        finally:
+            os.lseek(self.fd, offset, os.SEEK_SET)
+        payload = b"".join(chunks)
+        if (
+            len(payload) != size
+            or hashlib.sha256(payload).hexdigest() != snapshot["sha256"]
+            or self.live_snapshot(include_hash=True) != snapshot
+        ):
+            raise IdentityDriftError("Retained plugin file content drifted.")
+        return payload
+
+    def close(self) -> None:
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+        if self.handle is not None and os.name == "nt":
+            _kernel32.CloseHandle(self.handle)
+            self.handle = None
+
+
+def _loaded_source_records(
+    value: Mapping[str, Mapping[str, Any]], executing_plugin_root: Path
+) -> dict[str, dict[str, Any]]:
+    names = set(value)
+    if not _REQUIRED_LOADED_SOURCE_MODULES.issubset(names) or not names.issubset(
+        _ALLOWED_LOADED_SOURCE_MODULES
+    ):
+        raise PackageIdentityError("Loaded plugin-local source set is incomplete.")
+    scripts_root = (
+        executing_plugin_root / "skills" / "codex-orchestration" / "scripts"
+    )
+    result: dict[str, dict[str, Any]] = {}
+    for name in sorted(names):
+        raw = value[name]
+        if not isinstance(raw, Mapping) or set(raw) != {
+            "path",
+            "device",
+            "inode",
+            "size",
+            "sha256",
+        }:
+            raise PackageIdentityError("Loaded plugin-local source record is malformed.")
+        expected = Path(os.path.abspath(scripts_root / f"{name}.py"))
+        supplied = raw["path"]
+        if not isinstance(supplied, str) or _path_key(supplied) != _path_key(expected):
+            raise PackageIdentityError("Loaded plugin-local source path is invalid.")
+        integers = (raw["device"], raw["inode"], raw["size"])
+        if any(type(item) is not int or item < 0 for item in integers):
+            raise PackageIdentityError("Loaded plugin-local source identity is invalid.")
+        digest = raw["sha256"]
+        if not isinstance(digest, str) or _SOURCE_SHA_RE.fullmatch(digest) is None:
+            raise PackageIdentityError("Loaded plugin-local source digest is invalid.")
+        retained = _Retained(expected, directory=False)
+        try:
+            if retained.fd is None:
+                raise PackageIdentityError(
+                    "Loaded plugin-local source handle is unavailable."
+                )
+            info = os.fstat(retained.fd)
+            snapshot = retained.live_snapshot(include_hash=True)
+        finally:
+            retained.close()
+        if int(info.st_dev) != raw["device"] or int(info.st_ino) != raw["inode"]:
+            raise IdentityDriftError(
+                f"Loaded plugin-local source path identity drifted: {name}."
+            )
+        if snapshot["size"] != raw["size"] or snapshot["sha256"] != digest:
+            raise IdentityDriftError(
+                f"Loaded plugin-local source content drifted: {name}."
+            )
+        result[name] = {
+            "path": _path_key(expected),
+            "device": raw["device"],
+            "inode": raw["inode"],
+            "size": raw["size"],
+            "sha256": digest,
+        }
+    return result
+
+
+class _Package:
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.items: list[tuple[str, _Retained]] = []
+        # Python-generated bytecode is excluded from source/cache content
+        # equivalence because its timestamp header is installation-specific,
+        # but it remains part of each package's own identity recheck.
+        self.ignored_items: list[tuple[str, _Retained]] = []
+        self._capture()
+
+    def _capture_ignored_tree(self, path: Path, relative: str) -> None:
+        self.ignored_items.append(
+            (relative, _Retained(path, directory=True))
+        )
+        for current, directory_names, file_names in os.walk(
+            path, topdown=True, followlinks=False
+        ):
+            directory_names.sort()
+            file_names.sort()
+            current_path = Path(current)
+            for name in directory_names:
+                child = current_path / name
+                self.ignored_items.append(
+                    (
+                        child.relative_to(self.root).as_posix(),
+                        _Retained(child, directory=True),
+                    )
+                )
+            for name in file_names:
+                child = current_path / name
+                self.ignored_items.append(
+                    (
+                        child.relative_to(self.root).as_posix(),
+                        _Retained(child, directory=False),
+                    )
+                )
+
+    def _ignored_names(self) -> tuple[str, ...]:
+        names: list[str] = []
+        root = Path(os.path.abspath(self.root))
+        for current, directory_names, file_names in os.walk(
+            root, topdown=True, followlinks=False
+        ):
+            current_path = Path(current)
+            for name in sorted(tuple(directory_names)):
+                if name != "__pycache__":
+                    continue
+                ignored_root = current_path / name
+                names.append(ignored_root.relative_to(root).as_posix())
+                for ignored_current, ignored_dirs, ignored_files in os.walk(
+                    ignored_root, topdown=True, followlinks=False
+                ):
+                    ignored_dirs.sort()
+                    ignored_files.sort()
+                    ignored_path = Path(ignored_current)
+                    names.extend(
+                        child.relative_to(root).as_posix()
+                        for child_name in ignored_dirs
+                        for child in (ignored_path / child_name,)
+                    )
+                    names.extend(
+                        child.relative_to(root).as_posix()
+                        for child_name in ignored_files
+                        for child in (ignored_path / child_name,)
+                    )
+                directory_names.remove(name)
+            directory_names.sort()
+            file_names.sort()
+        return tuple(names)
+
+    def _capture(self) -> None:
+        root = Path(os.path.abspath(self.root))
+        try:
+            self.items.append((".", _Retained(root, directory=True)))
+            seen: set[str] = set()
+            for current, directory_names, file_names in os.walk(root, topdown=True, followlinks=False):
+                current_path = Path(current)
+                for name in sorted(tuple(directory_names)):
+                    if name == "__pycache__":
+                        ignored_path = current_path / name
+                        self._capture_ignored_tree(
+                            ignored_path,
+                            ignored_path.relative_to(root).as_posix(),
+                        )
+                        directory_names.remove(name)
+                directory_names.sort()
+                file_names.sort()
+                for name in directory_names:
+                    path = current_path / name
+                    relative = path.relative_to(root).as_posix()
+                    self.items.append((relative, _Retained(path, directory=True)))
+                for name in file_names:
+                    path = current_path / name
+                    relative = path.relative_to(root).as_posix()
+                    retained = _Retained(path, directory=False)
+                    identity = retained.snapshot(include_hash=False)["identity"]
+                    if identity in seen:
+                        retained.close()
+                        raise PackageIdentityError("Plugin payload contains duplicate file identity.")
+                    seen.add(identity)
+                    self.items.append((relative, retained))
+            captured = tuple(relative for relative, _ in self.items)
+            if self._enumerate_names() != captured:
+                raise IdentityDriftError(
+                    "Plugin payload names drifted during identity capture."
+                )
+            ignored_captured = tuple(relative for relative, _ in self.ignored_items)
+            if self._ignored_names() != ignored_captured:
+                raise IdentityDriftError(
+                    "Plugin bytecode names drifted during identity capture."
+                )
+        except Exception:
+            self.close()
+            raise
+
+    def _enumerate_names(self) -> tuple[str, ...]:
+        names = ["."]
+        for current, directory_names, file_names in os.walk(
+            self.root, topdown=True, followlinks=False
+        ):
+            directory_names[:] = sorted(
+                name for name in directory_names if name != "__pycache__"
+            )
+            file_names.sort()
+            current_path = Path(current)
+            names.extend(
+                (current_path / name).relative_to(self.root).as_posix()
+                for name in directory_names
+            )
+            names.extend(
+                (current_path / name).relative_to(self.root).as_posix()
+                for name in file_names
+            )
+        return tuple(names)
+
+    @property
+    def root_identity(self) -> str:
+        return self.items[0][1].live_snapshot(include_hash=False)["identity"]
+
+    def _fingerprint(self, *, include_file_identity: bool) -> str:
+        if self._enumerate_names() != tuple(relative for relative, _ in self.items):
+            raise IdentityDriftError("Plugin payload names drifted.")
+        if self._ignored_names() != tuple(
+            relative for relative, _ in self.ignored_items
+        ):
+            raise IdentityDriftError("Plugin bytecode names drifted.")
+        payload = []
+        for relative, retained in self.items:
+            snap = retained.live_snapshot(include_hash=not retained.directory)
+            if retained.directory:
+                continue
+            if not stat.S_ISREG(snap["mode"]) or snap["links"] != 1:
+                raise IdentityDriftError("Plugin payload identity drifted.")
+            item = {
+                "path": relative,
+                "size": snap["size"],
+                "sha256": snap["sha256"],
+            }
+            if include_file_identity:
+                item["file_identity"] = snap["identity"]
+            payload.append(item)
+        for relative, retained in self.ignored_items:
+            snap = retained.live_snapshot(include_hash=not retained.directory)
+            if include_file_identity and not retained.directory:
+                if not stat.S_ISREG(snap["mode"]) or snap["links"] != 1:
+                    raise IdentityDriftError("Plugin bytecode identity drifted.")
+                item = {
+                    "path": relative,
+                    "ignored_bytecode": True,
+                    "size": snap["size"],
+                    "sha256": snap["sha256"],
+                    "file_identity": snap["identity"],
+                }
+                payload.append(item)
+        # Rebind the live root after traversal so a root swap during inspection
+        # cannot pass on only the opening observation.
+        self.items[0][1].live_snapshot(include_hash=False)
+        return _digest(payload)
+
+    def fingerprint(self) -> str:
+        return self._fingerprint(include_file_identity=True)
+
+    def content_fingerprint(self) -> str:
+        """Fingerprint payload bytes and paths, excluding filesystem identity."""
+        return self._fingerprint(include_file_identity=False)
+
+    def read_json_file(self, relative: str) -> Mapping[str, Any]:
+        matches = [
+            retained
+            for captured, retained in self.items
+            if captured == relative and not retained.directory
+        ]
+        if len(matches) != 1:
+            raise PackageIdentityError("Plugin package JSON file is missing or ambiguous.")
+        try:
+            payload = json.loads(matches[0].read_payload().decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as error:
+            raise PackageIdentityError("Plugin package JSON file is malformed.") from error
+        if not isinstance(payload, dict):
+            raise PackageIdentityError("Plugin package JSON file has an invalid shape.")
+        return payload
+
+    def close(self) -> None:
+        for _, retained in reversed(self.ignored_items):
+            retained.close()
+        self.ignored_items.clear()
+        for _, retained in reversed(self.items):
+            retained.close()
+        self.items.clear()
+
+
+def _client_identity(codex_binary: Path, retained: _Retained) -> dict[str, Any]:
+    snap = retained.live_snapshot(include_hash=True)
+    if not stat.S_ISREG(snap["mode"]) or snap["links"] != 1:
+        raise PackageIdentityError("Codex client identity is not a regular file.")
+    return {
+        "path": os.path.normcase(str(codex_binary)),
+        "size": snap["size"],
+        "file_identity": snap["identity"],
+        "sha256": snap["sha256"],
+    }
+
+
+def run_inventory(
+    codex_binary: str | os.PathLike[str],
+    *,
+    codex_home: str | os.PathLike[str] | None = None,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+) -> Any:
+    binary = Path(codex_binary)
+    if not binary.is_absolute():
+        raise InventoryCommandError("Codex binary path must be absolute.")
+    environment = None
+    if codex_home is not None:
+        home = Path(codex_home)
+        if not home.is_absolute():
+            raise InventoryCommandError("Codex home path must be absolute.")
+        environment = os.environ.copy()
+        environment["CODEX_HOME"] = str(home)
+    paths: list[str] = []
+    try:
+        with tempfile.NamedTemporaryFile(delete=False) as stdout_file, tempfile.NamedTemporaryFile(delete=False) as stderr_file:
+            paths = [stdout_file.name, stderr_file.name]
+            try:
+                process = subprocess.Popen(
+                    [str(binary), "plugin", "list", "--json"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=stdout_file,
+                    stderr=stderr_file,
+                    shell=False,
+                    **({"env": environment} if environment is not None else {}),
+                )
+            except OSError as error:
+                raise InventoryCommandError("Codex plugin inventory command could not start.") from error
+            try:
+                return_code = process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired as error:
+                process.kill()
+                process.wait()
+                raise InventoryCommandError("Codex plugin inventory command timed out.") from error
+        for path in paths:
+            if os.path.getsize(path) > MAX_OUTPUT_BYTES:
+                raise InventoryCommandError("Codex plugin inventory output exceeded its bound.")
+        if return_code != 0:
+            raise InventoryCommandError("Codex plugin inventory command failed.")
+        try:
+            with open(paths[0], "r", encoding="utf-8") as stream:
+                return json.load(stream)
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise InventoryFormatError("Codex plugin inventory JSON is malformed.") from error
+    finally:
+        for path in paths:
+            with contextlib.suppress(OSError):
+                os.unlink(path)
+
+
+def _records(value: Any) -> list[Mapping[str, Any]]:
+    if not isinstance(value, dict) or set(value) != {"installed", "available"}:
+        raise InventoryFormatError("Plugin inventory has an unexpected top-level shape.")
+    if not isinstance(value["installed"], list) or not isinstance(value["available"], list):
+        raise InventoryFormatError("Plugin inventory has an unexpected top-level shape.")
+    if any(not isinstance(item, dict) for item in value["installed"] + value["available"]):
+        raise InventoryFormatError("Plugin inventory contains an invalid record.")
+    return value["installed"]
+
+
+def _canonical_record(raw: Mapping[str, Any], package: _Package | None = None) -> tuple[dict[str, Any], _Package]:
+    plugin_id, name, marketplace, installed, enabled = _record_identity(raw)
+    version = _text(raw.get("version"), "plugin version")
+    source = raw.get("source")
+    market_source = raw.get("marketplaceSource")
+    if not isinstance(source, dict) or set(source) != {"source", "path"}:
+        raise InventoryFormatError("Plugin inventory source is malformed.")
+    if not isinstance(market_source, dict) or set(market_source) != {"sourceType", "source"}:
+        raise InventoryFormatError("Plugin inventory marketplace source is malformed.")
+    source_type = _text(source["source"], "source type")
+    if source_type != "local":
+        raise InventoryFormatError("Plugin inventory source type is unsupported.")
+    source_path = _canonical_path(source["path"], "source path")
+    marketplace_source = {
+        "source_type": _text(market_source["sourceType"], "marketplace source type"),
+        "source": _text(market_source["source"], "marketplace source"),
+    }
+    owned = package or _Package(source_path)
+    return ({
+        "plugin_id": plugin_id,
+        "name": name,
+        "marketplace_name": marketplace,
+        "version": version,
+        "installed": installed,
+        "enabled": enabled,
+        "source_type": source_type,
+        "source_path": os.path.normcase(os.path.realpath(source_path)),
+        "marketplace_source": marketplace_source,
+        "root_file_identity": owned.root_identity,
+        "package_fingerprint": owned.fingerprint(),
+    }, owned)
+
+
+def _inventory(
+    value: Any,
+    retained_packages: Mapping[str, _Package] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, _Package]]:
+    result: list[dict[str, Any]] = []
+    transient: dict[str, _Package] = {}
+    seen: set[str] = set()
+    targets: list[tuple[Mapping[str, Any], str]] = []
+    try:
+        for raw in _records(value):
+            plugin_id, name, _, installed, _ = _record_identity(raw)
+            if name != PLUGIN_NAME:
+                continue
+            if plugin_id in seen:
+                raise InventoryFormatError(
+                    "Plugin inventory contains a duplicate plugin ID."
+                )
+            seen.add(plugin_id)
+            if installed:
+                targets.append((raw, plugin_id))
+        for raw, plugin_id in targets:
+            package = (
+                retained_packages.get(plugin_id)
+                if retained_packages is not None
+                else None
+            )
+            record, opened = _canonical_record(raw, package)
+            result.append(record)
+            if package is None:
+                transient[record["plugin_id"]] = opened
+        result.sort(key=lambda item: item["plugin_id"])
+        return result, transient
+    except Exception:
+        for package in transient.values():
+            package.close()
+        raise
+
+
+def _executing_record(
+    records: Sequence[Mapping[str, Any]],
+    executing_plugin_root: Path,
+    codex_home: str | os.PathLike[str] | None,
+    *,
+    require_enabled: bool,
+) -> Mapping[str, Any]:
+    if codex_home is None:
+        raise SelectionError("Effective CODEX_HOME is required for plugin cache identity.")
+    _validate_exact_cache_path(executing_plugin_root)
+    matches = [
+        record
+        for record in records
+        if record["name"] == PLUGIN_NAME
+        and record["installed"]
+        and (record["enabled"] or not require_enabled)
+        and _path_key(_expected_cache_path(codex_home, record))
+        == _path_key(executing_plugin_root)
+    ]
+    if len(matches) != 1:
+        qualifier = "Enabled " if require_enabled else ""
+        raise SelectionError(
+            f"{qualifier}executing plugin identity is missing or ambiguous."
+        )
+    return matches[0]
+
+
+def _enabled_executing_record(
+    records: Sequence[Mapping[str, Any]],
+    executing_plugin_root: Path,
+    codex_home: str | os.PathLike[str] | None,
+) -> Mapping[str, Any]:
+    return _executing_record(
+        records,
+        executing_plugin_root,
+        codex_home,
+        require_enabled=True,
+    )
+
+
+def _select_identities(
+    records: Sequence[Mapping[str, Any]],
+    selector: str,
+    executing_plugin_root: Path,
+    saved_plugin_id: str | None,
+    codex_home: str | os.PathLike[str] | None,
+) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+    if selector in {"setup", "repair", "status"}:
+        executing = _enabled_executing_record(
+            records, executing_plugin_root, codex_home
+        )
+        if selector == "repair" and saved_plugin_id is not None:
+            if _plugin_id(saved_plugin_id) != executing["plugin_id"]:
+                raise SelectionError(
+                    "Saved plugin identity does not match the executing plugin."
+                )
+        if selector == "status" and saved_plugin_id is not None:
+            target = _plugin_id(saved_plugin_id)
+            matches = [record for record in records if record["plugin_id"] == target]
+            if len(matches) != 1:
+                raise SelectionError(
+                    "Saved status plugin identity is missing or ambiguous."
+                )
+            return matches[0], executing
+        return executing, executing
+    if selector == "disable-schema7":
+        if saved_plugin_id is None:
+            raise SelectionError("Saved plugin identity is required for schema-7 disable.")
+        target = _plugin_id(saved_plugin_id)
+    elif selector == "disable-legacy":
+        target = LEGACY_PLUGIN_ID
+    else:
+        raise SelectionError("Plugin operation selector is unsupported.")
+    matches = [record for record in records if record["plugin_id"] == target]
+    if len(matches) != 1:
+        raise SelectionError("Requested installed plugin identity is missing or ambiguous.")
+    executing = _executing_record(
+        records,
+        executing_plugin_root,
+        codex_home,
+        require_enabled=False,
+    )
+    if executing["plugin_id"] != target:
+        raise SelectionError(
+            "Executing plugin identity does not match the saved disable target."
+        )
+    return matches[0], executing
+
+
+def _select(
+    records: Sequence[Mapping[str, Any]],
+    selector: str,
+    executing_plugin_root: Path,
+    saved_plugin_id: str | None,
+    codex_home: str | os.PathLike[str] | None,
+) -> Mapping[str, Any]:
+    selected, _ = _select_identities(
+        records,
+        selector,
+        executing_plugin_root,
+        saved_plugin_id,
+        codex_home,
+    )
+    return selected
+
+
+def _operation_selected_record(
+    record: Mapping[str, Any], executing_package: _Package
+) -> dict[str, Any]:
+    selected = dict(record)
+    selected["executing_cache"] = {
+        "path": _path_key(executing_package.root),
+        "root_file_identity": executing_package.root_identity,
+        "package_fingerprint": executing_package.fingerprint(),
+    }
+    return selected
+
+
+class PluginIdentityGuard:
+    """Context-managed, non-persistent identity transaction guard."""
+
+    def __init__(
+        self,
+        codex_binary: str | os.PathLike[str],
+        executing_plugin_root: str | os.PathLike[str],
+        selector: str,
+        *,
+        saved_plugin_id: str | None = None,
+        codex_home: str | os.PathLike[str] | None = None,
+        loaded_sources: Mapping[str, Mapping[str, Any]] | None = None,
+        timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    ) -> None:
+        supplied_binary = Path(codex_binary)
+        if not supplied_binary.is_absolute():
+            raise InventoryCommandError("Codex binary path must be absolute.")
+        self.codex_binary = Path(os.path.abspath(supplied_binary))
+        self.executing_plugin_root = Path(os.path.abspath(executing_plugin_root))
+        self.selector = selector
+        self.saved_plugin_id = saved_plugin_id
+        self.codex_home = codex_home
+        self.loaded_sources = (
+            {name: dict(record) for name, record in loaded_sources.items()}
+            if loaded_sources is not None
+            else None
+        )
+        self.timeout = timeout
+        self.selected_plugin_id = ""
+        self.executing_plugin_id = ""
+        self.full_inventory_sha256 = ""
+        self.operation_identity_sha256 = ""
+        self._client: _Retained | None = None
+        self._executing_package: _Package | None = None
+        self._packages: dict[str, _Package] = {}
+        self._package: _Package | None = None
+        self._selected_template: dict[str, Any] | None = None
+        self._executing_template: dict[str, Any] | None = None
+        self._selected_mcp_defaults: dict[str, bool] = {}
+        self._bytecode_isolation: _BytecodeIsolation | None = None
+        self._loaded_source_records: dict[str, dict[str, Any]] = {}
+
+    def __enter__(self) -> "PluginIdentityGuard":
+        try:
+            self._bytecode_isolation = _BytecodeIsolation()
+            self._bytecode_isolation.__enter__()
+            if self.loaded_sources is not None:
+                self._loaded_source_records = _loaded_source_records(
+                    self.loaded_sources, self.executing_plugin_root
+                )
+            self._client = _Retained(self.codex_binary, directory=False)
+            self._executing_package = _Package(self.executing_plugin_root)
+            client = _client_identity(self.codex_binary, self._client)
+            first, opened = _inventory(
+                run_inventory(
+                    self.codex_binary,
+                    codex_home=self.codex_home,
+                    timeout=self.timeout,
+                )
+            )
+            self._packages = opened
+            selected, executing = _select_identities(
+                first,
+                self.selector,
+                self.executing_plugin_root,
+                self.saved_plugin_id,
+                self.codex_home,
+            )
+            self.selected_plugin_id = str(selected["plugin_id"])
+            self.executing_plugin_id = str(executing["plugin_id"])
+            self._package = self._packages[self.selected_plugin_id]
+            executing_source = self._packages[self.executing_plugin_id]
+            cache_fingerprint = self._executing_package.content_fingerprint()
+            for package in {self._package, executing_source}:
+                if package.content_fingerprint() != cache_fingerprint:
+                    raise SelectionError(
+                        "Executing plugin cache payload does not match the selected source payload."
+                    )
+            second, transient = _inventory(
+                run_inventory(
+                    self.codex_binary,
+                    codex_home=self.codex_home,
+                    timeout=self.timeout,
+                ),
+                self._packages,
+            )
+            for package in transient.values():
+                package.close()
+            first_digest = _digest(first)
+            second_digest = _digest(second)
+            if first_digest != second_digest:
+                raise IdentityDriftError("Plugin inventory drifted during identity capture.")
+            selected_second = next(item for item in second if item["plugin_id"] == self.selected_plugin_id)
+            executing_second = next(
+                item for item in second if item["plugin_id"] == self.executing_plugin_id
+            )
+            self.full_inventory_sha256 = second_digest
+            self._selected_template = dict(selected_second)
+            self._executing_template = dict(executing_second)
+            mcp_manifest = self._package.read_json_file(".mcp.json")
+            mcp_servers = mcp_manifest.get("mcpServers")
+            if not isinstance(mcp_servers, dict):
+                raise PackageIdentityError("Plugin MCP manifest has an invalid shape.")
+            for server, config in mcp_servers.items():
+                if (
+                    not isinstance(server, str)
+                    or not server
+                    or not isinstance(config, dict)
+                    or type(config.get("enabled")) is not bool
+                ):
+                    raise PackageIdentityError(
+                        "Plugin MCP manifest has an invalid server default."
+                    )
+                self._selected_mcp_defaults[server] = config["enabled"]
+            self.operation_identity_sha256 = _digest({
+                "namespace": PLUGIN_NAME,
+                "selector": self.selector,
+                "client": client,
+                "loaded_sources": self._loaded_source_records,
+                "selected": selected_second,
+                "executing": _operation_selected_record(
+                    executing_second, self._executing_package
+                ),
+            })
+            return self
+        except Exception:
+            self.close()
+            raise
+
+    def selected_plugin_enabled(self) -> bool:
+        if self._selected_template is None:
+            raise IdentityDriftError("Plugin identity guard is not active.")
+        enabled = self._selected_template.get("enabled")
+        if type(enabled) is not bool:
+            raise IdentityDriftError("Selected plugin enabled state is invalid.")
+        return enabled
+
+    def selected_mcp_default_enabled(self, server: str) -> bool:
+        if self._selected_template is None:
+            raise IdentityDriftError("Plugin identity guard is not active.")
+        if server not in self._selected_mcp_defaults:
+            raise PackageIdentityError(
+                "Selected plugin MCP server is absent from the attested manifest."
+            )
+        return self._selected_mcp_defaults[server]
+
+    def assert_unchanged(self, phase: str) -> None:
+        _text(phase, "guard phase")
+        if (
+            not self._client
+            or not self._package
+            or not self._executing_package
+            or not self._selected_template
+            or not self._executing_template
+        ):
+            raise IdentityDriftError("Plugin identity guard is not active.")
+        records, transient = _inventory(
+            run_inventory(
+                self.codex_binary,
+                codex_home=self.codex_home,
+                timeout=self.timeout,
+            ),
+            self._packages,
+        )
+        for package in transient.values():
+            package.close()
+        if _digest(records) != self.full_inventory_sha256:
+            raise IdentityDriftError(f"Plugin inventory drifted before {phase}.")
+        selected = next((item for item in records if item["plugin_id"] == self.selected_plugin_id), None)
+        if selected is None:
+            raise IdentityDriftError(f"Selected plugin identity disappeared before {phase}.")
+        executing = next(
+            (item for item in records if item["plugin_id"] == self.executing_plugin_id),
+            None,
+        )
+        if executing is None:
+            raise IdentityDriftError(
+                f"Executing plugin identity disappeared before {phase}."
+            )
+        operation = _digest({
+            "namespace": PLUGIN_NAME,
+            "selector": self.selector,
+            "client": _client_identity(self.codex_binary, self._client),
+            "loaded_sources": (
+                _loaded_source_records(
+                    self.loaded_sources, self.executing_plugin_root
+                )
+                if self.loaded_sources is not None
+                else {}
+            ),
+            "selected": selected,
+            "executing": _operation_selected_record(
+                executing, self._executing_package
+            ),
+        })
+        if operation != self.operation_identity_sha256:
+            raise IdentityDriftError(f"Operation identity drifted before {phase}.")
+
+    def close(self) -> None:
+        for package in self._packages.values():
+            package.close()
+        self._packages.clear()
+        self._package = None
+        self._selected_template = None
+        self._executing_template = None
+        self._selected_mcp_defaults.clear()
+        self._loaded_source_records.clear()
+        if self._executing_package:
+            self._executing_package.close()
+            self._executing_package = None
+        if self._client:
+            self._client.close()
+            self._client = None
+        if self._bytecode_isolation:
+            self._bytecode_isolation.close()
+            self._bytecode_isolation = None
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        self.close()
+
+
+def guard_plugin_identity(
+    codex_binary: str | os.PathLike[str],
+    executing_plugin_root: str | os.PathLike[str],
+    selector: str,
+    *,
+    saved_plugin_id: str | None = None,
+    codex_home: str | os.PathLike[str] | None = None,
+    loaded_sources: Mapping[str, Mapping[str, Any]] | None = None,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+) -> PluginIdentityGuard:
+    return PluginIdentityGuard(
+        codex_binary,
+        executing_plugin_root,
+        selector,
+        saved_plugin_id=saved_plugin_id,
+        codex_home=codex_home,
+        loaded_sources=loaded_sources,
+        timeout=timeout,
+    )

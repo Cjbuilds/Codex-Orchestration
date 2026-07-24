@@ -66,6 +66,30 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(result.status, "FAIL")
         self.assertIn("zero tests", result.detail)
 
+    def test_codex_probe_resolves_platform_launcher_before_starting(self) -> None:
+        launcher = str(REPO_ROOT / "codex.cmd")
+        with (
+            mock.patch.object(PREFLIGHT.shutil, "which", return_value=launcher),
+            mock.patch.object(
+                PREFLIGHT,
+                "run_command",
+                return_value=PREFLIGHT.CheckResult("codex-available", "PASS"),
+            ) as run,
+        ):
+            result = PREFLIGHT._codex_available(REPO_ROOT)
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(run.call_args.args[1], [launcher, "--version"])
+
+    def test_codex_probe_reports_missing_launcher_without_starting(self) -> None:
+        with (
+            mock.patch.object(PREFLIGHT.shutil, "which", return_value=None),
+            mock.patch.object(PREFLIGHT, "run_command") as run,
+        ):
+            result = PREFLIGHT._codex_available(REPO_ROOT)
+        self.assertEqual(result.status, "FAIL")
+        self.assertIn("not found on PATH", result.detail)
+        run.assert_not_called()
+
     def test_unknown_target_returns_argument_error(self) -> None:
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
             PREFLIGHT.parse_args(["unknown"])

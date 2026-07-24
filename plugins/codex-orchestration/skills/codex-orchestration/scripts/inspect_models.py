@@ -29,12 +29,22 @@ def parse_args() -> argparse.Namespace:
 
 
 def resolve_executable(codex_bin: str) -> str:
-    executable = shutil.which(codex_bin) if "/" not in codex_bin else codex_bin
+    candidate = Path(codex_bin).expanduser()
+    explicit_path = candidate.is_absolute() or candidate.parent != Path(".")
+    executable = str(candidate) if explicit_path else shutil.which(codex_bin)
     if not executable:
         raise RuntimeError(f"Codex executable not found: {codex_bin}")
     path = Path(executable).expanduser()
     if not path.is_file() or not os.access(path, os.X_OK):
         raise RuntimeError(f"Codex executable is not a regular executable file: {path}")
+    if os.name == "nt" and path.suffix.lower() not in {".cmd", ".bat"}:
+        try:
+            with path.open("rb") as handle:
+                native_header = handle.read(2)
+        except OSError as exc:
+            raise RuntimeError(f"Could not inspect Codex executable: {path}") from exc
+        if native_header != b"MZ":
+            raise RuntimeError(f"Codex executable is not a native Windows executable: {path}")
     return str(path.resolve())
 
 
