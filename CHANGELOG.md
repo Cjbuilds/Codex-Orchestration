@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.9.0 — Unreleased
+
+- Add Claude Opus 5 as a sealed first-party subscription Planner or Advisor
+  through Claude Code 2.1.219 or newer, with exact effort validation and
+  fail-closed runtime model identity checks.
+- Preserve Fable 5 and routing-state schemas 1–4 while adding schema/policy 5
+  for Opus. Existing compatibility launcher IDs remain disabled until selected.
+- Require a full managed-policy disable before replacing or moving an Opus
+  subscription seat, so setup never silently changes an existing Claude route.
+
 ## 0.8.0 — Unreleased
 
 - Replace READY External Model execution through Desktop native agents with a

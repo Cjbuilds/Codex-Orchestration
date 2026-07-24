@@ -11,6 +11,12 @@ import fable_advisor_mcp
 
 FABLE_PROVIDER = "claude-fable"
 FABLE_MODEL = "claude-fable-5"
+OPUS_PROVIDER = "claude-opus"
+OPUS_MODEL = "claude-opus-5"
+SEALED_MODELS = {
+    FABLE_PROVIDER: FABLE_MODEL,
+    OPUS_PROVIDER: OPUS_MODEL,
+}
 OPERATION_SEATS = {
     "create_plan": "planner",
     "revise_plan": "planner",
@@ -35,10 +41,13 @@ def validate_route(
 ) -> tuple[dict[str, Any], str]:
     """Resolve only manifest-sealed provider/model/effort/operation tuples."""
 
-    _require(provider_id == FABLE_PROVIDER, "subscription provider is not audited")
+    _require(provider_id in SEALED_MODELS, "subscription provider is not audited")
     provider = external_providers.load_provider(provider_id)
     _require(provider["lane"] == "subscription", "provider is not a subscription adapter")
-    _require(model == FABLE_MODEL, "subscription model is not sealed")
+    _require(
+        model == SEALED_MODELS[provider_id],
+        "subscription provider/model pair is not sealed",
+    )
     selected_effort = external_providers.resolve_effort(provider, model, effort)
     adapter = provider["subscription_adapter"]
     _require(
@@ -67,10 +76,10 @@ def status(
         provider_id, model, effort, operation
     )
     route = fable_advisor_mcp.load_fable_route(seat=seat)
-    _require(route["model"] == model, "configured Fable route model drifted")
+    _require(route["model"] == model, "configured Claude route model drifted")
     _require(
         route["effort"] == selected_effort,
-        "configured Fable effort differs from the requested effort",
+        "configured Claude effort differs from the requested effort",
     )
     executable = fable_advisor_mcp.resolve_claude()
     auth = fable_advisor_mcp.check_claude_auth(executable)
@@ -93,7 +102,7 @@ def invoke(
     model: str = FABLE_MODEL,
     effort: str = "high",
 ) -> dict[str, Any]:
-    """Dispatch one operation through the existing no-tools Fable bridge."""
+    """Dispatch one operation through the existing no-tools Claude bridge."""
 
     _, selected_effort = validate_route(provider_id, model, effort, operation)
     expected_keys = {
@@ -108,6 +117,16 @@ def invoke(
     _require(
         all(type(value) is str and bool(value.strip()) for value in arguments.values()),
         "subscription arguments must be non-empty strings",
+    )
+    seat = OPERATION_SEATS[operation]
+    configured = fable_advisor_mcp.load_fable_route(seat=seat)
+    _require(
+        configured["model"] == model,
+        "configured Claude route model differs from the requested model",
+    )
+    _require(
+        configured["effort"] == selected_effort,
+        "configured Claude route effort differs from the requested effort",
     )
     dispatch: dict[str, Callable[..., dict[str, Any]]] = {
         "create_plan": fable_advisor_mcp.create_plan,
@@ -126,5 +145,10 @@ def invoke(
     _require(
         model in result.get("used_models", []),
         "subscription runtime metadata omitted the primary model",
+    )
+    allowed_runtime = fable_advisor_mcp.ALLOWED_RUNTIME_MODELS_BY_PRIMARY[model]
+    _require(
+        set(result.get("used_models", [])).issubset(allowed_runtime),
+        "subscription runtime metadata included an unsealed helper model",
     )
     return result

@@ -284,10 +284,15 @@ class NativeRoutingTests(unittest.TestCase):
                     raise SystemExit(0)
                 if sys.argv[1:] == ["--help"]:
                     print(
-                        "--model --effort <level> Effort level "
+                        "--print --model --effort <level> Effort level "
                         "(low, medium, high, xhigh, max) "
-                        "--safe-mode --prompt-suggestions"
+                        "--safe-mode --tools --permission-mode "
+                        "--no-session-persistence --prompt-suggestions "
+                        "--output-format --system-prompt"
                     )
+                    raise SystemExit(0)
+                if sys.argv[1:] == ["--version"]:
+                    print("2.1.219 (Claude Code)")
                     raise SystemExit(0)
                 raise SystemExit(2)
                 """
@@ -399,7 +404,7 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertIn('Never use fork_turns = "all"', usage)
         self.assertIn("task-local Planner and Advisor must still be distinct", usage)
         self.assertIn("same direct model ID", usage)
-        self.assertIn("Fable in both seats", usage)
+        self.assertIn("more than one bundled Claude subscription seat", usage)
         self.assertIn("If you are a spawned child, do not call this tool", usage)
         self.assertNotIn("tool_namespace", mode + usage)
         self.assertNotIn("enabled = true", mode + usage)
@@ -592,8 +597,8 @@ class NativeRoutingTests(unittest.TestCase):
         state = json.loads(
             (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
         )
-        self.assertEqual(state["schema"], 4)
-        self.assertEqual(state["policy_version"], 4)
+        self.assertEqual(state["schema"], 5)
+        self.assertEqual(state["policy_version"], 5)
         self.assertEqual(state["planner"]["effort"], "xhigh")
         self.assertEqual(state["designer"]["effort"], "medium")
 
@@ -644,8 +649,8 @@ class NativeRoutingTests(unittest.TestCase):
                     "--apply",
                 )
                 upgraded = json.loads(state_path.read_text(encoding="utf-8"))
-                self.assertEqual(upgraded["schema"], 4)
-                self.assertEqual(upgraded["policy_version"], 4)
+                self.assertEqual(upgraded["schema"], 5)
+                self.assertEqual(upgraded["policy_version"], 5)
                 self.assertEqual(upgraded["previous"], original_previous)
                 self.assertEqual(upgraded["planner"]["model"], "gpt-5.6-sol")
                 self.assertEqual(upgraded["designer"]["model"], "gpt-5.6-luna")
@@ -1833,7 +1838,7 @@ class NativeRoutingTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 2)
-        self.assertIn("both cannot use Claude Fable 5", result.stderr)
+        self.assertIn("at most one bundled Claude subscription seat", result.stderr)
         self.assertFalse((self.home / NATIVE.STATE_FILENAME).exists())
 
     def test_fable_planner_with_gpt_advisor_uses_one_launcher_and_restores(self) -> None:
@@ -2028,6 +2033,264 @@ class NativeRoutingTests(unittest.TestCase):
             NATIVE.ConfigurationError, "low.*medium.*high.*xhigh.*max.*ultra"
         ):
             NATIVE.normalize_fable_effort("extreme")
+
+    def test_opus_setup_status_update_and_disable_are_no_model_call(self) -> None:
+        setup = self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--advisor-opus",
+            "--advisor-effort",
+            "xhigh",
+            "--apply",
+        )
+        self.assertIn("Advisor: Claude Opus 5 xhigh", setup.stdout)
+        self.assertIn("setup makes no model call", setup.stdout)
+        state = json.loads(
+            (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
+        )
+        self.assertEqual(state["schema"], 5)
+        self.assertEqual(
+            state["advisor"],
+            {
+                "kind": "claude_subscription",
+                "model": "claude-opus-5",
+                "effort": "xhigh",
+                "server": "fable-advisor-python3",
+            },
+        )
+
+        status = self.run_script("--status", "--require-effective")
+        self.assertIn("Claude Opus 5: ready", status.stdout)
+        self.assertIn("no model call made", status.stdout)
+
+        update = self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--advisor-opus",
+            "--advisor-effort",
+            "max",
+            "--apply",
+        )
+        self.assertIn("Advisor: Claude Opus 5 max", update.stdout)
+        updated = json.loads(
+            (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
+        )
+        self.assertEqual(updated["advisor"]["effort"], "max")
+
+        self.run_script("--disable", "--apply")
+        self.assertFalse((self.home / NATIVE.STATE_FILENAME).exists())
+        servers = (
+            self.read_fake_config()
+            .get("plugins", {})
+            .get(NATIVE.PLUGIN_ID, {})
+            .get("mcp_servers", {})
+        )
+        self.assertTrue(
+            all(not entry.get("enabled", False) for entry in servers.values())
+        )
+
+    def test_opus_transition_requires_full_disable_then_roundtrips(self) -> None:
+        self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--advisor-fable",
+            "--apply",
+        )
+        before_config = self.read_fake_config()
+        before_state = (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
+        rejected = self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--advisor-opus",
+            "--apply",
+            check=False,
+        )
+        self.assertEqual(rejected.returncode, 2)
+        self.assertIn(
+            "configure_native_routing.py --disable --apply", rejected.stderr
+        )
+        self.assertEqual(self.read_fake_config(), before_config)
+        self.assertEqual(
+            (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8"),
+            before_state,
+        )
+
+        self.run_script("--disable", "--apply")
+        self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--advisor-opus",
+            "--apply",
+        )
+        for requested in (
+            ("--advisor-fable",),
+            ("--planner-opus",),
+            (),
+        ):
+            with self.subTest(requested=requested):
+                before_config = self.read_fake_config()
+                before_state = (
+                    self.home / NATIVE.STATE_FILENAME
+                ).read_text(encoding="utf-8")
+                rejected = self.run_script(
+                    "--executor-model",
+                    "gpt-5.6-luna",
+                    *requested,
+                    "--apply",
+                    check=False,
+                )
+                self.assertEqual(rejected.returncode, 2)
+                self.assertIn(
+                    "configure_native_routing.py --disable --apply",
+                    rejected.stderr,
+                )
+                self.assertEqual(self.read_fake_config(), before_config)
+                self.assertEqual(
+                    (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8"),
+                    before_state,
+                )
+
+        self.run_script("--disable", "--apply")
+        fable = self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--planner-fable",
+            "--apply",
+        )
+        self.assertIn("Planner: Claude Fable 5 high", fable.stdout)
+
+    def test_opus_version_and_effort_prerequisites_fail_closed(self) -> None:
+        original = self.claude.read_text(encoding="utf-8")
+        self.claude.write_text(
+            original.replace("2.1.219 (Claude Code)", "2.1.218 (Claude Code)"),
+            encoding="utf-8",
+        )
+        too_old = self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--advisor-opus",
+            check=False,
+        )
+        self.assertEqual(too_old.returncode, 2)
+        self.assertIn("requires Claude Code 2.1.219 or newer", too_old.stderr)
+        self.assertFalse((self.home / NATIVE.STATE_FILENAME).exists())
+
+    def test_bundled_claude_prerequisite_checks_every_runtime_control(self) -> None:
+        original = self.claude.read_text(encoding="utf-8")
+        required = (
+            "--print",
+            "--model",
+            "--effort",
+            "--safe-mode",
+            "--tools",
+            "--permission-mode",
+            "--no-session-persistence",
+            "--prompt-suggestions",
+            "--output-format",
+            "--system-prompt",
+        )
+        for flag in required:
+            with self.subTest(flag=flag):
+                self.claude.write_text(
+                    original.replace(flag, f"--missing-{flag.removeprefix('--')}"),
+                    encoding="utf-8",
+                )
+                rejected = self.run_script(
+                    "--executor-model",
+                    "gpt-5.6-luna",
+                    "--advisor-opus",
+                    check=False,
+                )
+                self.assertEqual(rejected.returncode, 2)
+                self.assertIn(flag, rejected.stderr)
+                self.assertFalse((self.home / NATIVE.STATE_FILENAME).exists())
+        self.claude.write_text(original, encoding="utf-8")
+
+        self.claude.write_text(
+            original.replace(
+                "(low, medium, high, xhigh, max)",
+                "(low, medium, high, max, future)",
+            ),
+            encoding="utf-8",
+        )
+        missing = self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--advisor-opus",
+            "--advisor-effort",
+            "xhigh",
+            check=False,
+        )
+        self.assertEqual(missing.returncode, 2)
+        self.assertIn("does not advertise Claude Opus 5 effort 'xhigh'", missing.stderr)
+
+        self.claude.write_text(
+            original.replace(
+                "(low, medium, high, xhigh, max)",
+                "(unparseable)",
+            ),
+            encoding="utf-8",
+        )
+        malformed_efforts = self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--advisor-opus",
+            check=False,
+        )
+        self.assertEqual(malformed_efforts.returncode, 2)
+        self.assertIn(
+            "does not advertise Claude Opus 5 effort 'high'",
+            malformed_efforts.stderr,
+        )
+
+        self.claude.write_text(
+            original.replace(
+                "(low, medium, high, xhigh, max)",
+                "(low, medium, high, xhigh, max, future)",
+            ),
+            encoding="utf-8",
+        )
+        supported = self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--advisor-opus",
+            "--advisor-effort",
+            "max",
+        )
+        self.assertIn("Dry run only", supported.stdout)
+        unsealed = self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--advisor-opus",
+            "--advisor-effort",
+            "future",
+            check=False,
+        )
+        self.assertEqual(unsealed.returncode, 2)
+        self.assertIn("Claude Opus 5 effort must be one of", unsealed.stderr)
+
+        self.claude.write_text(
+            original.replace("2.1.219 (Claude Code)", "not-a-version"),
+            encoding="utf-8",
+        )
+        malformed = self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--advisor-opus",
+            check=False,
+        )
+        self.assertEqual(malformed.returncode, 2)
+        self.assertIn("unparseable version", malformed.stderr)
+        self.assertFalse((self.home / NATIVE.STATE_FILENAME).exists())
+
+    def test_opus_effort_set_matches_documented_contract(self) -> None:
+        self.assertEqual(
+            NATIVE.OPUS_EFFORTS,
+            {"low", "medium", "high", "xhigh", "max"},
+        )
+        self.assertEqual(NATIVE.normalize_opus_effort("auto"), "high")
+        for effort in NATIVE.OPUS_EFFORTS:
+            self.assertEqual(NATIVE.normalize_opus_effort(effort), effort)
 
     def test_fable_setup_rejects_effort_missing_from_installed_claude(self) -> None:
         self.claude.write_text(

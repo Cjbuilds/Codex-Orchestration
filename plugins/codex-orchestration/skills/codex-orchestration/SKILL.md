@@ -17,6 +17,7 @@ Support these simple forms:
 /codex-orchestration setup executor: GPT-5.6 Luna Extra High
 /codex-orchestration setup executor: GPT-5.6 Luna Extra High, advisor: Claude Fable 5 High
 /codex-orchestration setup planner: Claude Fable 5 High, advisor: GPT-5.6 Sol High, executor: GPT-5.6 Luna Extra High
+/codex-orchestration setup advisor: Claude Opus 5 XHigh, executor: GPT-5.6 Luna Extra High
 /codex-orchestration setup designer: GPT-5.6 Sol High, executor: GPT-5.6 Luna Extra High
 /codex-orchestration Planner: Claude Fable 5 High, Designer: Kimi K3
 /codex-orchestration --update
@@ -68,7 +69,7 @@ Explicit seat labels are authoritative. `planner:` configures only Planner, `adv
 
 The executor is required for setup or a task-local override. It is not required for a custom-role creation request. Planner, advisor, and designer are optional: omitted planner means the current root model plans, omitted advisor means `advisor: none`, and omitted designer means `designer: none`. Do not ask separate planner or advisor questions, or a separate designer question, unless the user asks for help choosing them.
 
-For both persistent setup and task-local overrides, reject an identical Planner and Advisor route: the same direct model ID, the same custom-agent name, or Claude Fable 5 in both seats. Independent critique is required.
+For both persistent setup and task-local overrides, reject an identical Planner and Advisor route: the same direct model ID, the same custom-agent name, or more than one bundled Claude subscription seat across Fable 5 and Opus 5. Independent critique is required.
 
 If the executor is missing, ask only:
 
@@ -125,7 +126,7 @@ continue that work.
 
 If an old prompt contains `orchestrator:`, explain that the current task model already owns that role. Ignore that seat instead of switching or persisting it.
 
-Normalize `Extra High` to `xhigh`. For Claude Fable 5, accept `Low`, `Medium`, `High`, `XHigh`, `Max`, or `Ultra`. Omission or `Auto` means `High`; `Ultra` is a user-facing alias for Claude Code's actual `max` setting and must be reported as that mapping. Route Fable with `--planner-fable --planner-effort <normalized-effort>` or `--advisor-fable --advisor-effort <normalized-effort>`, not through the Codex model catalog. Resolve every other display name to an exact ID only through the executing host's model catalog, picker, a loaded custom agent, or official provider documentation. Never invent an ID. For persistent direct routing, resolve `auto` to the catalog's concrete default.
+Normalize `Extra High` to `xhigh`. For Claude Fable 5, accept `Low`, `Medium`, `High`, `XHigh`, `Max`, or `Ultra`. Omission or `Auto` means `High`; `Ultra` is a user-facing alias for Claude Code's actual `max` setting and must be reported as that mapping. Route Fable with `--planner-fable --planner-effort <normalized-effort>` or `--advisor-fable --advisor-effort <normalized-effort>`, not through the Codex model catalog. For Claude Opus 5, accept exactly `Low`, `Medium`, `High`, `XHigh`, or `Max`; omission or `Auto` means `High`, and `Ultra` is not an alias. Route it with `--planner-opus` or `--advisor-opus` plus the normalized effort. Resolve every other display name to an exact ID only through the executing host's model catalog, picker, a loaded custom agent, or official provider documentation. Never invent an ID. For persistent direct routing, resolve `auto` to the catalog's concrete default.
 
 Persistent Designer accepts only a direct same-provider model, not a Fable MCP
 or unqualified custom-agent route. Route it with `--designer-model` plus
@@ -297,11 +298,11 @@ or ambiguous data for manual recovery. An intentionally replaced user helper may
 accepted only through preview/apply `trust-helper` at the same absolute path, which
 clears qualification and requires authentication plus Gate 0 again.
 
-Claude Fable 5 remains the sealed first-party subscription adapter. It continues to
-use only its Planner/Advisor MCP operations and existing first-party login,
-no-tools, no-session-persistence, runtime-model-metadata contract. Do not route it
-through the native External Model provider configurator and do not generalize its
-adapter to arbitrary CLIs.
+Claude Fable 5 and Claude Opus 5 are the sealed first-party subscription adapters.
+They use only the Planner/Advisor MCP operations and existing first-party login,
+no-tools, no-session-persistence, runtime-model-metadata contract. Do not route
+them through the native External Model provider configurator and do not generalize
+their adapter to arbitrary CLIs.
 
 ## Create arbitrary custom roles
 
@@ -331,7 +332,7 @@ If the user combines a workflow with a Codex Goal, leave Goal lifecycle and limi
 
 ## One-time native setup
 
-Use this path for a current same-provider setup such as Sol root to Luna or Terra children. Claude Fable 5 is the one built-in cross-provider Planner or Advisor exception because it runs through the bundled read-only MCP bridge and the user's authenticated Claude Code CLI.
+Use this path for a current same-provider setup such as Sol root to Luna or Terra children. Claude Fable 5 and Claude Opus 5 are the built-in cross-provider Planner or Advisor exceptions because they run through the bundled read-only MCP bridge and the user's authenticated Claude Code CLI.
 
 1. Identify the Codex binary used by the active host. Do not assume the shell `codex` is the Desktop binary.
 2. Resolve the exact executor and optional Planner, Advisor, and Designer IDs and efforts from that host.
@@ -356,7 +357,13 @@ python3 <skill-dir>/scripts/configure_native_routing.py \
 
 Add `--advisor-model` and `--advisor-effort` for a same-provider Codex advisor. For Claude Fable 5, use `--advisor-fable`; add `--advisor-effort low|medium|high|xhigh|max` when the user chooses one. Omitting Fable effort defaults to `high`, while user-facing `ultra` is normalized to Claude Code's `max`. The configurator verifies that the installed Claude Code CLI advertises the selected effective effort. It also requires Claude Code to be logged in through a first-party Pro or Max account, chooses an available Python 3.11+ MCP launcher, and performs only an auth/capability check during setup. It never extracts a token, writes a credential, or makes a model call during setup or status. Omission persists `advisor: none`.
 
-Add `--planner-model` and `--planner-effort` for a same-provider Planner. For Claude Fable 5, use `--planner-fable`; add `--planner-effort low|medium|high|xhigh|max` when the user chooses one. Planner omission persists no Planner route and means the root plans. A configured Planner and Advisor must not resolve to the same model or agent route; independent review is required.
+For Claude Opus 5 Advisor, use `--advisor-opus` with an optional exact
+`--advisor-effort low|medium|high|xhigh|max`. The default is `high`. Setup also
+requires Claude Code 2.1.219 or newer. It checks version, first-party login,
+required flags, and that the installed CLI advertises the selected effort; extra
+future CLI efforts remain unselectable.
+
+Add `--planner-model` and `--planner-effort` for a same-provider Planner. For Claude Fable 5, use `--planner-fable`; add `--planner-effort low|medium|high|xhigh|max` when the user chooses one. For Claude Opus 5, use `--planner-opus` with the same exact five values and the same 2.1.219 minimum. Planner omission persists no Planner route and means the root plans. A configured Planner and Advisor must not resolve to the same model or agent route; independent review is required.
 
 Add `--designer-model` and `--designer-effort` for a persistent same-provider
 Designer. Designer omission persists `designer: none`. Designer cannot use the
@@ -375,9 +382,9 @@ Do not add `enabled = true` for a Sol or Terra root. Their current model metadat
 - `features.multi_agent_v2.multi_agent_mode_hint_text`;
 - `features.multi_agent_v2.usage_hint_text`.
 
-When Claude Fable 5 is selected, it additionally manages only the plugin-scoped `enabled` override for the chosen bundled MCP launcher and any launcher variant already overridden by the user. All bundled variants are disabled by default. The original override values are stored and restored by `disable`. Codex's TOML editor may retain an inert empty table header after deleting the last override; never rewrite the file merely to remove that cosmetic header.
+When Claude Fable 5 or Claude Opus 5 is selected, it additionally manages only the plugin-scoped `enabled` override for the chosen bundled MCP launcher and any launcher variant already overridden by the user. The historical `fable-advisor-*` launcher IDs are retained as compatibility identifiers for both sealed models. All bundled variants are disabled by default. The original override values are stored and restored by `disable`. Codex's TOML editor may retain an inert empty table header after deleting the last override; never rewrite the file merely to remove that cosmetic header.
 
-It uses Codex App Server's `config/read` and `config/batchWrite` APIs, not a home-grown TOML rewrite. It preserves unrelated settings and comments, validates the whole effective config, and uses the user-layer version to detect races. Restore snapshots cover the four routing fields plus the narrowly scoped MCP overrides only when Fable is selected; the namespaced state also records schema/version markers, config path, selected seats, and scalar-conversion metadata when needed. If the user explicitly replaces existing hint text, the exact prior text is stored for restoration; warn them never to place credentials in routing hints.
+It uses Codex App Server's `config/read` and `config/batchWrite` APIs, not a home-grown TOML rewrite. It preserves unrelated settings and comments, validates the whole effective config, and uses the user-layer version to detect races. Restore snapshots cover the four routing fields plus the narrowly scoped MCP overrides only when either bundled Claude model is selected; the namespaced state also records schema/version markers, config path, selected seats, and scalar-conversion metadata when needed. If the user explicitly replaces existing hint text, the exact prior text is stored for restoration; warn them never to place credentials in routing hints.
 
 If a user-authored mode or usage hint already exists, do not replace it automatically. Show the conflict. Use `--replace-existing-policy` only after the user explicitly approves replacing and later restoring those exact values.
 
@@ -423,7 +430,7 @@ a concurrent config or saved-state edit instead of overwriting it. It never read
 changes authentication, credentials, chats, or sessions. After apply, run status with
 `--require-effective` and fully quit and reopen Codex before starting a new task.
 
-To change seats, run normal `setup` again. The configurator keeps the original restore snapshot rather than treating its own managed values as user settings.
+To change ordinary seats, run normal `setup` again. The configurator keeps the original restore snapshot rather than treating its own managed values as user settings. An Opus route may update effort in place only on the same seat. Replacing Fable with Opus, replacing Opus with Fable, moving Opus between planning seats, or removing Opus through setup must fail before writes and instruct the user to run the existing full-policy `--disable --apply`, then one fresh complete setup.
 
 For disable, dry-run and then apply. A literal `disable` request authorizes a clean restore:
 
@@ -441,9 +448,14 @@ Disable must remain available even if an older client is incompatible with the a
 
 For personal v0.4 custom roles, preview and apply removal with `configure_orchestration.py --scope personal --personal-route-names --remove-saved-roles`. For older fixed-name personal roles, run a separate preview without `--personal-route-names`. Project removal uses `--scope project --root <trusted-project> --remove-saved-roles`. Delete only files that the configurator fully validates as managed; edited or user-owned files require manual review.
 
-## Claude Fable 5 Planner or Advisor
+## Claude Fable 5 or Claude Opus 5 Planner or Advisor
 
 Use this built-in route when the user names Claude Fable 5. Do not create a custom provider or custom-agent file for it.
+Claude Fable 5 remains a built-in cross-provider Planner or Advisor exception.
+
+Use the same sealed bridge when the user names Claude Opus 5. Its exact model
+ID is `claude-opus-5`, and Claude Code 2.1.219 or newer is required. In
+user-facing diagnostics use the exact name `Claude Opus 5`.
 
 In user-facing diagnostic status or operation results, use the exact name `Claude Fable 5`.
 The concise activation confirmation preserves the supplied `Fable 5` label when that is what the user wrote, as shown in its exact example.
@@ -455,11 +467,19 @@ Prerequisites:
 - `claude auth status` reports a first-party Pro or Max login;
 - a Python 3.11+ launcher is available.
 
-The plugin packages three disabled MCP launcher variants for macOS, Linux, and Windows. Setup enables exactly one compatible variant through the plugin's namespaced config when either Fable seat is selected. At planning or review time the MCP server removes API-key and Bedrock/Vertex/Foundry override variables, re-checks first-party login, and invokes `claude -p --model claude-fable-5` with `--safe-mode`, no tools, no session persistence, prompt suggestions disabled, and JSON output. Each saved seat pins its model and effort; the root cannot replace them through tool arguments.
+The plugin packages three disabled MCP launcher variants for macOS, Linux, and Windows. Setup enables exactly one compatible variant through the plugin's namespaced config when either bundled Claude model is selected. At planning or review time the MCP server removes API credentials plus endpoint, header, provider, model, and effort overrides, re-checks first-party login, and invokes `claude --print --model <sealed-model-id>` with `--safe-mode`, no tools, no session persistence, prompt suggestions disabled, and JSON output. Each saved seat pins its model and effort; the root cannot replace them through tool arguments.
 
 Fable effort is configurable per setup. The default is `high`; supported Claude Code values are `low`, `medium`, `high`, `xhigh`, and `max`. Accept `ultra` as an alias for `max`, save the effective Claude Code value, and disclose the alias mapping in setup output. Existing saved `max` routes remain valid.
 
-The bridge exposes only bounded, read-only planning operations. `create_plan` accepts one self-contained packet and requires `PLAN_DRAFT`. `revise_plan` requires the task, canonical current plan, latest critique, and compact findings history, then requires `PLAN_REVISION` plus a findings ledger and revised plan. `review_plan` remains the Advisor operation and requires `PLAN_APPROVED` or `PLAN_REVISE`. Every call uses the same full saved-state validator as native status/repair/disable, then requires runtime `modelUsage` to contain the pinned `claude-fable-5` primary plus only the bridge's explicit exact helper allowlist. Return every observed ID in `used_models`; an unknown additional or missing primary model makes the seat unavailable. Any auth, transport, state, format, or model-confirmation failure makes that seat unavailable; it never counts as approval. The bridge returns no account identifier or credential.
+Opus effort is also configurable and defaults to `high`. Its sealed set is
+exactly `low`, `medium`, `high`, `xhigh`, and `max`; no alias is accepted.
+Setup requires only that the selected sealed effort appear in the installed
+CLI's advertised set. Extra advertised values do not expand the sealed set.
+
+The bridge exposes only bounded, read-only planning operations. `create_plan` accepts one self-contained packet and requires `PLAN_DRAFT`. `revise_plan` requires the task, canonical current plan, latest critique, and compact findings history, then requires `PLAN_REVISION` plus a findings ledger and revised plan. `review_plan` remains the Advisor operation and requires `PLAN_APPROVED` or `PLAN_REVISE`. Every call uses the same full saved-state validator as native status/repair/disable, then requires runtime `modelUsage` to contain the pinned primary plus only that model's explicit exact helper allowlist. Fable permits its independently observed `claude-haiku-4-5-20251001` helper. No Opus helper identity is independently established, so Opus currently permits only `claude-opus-5` and fails closed if any additional runtime model appears. Return every observed ID in `used_models`; an unknown additional or missing primary model makes the seat unavailable. Any auth, transport, state, format, or model-confirmation failure makes that seat unavailable; it never counts as approval. The bridge returns no account identifier or credential. Local mocked verification does not prove a positive live Opus invocation.
+
+The legacy Fable contract requires runtime `modelUsage` to contain the pinned `claude-fable-5`
+primary; Opus applies the same primary-presence rule to `claude-opus-5`.
 
 Plugin and policy updates cannot replace the MCP process already loaded into the
 current task. If a Fable call fails after an update or repair, run fresh native
@@ -595,9 +615,11 @@ A configured Planner or Advisor is required by default. Route failure, malformed
 
 Do not persist a best-effort flag. An explicit task override applies only to that task.
 
-Reject persistent setup or task-local activation when configured Planner and Advisor routes are identical: the same direct model ID, same custom-agent name, or Fable in both seats. Independent critique is the reason for the Advisor role.
+Reject persistent setup or task-local activation when configured Planner and Advisor routes are identical: the same direct model ID, same custom-agent name, or more than one bundled Claude subscription seat. Independent critique is the reason for the Advisor role.
 
-Fable Planner uses `create_plan` and `revise_plan`; Fable Advisor uses `review_plan`. These operations are seat-bound: never send a supplied Fable Planner to `review_plan`, and never use an Advisor route to create or revise the plan. The policy authorizes only the root to make these read-only calls; Executors must never use or direct them.
+Bundled Claude Planner routes use `create_plan` and `revise_plan`; bundled Claude Advisor routes use `review_plan`. These operations are seat-bound: never send a supplied Planner route to `review_plan`, and never use an Advisor route to create or revise the plan. The policy authorizes only the root to make these read-only calls; Executors must never use or direct them.
+
+For compatibility with the established seat contract: Fable Planner uses `create_plan` and `revise_plan`; Fable Advisor uses `review_plan`. Opus uses the same operation-to-seat mapping.
 
 ## Designer handoff
 
@@ -665,11 +687,11 @@ Never call that 65% fewer raw tokens, a guaranteed five-hour or weekly-limit sav
 ## Resources
 
 - `scripts/configure_native_routing.py`: one-time native setup, status, seat changes, and disable.
-- `scripts/fable_advisor_mcp.py`: fail-closed Claude Fable 5 planning and review bridge.
+- `scripts/fable_advisor_mcp.py`: fail-closed Fable 5 and Opus 5 planning and review bridge; the filename is retained for compatibility.
 - `scripts/configure_orchestration.py`: namespaced custom agents, provider pins, safe removal, and legacy migration.
 - `scripts/inspect_models.py`: fallible host-catalog diagnostics.
 - `scripts/external_configurator.py`: preview-first External Model provider, Gate 0, role, status, recovery, and removal lifecycle.
 - `scripts/external_auth_helper.py`: stable OS credential-store reader for documented command-backed provider auth.
-- `scripts/external_subscription.py`: sealed dispatch through the existing Claude Fable 5 bridge.
+- `scripts/external_subscription.py`: sealed dispatch through the bundled Claude subscription bridge.
 - [providers-and-models.md](references/providers-and-models.md): detailed capability, provider, compatibility, persistence, and usage boundaries.
 - [external-models.md](references/external-models.md): External Model trust lanes, lifecycle, commands, secret handling, Kimi status, and adapter-extension contract.

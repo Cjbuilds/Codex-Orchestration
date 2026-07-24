@@ -46,15 +46,25 @@ class FableAdvisorMcpTests(unittest.TestCase):
             "server": "fable-advisor-python3",
         }
 
+    @staticmethod
+    def opus_route(effort: str = "high") -> dict[str, str]:
+        return {
+            "kind": "claude_subscription",
+            "model": "claude-opus-5",
+            "effort": effort,
+            "server": "fable-advisor-python3",
+        }
+
     def write_state(self, *, schema: int = 3, **seats: object) -> None:
-        fable_routes = [
+        subscription_routes = [
             route
             for route in seats.values()
-            if isinstance(route, dict) and route.get("kind") == "fable"
+            if isinstance(route, dict)
+            and route.get("kind") in {"fable", "claude_subscription"}
         ]
         managed_mcp = {
             route["server"]: True
-            for route in fable_routes[:1]
+            for route in subscription_routes[:1]
             if isinstance(route.get("server"), str)
         }
         previous_mcp = {
@@ -162,9 +172,7 @@ class FableAdvisorMcpTests(unittest.TestCase):
     def test_review_is_pinned_sanitized_read_only_and_runtime_confirmed(self) -> None:
         env = {
             "CODEX_HOME": str(self.home),
-            "ANTHROPIC_API_KEY": "must-not-leak",
-            "ANTHROPIC_AUTH_TOKEN": "must-not-leak",
-            "CLAUDE_CODE_USE_BEDROCK": "1",
+            **{name: "must-not-leak" for name in FABLE.SENSITIVE_ENV},
         }
         calls: list[tuple[list[str], dict[str, object]]] = []
 
@@ -193,6 +201,7 @@ class FableAdvisorMcpTests(unittest.TestCase):
         self.assertEqual(auth_command[-2:], ["auth", "status"])
         review_command, review_kwargs = calls[1]
         for flag in (
+            "--print",
             "--safe-mode",
             "--tools",
             "--permission-mode",
@@ -345,8 +354,47 @@ class FableAdvisorMcpTests(unittest.TestCase):
         with self.assertRaisesRegex(FABLE.AdvisorError, "state is invalid"):
             FABLE.load_fable_route(self.home)
         self.write_state(schema=5, advisor=self.route())
-        with self.assertRaisesRegex(FABLE.AdvisorError, "state is invalid"):
-            FABLE.load_fable_route(self.home)
+        self.assertEqual(FABLE.load_fable_route(self.home)["model"], FABLE.FABLE_MODEL)
+
+    def test_opus_route_pins_primary_and_rejects_every_unverified_helper(self) -> None:
+        self.write_state(schema=5, advisor=self.opus_route("xhigh"))
+        result, calls = self.invoke_with_results(
+            FABLE.review_plan,
+            "packet",
+            model_response="PLAN_APPROVED\nNo material gap.",
+            model_usage={FABLE.OPUS_MODEL: {"outputTokens": 12}},
+        )
+        self.assertEqual(result["model"], FABLE.OPUS_MODEL)
+        self.assertEqual(result["effort"], "xhigh")
+        review_command = calls[1][0]
+        self.assertEqual(
+            review_command[review_command.index("--model") + 1], FABLE.OPUS_MODEL
+        )
+        self.assertEqual(
+            review_command[review_command.index("--effort") + 1], "xhigh"
+        )
+
+        with self.assertRaisesRegex(
+            FABLE.AdvisorError, "outside the allowed Claude runtime policy"
+        ):
+            self.invoke_with_results(
+                FABLE.review_plan,
+                "packet",
+                model_response="PLAN_APPROVED\nNo material gap.",
+                model_usage={
+                    FABLE.OPUS_MODEL: {"outputTokens": 12},
+                    FABLE.FABLE_HELPER_MODEL: {"outputTokens": 1},
+                },
+            )
+        with self.assertRaisesRegex(
+            FABLE.AdvisorError, "did not confirm the pinned Claude Opus 5"
+        ):
+            self.invoke_with_results(
+                FABLE.review_plan,
+                "packet",
+                model_response="PLAN_APPROVED\nNo material gap.",
+                model_usage={FABLE.FABLE_HELPER_MODEL: {"outputTokens": 1}},
+            )
 
     def test_authorization_state_tampering_fails_before_any_subprocess(self) -> None:
         mutations = {

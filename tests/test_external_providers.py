@@ -21,9 +21,10 @@ import external_providers as PROVIDERS  # noqa: E402
 
 
 class ExternalProviderTests(unittest.TestCase):
-    def test_bundled_openrouter_and_fable_templates_are_strict(self) -> None:
+    def test_bundled_openrouter_and_claude_templates_are_strict(self) -> None:
         openrouter = PROVIDERS.load_provider("openrouter")
         fable = PROVIDERS.load_provider("claude-fable")
+        opus = PROVIDERS.load_provider("claude-opus")
         self.assertEqual(openrouter["wire_api"], "responses")
         self.assertEqual(openrouter["base_url"], "https://openrouter.ai/api/v1")
         self.assertEqual(
@@ -39,6 +40,13 @@ class ExternalProviderTests(unittest.TestCase):
         )
         self.assertEqual(fable["lane"], "subscription")
         self.assertEqual(fable["runtime_identity"], "cli_metadata")
+        self.assertEqual(opus["lane"], "subscription")
+        self.assertEqual(opus["runtime_identity"], "cli_metadata")
+        self.assertEqual(set(opus["models"]), {"claude-opus-5"})
+        self.assertEqual(
+            opus["models"]["claude-opus-5"]["supported_efforts"],
+            ["low", "medium", "high", "xhigh", "max"],
+        )
 
     def test_kimi_effort_is_explicit_and_never_clamped(self) -> None:
         provider = PROVIDERS.load_provider("openrouter")
