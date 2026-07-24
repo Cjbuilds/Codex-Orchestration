@@ -66,14 +66,14 @@ class KimiDesignerMcpTests(unittest.TestCase):
                 "usage": {"known": True, "present": False},
                 "metadata": {"known": True, "present": False},
                 "namespace": {"known": True, "present": False},
-                "mcp": {
-                    "kimi-designer-python3": {"known": True, "present": False}
-                },
+                "mcp": {"kimi-designer-python3": {"known": True, "present": False}},
             },
             "scalar_origin": None,
             "managed_feature": None,
         }
-        (self.home / KIMI.STATE_FILENAME).write_text(json.dumps(payload), encoding="utf-8")
+        (self.home / KIMI.STATE_FILENAME).write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
 
     @staticmethod
     def transcript(
@@ -127,7 +127,9 @@ class KimiDesignerMcpTests(unittest.TestCase):
                     },
                 }
             )
-        messages.append({"jsonrpc": "2.0", "id": 2, "result": {"stopReason": "end_turn"}})
+        messages.append(
+            {"jsonrpc": "2.0", "id": 2, "result": {"stopReason": "end_turn"}}
+        )
         return "\n".join(json.dumps(message) for message in messages)
 
     def test_state_route_is_exact_and_schema_bound(self) -> None:
@@ -153,7 +155,9 @@ class KimiDesignerMcpTests(unittest.TestCase):
         with self.assertRaisesRegex(KIMI.KimiDesignerError, "state is invalid"):
             KIMI.load_designer_route(self.home)
 
-    def test_prerequisites_require_oauth_k3_with_max_support_without_api_key(self) -> None:
+    def test_prerequisites_require_oauth_k3_with_max_support_without_api_key(
+        self,
+    ) -> None:
         catalog = {
             "providers": {
                 "managed:kimi-code": {
@@ -172,8 +176,11 @@ class KimiDesignerMcpTests(unittest.TestCase):
             },
         }
         outputs = ["0.27.0\n", "0.12.0\n", json.dumps(catalog)]
-        with mock.patch.object(KIMI, "_resolve_command", side_effect=lambda name: Path(name)), mock.patch.object(
-            KIMI, "_run_probe", side_effect=outputs
+        with (
+            mock.patch.object(
+                KIMI, "_resolve_command", side_effect=lambda name: Path(name)
+            ),
+            mock.patch.object(KIMI, "_run_probe", side_effect=outputs),
         ):
             ready = KIMI.check_prerequisites()
         self.assertEqual(ready["auth_method"], "kimi-code-oauth")
@@ -183,38 +190,48 @@ class KimiDesignerMcpTests(unittest.TestCase):
 
         catalog["providers"]["managed:kimi-code"]["apiKey"] = "secret"
         outputs = ["0.27.0\n", "0.12.0\n", json.dumps(catalog)]
-        with mock.patch.object(KIMI, "_resolve_command", side_effect=lambda name: Path(name)), mock.patch.object(
-            KIMI, "_run_probe", side_effect=outputs
-        ), self.assertRaisesRegex(KIMI.KimiDesignerError, "audited contract"):
+        with (
+            mock.patch.object(
+                KIMI, "_resolve_command", side_effect=lambda name: Path(name)
+            ),
+            mock.patch.object(KIMI, "_run_probe", side_effect=outputs),
+            self.assertRaisesRegex(KIMI.KimiDesignerError, "audited contract"),
+        ):
             KIMI.check_prerequisites()
 
         for malformed in ({"nested": "secret"}, ["secret"]):
             catalog["providers"]["managed:kimi-code"]["apiKey"] = malformed
             outputs = ["0.27.0\n", "0.12.0\n", json.dumps(catalog)]
-            with mock.patch.object(
-                KIMI, "_resolve_command", side_effect=lambda name: Path(name)
-            ), mock.patch.object(
-                KIMI, "_run_probe", side_effect=outputs
-            ), self.assertRaisesRegex(KIMI.KimiDesignerError, "audited contract"):
+            with (
+                mock.patch.object(
+                    KIMI, "_resolve_command", side_effect=lambda name: Path(name)
+                ),
+                mock.patch.object(KIMI, "_run_probe", side_effect=outputs),
+                self.assertRaisesRegex(KIMI.KimiDesignerError, "audited contract"),
+            ):
                 KIMI.check_prerequisites()
 
         catalog["providers"]["managed:kimi-code"]["apiKey"] = ""
         catalog["models"]["kimi-code/k3"]["supportEfforts"] = None
         outputs = ["0.27.0\n", "0.12.0\n", json.dumps(catalog)]
-        with mock.patch.object(
-            KIMI, "_resolve_command", side_effect=lambda name: Path(name)
-        ), mock.patch.object(
-            KIMI, "_run_probe", side_effect=outputs
-        ), self.assertRaisesRegex(KIMI.KimiDesignerError, "audited contract"):
+        with (
+            mock.patch.object(
+                KIMI, "_resolve_command", side_effect=lambda name: Path(name)
+            ),
+            mock.patch.object(KIMI, "_run_probe", side_effect=outputs),
+            self.assertRaisesRegex(KIMI.KimiDesignerError, "audited contract"),
+        ):
             KIMI.check_prerequisites()
 
         catalog["models"]["kimi-code/k3"]["supportEfforts"] = ["low", "high"]
         outputs = ["0.27.0\n", "0.12.0\n", json.dumps(catalog)]
-        with mock.patch.object(
-            KIMI, "_resolve_command", side_effect=lambda name: Path(name)
-        ), mock.patch.object(
-            KIMI, "_run_probe", side_effect=outputs
-        ), self.assertRaisesRegex(KIMI.KimiDesignerError, "audited contract"):
+        with (
+            mock.patch.object(
+                KIMI, "_resolve_command", side_effect=lambda name: Path(name)
+            ),
+            mock.patch.object(KIMI, "_run_probe", side_effect=outputs),
+            self.assertRaisesRegex(KIMI.KimiDesignerError, "audited contract"),
+        ):
             KIMI.check_prerequisites()
 
     def test_transcript_requires_runtime_identity_and_rejects_tools(self) -> None:
@@ -225,8 +242,12 @@ class KimiDesignerMcpTests(unittest.TestCase):
             KIMI._parse_acpx_transcript(self.transcript(model="kimi-code/k2"))
         with self.assertRaisesRegex(KIMI.KimiDesignerError, "call a tool"):
             KIMI._parse_acpx_transcript(self.transcript(update="tool_call"))
-        forbidden_fs = self.transcript() + "\n" + json.dumps(
-            {"jsonrpc": "2.0", "id": 9, "method": "fs/read_text_file", "params": {}}
+        forbidden_fs = (
+            self.transcript()
+            + "\n"
+            + json.dumps(
+                {"jsonrpc": "2.0", "id": 9, "method": "fs/read_text_file", "params": {}}
+            )
         )
         with self.assertRaisesRegex(KIMI.KimiDesignerError, "operation forbidden"):
             KIMI._parse_acpx_transcript(forbidden_fs)
@@ -241,13 +262,19 @@ class KimiDesignerMcpTests(unittest.TestCase):
         completed = subprocess.CompletedProcess(
             ["acpx"], 0, self.transcript(), "diagnostic output"
         )
-        with mock.patch.object(KIMI, "load_designer_route", return_value={
-            "model": "kimi-code/k3",
-            "effort": "max",
-            "server": "kimi-designer-python3",
-        }), mock.patch.object(KIMI, "check_prerequisites", return_value=ready), mock.patch.object(
-            KIMI.subprocess, "run", return_value=completed
-        ) as run:
+        with (
+            mock.patch.object(
+                KIMI,
+                "load_designer_route",
+                return_value={
+                    "model": "kimi-code/k3",
+                    "effort": "max",
+                    "server": "kimi-designer-python3",
+                },
+            ),
+            mock.patch.object(KIMI, "check_prerequisites", return_value=ready),
+            mock.patch.object(KIMI.subprocess, "run", return_value=completed) as run,
+        ):
             result = KIMI.create_design_handoff("Design the approved settings screen.")
         command = run.call_args.args[0]
         self.assertIn("--deny-all", command)
@@ -258,8 +285,20 @@ class KimiDesignerMcpTests(unittest.TestCase):
         sent_prompt = run.call_args.kwargs["input"]
         self.assertTrue(sent_prompt.startswith(KIMI.DESIGNER_PROMPT))
         self.assertIn("Design the approved settings screen.", sent_prompt)
+        self.assertEqual(run.call_args.kwargs["encoding"], "utf-8")
+        self.assertEqual(run.call_args.kwargs["errors"], "replace")
         self.assertEqual(result["runtime_model"], "kimi-code/k3")
         self.assertEqual(result["tool_policy"], "deny-all/no-terminal/disposable-cwd")
+
+    def test_prerequisite_probe_decodes_utf8_explicitly(self) -> None:
+        completed = subprocess.CompletedProcess(
+            ["kimi", "--version"], 0, "0.27.0\n", ""
+        )
+        with mock.patch.object(KIMI.subprocess, "run", return_value=completed) as run:
+            output = KIMI._run_probe(["kimi", "--version"], label="Kimi Code CLI")
+        self.assertEqual(output, "0.27.0\n")
+        self.assertEqual(run.call_args.kwargs["encoding"], "utf-8")
+        self.assertEqual(run.call_args.kwargs["errors"], "replace")
 
     def test_environment_scrubs_provider_overrides(self) -> None:
         with mock.patch.dict(
@@ -281,9 +320,13 @@ class KimiDesignerMcpTests(unittest.TestCase):
 
     def test_mcp_surface_exposes_only_bounded_designer_and_status(self) -> None:
         tools = KIMI.tool_definitions()
-        self.assertEqual([tool["name"] for tool in tools], ["create_design_handoff", "status"])
+        self.assertEqual(
+            [tool["name"] for tool in tools], ["create_design_handoff", "status"]
+        )
         self.assertTrue(all(tool["annotations"]["readOnlyHint"] for tool in tools))
-        response = KIMI.handle_request({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+        response = KIMI.handle_request(
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+        )
         self.assertEqual(len(response["result"]["tools"]), 2)
 
 

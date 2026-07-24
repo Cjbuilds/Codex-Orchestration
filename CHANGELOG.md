@@ -2,6 +2,9 @@
 
 ## 0.9.2 — 2026-07-23
 
+- Decode Kimi Code CLI and ACP subprocess output explicitly as UTF-8 on Windows,
+  preventing Unicode punctuation in Designer handoffs from being misread through
+  the active console code page.
 - Resolve the enabled executing Codex Orchestration installation from the native
   plugin inventory instead of writing MCP overrides beneath a hard-coded marketplace
   ID. The guard binds the executing package to Codex's documented marketplace/name/
