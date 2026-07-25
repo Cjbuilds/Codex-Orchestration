@@ -24,6 +24,11 @@ PORTABILITY_BASE_MODULES = (
     "tests.test_packaging",
     "tests.test_skill_contract",
 )
+ROUTING_PORTABILITY_MODULES = (
+    "tests.test_native_routing",
+    "tests.test_routing_state",
+    "tests.test_fable_advisor_mcp",
+)
 EXTERNAL_PORTABILITY_MODULES = (
     "tests.test_external_cli_trust",
     "tests.test_external_configurator",
@@ -347,6 +352,15 @@ def ci_checks(
                 timeout=600,
             ),
         ]
+        results.extend(
+            unittest_check(
+                root,
+                f"portability-{module.rsplit('.', 1)[-1].removeprefix('test_').replace('_', '-')}",
+                [module],
+                timeout=300,
+            )
+            for module in ROUTING_PORTABILITY_MODULES
+        )
         results.extend(
             unittest_check(
                 root,

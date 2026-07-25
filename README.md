@@ -1,6 +1,6 @@
 # Codex Orchestration
 
-Bring models like Claude Fable 5 into Codex, give each model a role, and let Codex coordinate the work.
+Bring models like Claude Fable 5 and Claude Opus 5 into Codex, give each model a role, and let Codex coordinate the work.
 
 ## What is it?
 
@@ -53,7 +53,7 @@ Planner and Advisor can work through several revisions. Codex stops as soon as t
 
 ## Why use it?
 
-- Bring Fable 5 or another compatible model into Codex.
+- Bring Fable 5, Opus 5, or another compatible model into Codex.
 - Use different models for planning, review, design, and implementation.
 - Get a stronger plan before code changes begin.
 - Run independent implementation work in parallel—up to 2x faster on suitable tasks.
@@ -90,11 +90,21 @@ Or let your current Codex model plan and use Fable 5 only as Advisor:
 /codex-orchestration setup advisor: Claude Fable 5 High, executor: GPT-5.6 Luna Extra High
 ```
 
+Or use Claude Opus 5 as the Advisor:
+
+```text
+/codex-orchestration setup advisor: Claude Opus 5 XHigh, executor: GPT-5.6 Luna Extra High
+```
+
 After setup, start another new task and use Codex normally. The saved workflow applies automatically.
 
 Fable defaults to **High**. You can choose **Low**, **Medium**, **High**, **XHigh**, or **Max**. **Ultra** is accepted as an alias for Max because Claude Code does not expose a separate Ultra effort.
 
-Fable 5 uses the official Claude Code CLI and a compatible first-party Claude login. You do not need to add an Anthropic API key to Codex.
+Opus 5 also defaults to **High** and supports the same five exact effort values,
+but not the Fable-only **Ultra** alias. Opus requires Claude Code **2.1.219 or
+newer**.
+
+Fable 5 and Opus 5 use the official Claude Code CLI and a compatible first-party Claude login. You do not need to add an Anthropic API key to Codex.
 
 ## Choose your roles
 
@@ -180,10 +190,20 @@ the explicitly billable isolated Gate 0. New providers or subscription CLIs stil
 require a reviewed bundled manifest and adapter; arbitrary URLs and arbitrary local
 CLIs are not auto-trusted.
 
-Fable 5 remains the sealed subscription exception and can be used directly as
-Planner or Advisor through first-party Claude login. See the
+Fable 5 and Opus 5 are sealed subscription exceptions available only as Planner
+or Advisor through first-party Claude login. Only one bundled Claude subscription
+seat may be configured at a time; neither model is a Designer, Executor, general
+custom role, or Desktop picker entry. See the
 [External Models reference](plugins/codex-orchestration/skills/codex-orchestration/references/external-models.md)
 for commands, lifecycle states, extension rules, and threat boundaries.
+Fable 5 is the bundled cross-provider exception retained for compatibility;
+Opus 5 is the second sealed bundled exception added in version 0.9.0.
+
+The bundled Claude bridge starts each authentication and model subprocess with
+only a minimal platform environment. It preserves canonical `HOME` on POSIX or
+`USERPROFILE` on Windows so the official CLI can find the user's first-party login,
+but it does not inherit credential, config-redirection, provider/model/effort,
+endpoint/gateway, proxy/CA/mTLS, or telemetry override families.
 
 Models already available through Codex can still become ordinary user-owned roles:
 
@@ -192,7 +212,7 @@ Models already available through Codex can still become ordinary user-owned role
 ```
 
 Project roles live in `.codex/agents/`; personal roles live in
-`~/.codex/agents/`. An unbundled cross-provider model still requires an existing authenticated, compatible provider. Fable 5 is the bundled cross-provider exception.
+`~/.codex/agents/`. An unbundled cross-provider model still requires an existing authenticated, compatible provider. Fable 5 and Opus 5 are the bundled cross-provider exceptions.
 
 ## Use it with Codex Goals
 
@@ -206,6 +226,7 @@ Create a Codex Goal normally, then tell Codex to use the saved workflow until th
 /codex-orchestration repair
 /codex-orchestration --update
 /codex-orchestration setup planner: Claude Fable 5 High, advisor: GPT-5.6 Sol High, designer: GPT-5.6 Terra High, executor: GPT-5.6 Luna Extra High
+/codex-orchestration setup advisor: Claude Opus 5 XHigh, executor: GPT-5.6 Luna Extra High
 /codex-orchestration Planner: Claude Fable 5 High, Designer: Kimi K3
 /codex-orchestration disable
 ```
@@ -222,19 +243,25 @@ unavailable. The seat label never authorizes credential entry or a paid probe.
 
 `disable` restores the routing values that existed before setup. It does not delete user-owned custom roles.
 
+An Opus seat can be updated in place on the same Planner or Advisor seat,
+including its effort. Replacing Opus with Fable, replacing Fable with Opus,
+moving Opus between Planner and Advisor, or removing Opus through another setup
+requires `/codex-orchestration disable` first, followed by one fresh complete
+setup. This prevents silent subscription route replacement.
+
 `repair` is narrower than setup or disable. When status reports that plugin-managed
 mode/usage hints conflict with otherwise intact saved state, it can restore only
 those saved hint bytes after a dry run. It refuses missing state, unmarked text,
-namespace or spawn-metadata drift, Fable launcher drift, concurrent edits, and
-higher-layer overrides. It does not rewrite restore history or touch authentication,
-credentials, chats, or sessions.
+namespace or spawn-metadata drift, bundled Claude launcher drift, concurrent edits,
+and higher-layer overrides. It does not rewrite restore history or touch
+authentication, credentials, chats, or sessions.
 
 ## Important limits
 
 - Codex remains the root orchestrator and final authority.
 - Planner, Advisor, and Designer report only to Codex; they do not contact one another or Executors directly.
 - Designer may edit only design artifacts explicitly delegated by Codex; it does not change implementation code or release Executor.
-- The workflow reserves Fable planning tools for the root Codex model by policy. Current MCP calls do not identify their caller, so this caller boundary is instruction-enforced; the bridge itself still disables tools, edits, and session persistence.
+- The workflow reserves bundled Claude planning tools for the root Codex model by policy. Current MCP calls do not identify their caller, so this caller boundary is instruction-enforced; the bridge itself still disables tools, edits, and session persistence.
 - Advisor approval is a planning gate, not a guarantee that implementation will succeed.
 - Direct model routes inherit the root provider. Audited external adapters use
   provider-pinned personal role agents and never enter the model picker.
@@ -260,10 +287,10 @@ the plugin or touch routing, credentials, chats, sessions, or the model picker.
 Restart Codex Desktop and start a new task after an update; the task that launched
 the updater keeps its already loaded instructions.
 
-If a Fable call fails in the task that performed an update but fresh status reports
-`first-party login ready`, the login is healthy and the already loaded MCP bridge is
-stale. Fully quit and reopen Codex, then start a new task; do not re-authenticate
-solely for that stale-bridge condition.
+If a bundled Claude call fails in the task that performed an update but fresh
+status reports `first-party login ready`, the login is healthy and the already
+loaded MCP bridge is stale. Fully quit and reopen Codex, then start a new task; do
+not re-authenticate solely for that stale-bridge condition.
 
 To move from version 0.6.x or older to 0.7.0, run the native Codex commands once:
 
@@ -277,7 +304,7 @@ or newer** adds `--update`, routing repair, and Designer; version **0.7.1 or new
 lets the natural `Designer: Kimi K3` label enter the External Model lifecycle;
 version **0.7.2 or newer** uses the concise per-role activation confirmation;
 version **0.8.0 or newer** uses sealed direct CLI invocation for READY External
-Model roles.
+Model roles; version **0.9.0 or newer** adds Claude Opus 5 subscription routing.
 Confirm with
 `codex plugin list --json`, then restart Codex Desktop and start a new task.
 

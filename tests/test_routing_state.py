@@ -36,6 +36,15 @@ def fable_route(server: str = "fable-advisor-python3") -> dict[str, str]:
     }
 
 
+def opus_route(server: str = "fable-advisor-python3") -> dict[str, str]:
+    return {
+        "kind": "claude_subscription",
+        "model": STATE.OPUS_MODEL,
+        "effort": "xhigh",
+        "server": server,
+    }
+
+
 def genuine_state(schema: int) -> dict[str, object]:
     managed: dict[str, object] = {
         "mode": f"{STATE.MANAGED_MARKER}\nmode body",
@@ -65,7 +74,7 @@ def genuine_state(schema: int) -> dict[str, object]:
         state["advisor"] = fable_route()
     if schema >= 3:
         state["planner"] = fable_route()
-    if schema == 4:
+    if schema >= 4:
         state["designer"] = {
             "kind": "model",
             "model": "gpt-designer",
@@ -84,8 +93,8 @@ def genuine_state(schema: int) -> dict[str, object]:
 
 
 class RoutingStateTests(unittest.TestCase):
-    def test_genuine_schemas_one_through_four_are_accepted(self) -> None:
-        for schema in (1, 2, 3, 4):
+    def test_genuine_schemas_one_through_five_are_accepted(self) -> None:
+        for schema in (1, 2, 3, 4, 5):
             with self.subTest(schema=schema):
                 state = genuine_state(schema)
                 self.assertIs(STATE.validate_routing_state(state), state)
@@ -115,8 +124,8 @@ class RoutingStateTests(unittest.TestCase):
             return lambda state: state.__setitem__("policy_version", value)
 
         mutations = [
-            *( (f"schema {value!r}", schema(value)) for value in (True, 1.0, "4", None, 0, 5) ),
-            *( (f"policy {value!r}", policy(value)) for value in (True, 4.0, "4", None, 0, 5, 3) ),
+            *( (f"schema {value!r}", schema(value)) for value in (True, 1.0, "4", None, 0, 6) ),
+            *( (f"policy {value!r}", policy(value)) for value in (True, 4.0, "4", None, 0, 6, 3) ),
             ("missing top key", lambda state: state.pop("managed_by")),
             ("extra top key", lambda state: state.__setitem__("future", True)),
             ("wrong owner", lambda state: state.__setitem__("managed_by", "other")),
@@ -182,6 +191,89 @@ class RoutingStateTests(unittest.TestCase):
                 mutate(state)
                 with self.assertRaises(STATE.RoutingStateError):
                     STATE.validate_routing_state(state)
+
+    def test_schema_five_opus_route_is_sealed_and_exclusive(self) -> None:
+        state = genuine_state(5)
+        state["planner"] = opus_route()
+        self.assertIs(STATE.validate_routing_state(state), state)
+
+        mutations = {
+            "Fable cross encoded": lambda value: value["planner"].update(
+                model=STATE.FABLE_MODEL
+            ),
+            "wrong effort": lambda value: value["planner"].update(effort="ultra"),
+            "wrong server": lambda value: value["planner"].update(server="future"),
+            "extra key": lambda value: value["planner"].update(future=True),
+            "executor Opus": lambda value: value.update(executor=opus_route()),
+            "designer Opus": lambda value: value.update(designer=opus_route()),
+            "mixed subscription seats": lambda value: value.update(
+                advisor=fable_route()
+            ),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label=label):
+                invalid = deepcopy(state)
+                mutate(invalid)
+                with self.assertRaises(STATE.RoutingStateError):
+                    STATE.validate_routing_state(invalid)
+
+        legacy = genuine_state(4)
+        legacy["planner"] = opus_route()
+        with self.assertRaises(STATE.RoutingStateError):
+            STATE.validate_routing_state(legacy)
+
+    def test_reserved_claude_models_cannot_use_generic_model_routes(self) -> None:
+        seats_by_schema = {
+            1: ("executor", "advisor"),
+            2: ("executor", "advisor"),
+            3: ("executor", "planner", "advisor"),
+            4: ("executor", "planner", "advisor", "designer"),
+            5: ("executor", "planner", "advisor", "designer"),
+        }
+        for schema, seats in seats_by_schema.items():
+            for seat in seats:
+                for model in (STATE.FABLE_MODEL, STATE.OPUS_MODEL):
+                    with self.subTest(schema=schema, seat=seat, model=model):
+                        invalid = genuine_state(schema)
+                        invalid[seat] = {
+                            "kind": "model",
+                            "model": model,
+                            "effort": "high",
+                        }
+                        if not any(
+                            isinstance(invalid.get(candidate), dict)
+                            and invalid[candidate].get("kind")
+                            in {"fable", "claude_subscription"}
+                            for candidate in ("planner", "advisor")
+                        ):
+                            for server in invalid["managed"].get("mcp", {}):
+                                invalid["managed"]["mcp"][server] = False
+                        with self.assertRaises(STATE.RoutingStateError):
+                            STATE.validate_routing_state(invalid)
+
+        for sealed, generic in (
+            (fable_route(), STATE.OPUS_MODEL),
+            (opus_route(), STATE.FABLE_MODEL),
+        ):
+            for sealed_seat, generic_seat in (
+                ("planner", "advisor"),
+                ("advisor", "planner"),
+            ):
+                with self.subTest(
+                    sealed_model=sealed["model"],
+                    sealed_seat=sealed_seat,
+                    generic_model=generic,
+                    generic_seat=generic_seat,
+                ):
+                    invalid = genuine_state(5)
+                    invalid[sealed_seat] = deepcopy(sealed)
+                    invalid[generic_seat] = {
+                        "kind": "model",
+                        "model": generic,
+                        "effort": "high",
+                    }
+                    with self.assertRaises(STATE.RoutingStateError):
+                        STATE.validate_routing_state(invalid)
 
     def test_legacy_schemas_reject_future_surfaces(self) -> None:
         scenarios = []

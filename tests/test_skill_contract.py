@@ -29,6 +29,14 @@ ROUTING_STATE = (SKILL_ROOT / "scripts" / "routing_state.py").read_text(
 
 
 class SkillContractTests(unittest.TestCase):
+    def test_opus_is_a_sealed_subscription_planner_or_advisor(self) -> None:
+        self.assertIn("advisor: Claude Opus 5 XHigh", SKILL)
+        self.assertIn("--advisor-opus", SKILL)
+        self.assertIn("--planner-opus", SKILL)
+        self.assertIn("Claude Code 2.1.219 or newer", SKILL)
+        self.assertIn("No Opus helper identity is independently established", SKILL)
+        self.assertIn("more than one bundled Claude subscription seat", SKILL)
+
     def test_public_controls_are_simple_and_setup_is_persistent(self) -> None:
         self.assertIn("setup executor: GPT-5.6 Luna Extra High", SKILL)
         self.assertIn("setup planner: Claude Fable 5 High", SKILL)

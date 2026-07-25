@@ -5,6 +5,9 @@ from pathlib import Path
 import re
 import subprocess
 import unittest
+from unittest import mock
+
+from scripts import preflight
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -134,6 +137,53 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("name: analyze (python)", codeql)
         self.assertEqual(codeql.count("github/codeql-action/analyze@"), 1)
 
+    def test_portability_runs_routing_and_subscription_bridge_regressions(self) -> None:
+        calls: list[tuple[str, tuple[str, ...], int]] = []
+
+        def record_unittest(
+            root: Path,
+            name: str,
+            modules: list[str] | None = None,
+            *,
+            timeout: int = 600,
+            env: dict[str, str] | None = None,
+        ) -> preflight.CheckResult:
+            del root, env
+            calls.append((name, tuple(modules or ()), timeout))
+            return preflight.CheckResult(name, "PASS")
+
+        with (
+            mock.patch.object(
+                preflight,
+                "compile_check",
+                return_value=preflight.CheckResult("compile", "PASS"),
+            ),
+            mock.patch.object(
+                preflight, "unittest_check", side_effect=record_unittest
+            ),
+        ):
+            results = preflight.ci_checks(
+                "portability",
+                REPO_ROOT,
+                base_sha=None,
+                head_sha=None,
+            )
+
+        expected = {
+            "portability-native-routing": ("tests.test_native_routing",),
+            "portability-routing-state": ("tests.test_routing_state",),
+            "portability-fable-advisor-mcp": ("tests.test_fable_advisor_mcp",),
+        }
+        observed = {name: modules for name, modules, _ in calls}
+        self.assertEqual(
+            {name: observed.get(name) for name in expected},
+            expected,
+        )
+        for name, _, timeout in calls:
+            if name in expected:
+                self.assertEqual(timeout, 300, name)
+        self.assertTrue(all(result.status == "PASS" for result in results))
+
     def test_workflow_actions_permissions_and_cli_versions_remain_pinned(self) -> None:
         ci = (REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         codeql = (REPO_ROOT / ".github/workflows/codeql.yml").read_text(
@@ -205,7 +255,7 @@ class PackagingTests(unittest.TestCase):
 
         self.assertEqual(manifest["name"], "codex-orchestration")
         self.assertEqual(manifest["skills"], "./skills/")
-        self.assertEqual(manifest["version"], "0.8.0")
+        self.assertEqual(manifest["version"], "0.9.0")
         self.assertEqual(manifest["mcpServers"], "./.mcp.json")
         self.assertRegex(
             manifest["version"],
@@ -228,7 +278,7 @@ class PackagingTests(unittest.TestCase):
         self.assertFalse((SKILL_ROOT / "scripts" / "update_plugin.py").exists())
         self.assertIn("config/batchWrite", native.read_text(encoding="utf-8"))
         self.assertIn('"--repair"', native.read_text(encoding="utf-8"))
-        self.assertIn('"version": "0.8.0"', native.read_text(encoding="utf-8"))
+        self.assertIn('"version": "0.9.0"', native.read_text(encoding="utf-8"))
         self.assertIn("validate_routing_state", routing_state.read_text(encoding="utf-8"))
         self.assertIn("Standalone custom agent", custom.read_text(encoding="utf-8"))
 
@@ -249,6 +299,7 @@ class PackagingTests(unittest.TestCase):
             self.assertTrue((scripts / name).is_file(), name)
         openrouter = json.loads((providers / "openrouter.json").read_text("utf-8"))
         fable = json.loads((providers / "claude-fable.json").read_text("utf-8"))
+        opus = json.loads((providers / "claude-opus.json").read_text("utf-8"))
         self.assertEqual(openrouter["models"].keys(), {"moonshotai/kimi-k3"})
         self.assertEqual(openrouter["version"], 2)
         self.assertFalse(openrouter["experimental"])
@@ -258,6 +309,12 @@ class PackagingTests(unittest.TestCase):
             ["max"],
         )
         self.assertEqual(fable["subscription_adapter"]["module"], "fable_advisor_mcp")
+        self.assertEqual(opus["models"].keys(), {"claude-opus-5"})
+        self.assertEqual(
+            opus["models"]["claude-opus-5"]["supported_efforts"],
+            ["low", "medium", "high", "xhigh", "max"],
+        )
+        self.assertEqual(opus["subscription_adapter"]["module"], "fable_advisor_mcp")
         external_reference = SKILL_ROOT / "references/external-models.md"
         self.assertTrue(external_reference.is_file())
 
@@ -332,7 +389,7 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("@openai/codex@0.144.1", workflow)
         smoke_text = smoke.read_text(encoding="utf-8")
         self.assertIn('OLD_VERSION = "0.5.0"', smoke_text)
-        self.assertIn('NEW_VERSION = "0.8.0"', smoke_text)
+        self.assertIn('NEW_VERSION = "0.9.0"', smoke_text)
         self.assertIn("old Advisor-only cache unexpectedly supports Planner", smoke_text)
         self.assertIn("Upgraded installed skill is missing Planner contract", smoke_text)
         self.assertIn("reused the Advisor-only 0.5.0 cache directory", smoke_text)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Root-directed, no-tools MCP bridge from Codex to Claude Fable 5.
+"""Root-directed, no-tools MCP bridge to sealed Claude subscription models.
 
 The managed policy reserves stateless Planner and Advisor operations for the
 root; MCP requests do not carry caller identity, so the server cannot enforce
@@ -11,6 +11,7 @@ no-tools/no-persistence process.
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 import stat
@@ -25,6 +26,7 @@ import routing_state
 STATE_FILENAME = ".codex-orchestration-routing.json"
 MANAGED_MARKER = routing_state.MANAGED_MARKER
 FABLE_MODEL = routing_state.FABLE_MODEL
+OPUS_MODEL = routing_state.OPUS_MODEL
 FABLE_SERVERS = routing_state.FABLE_SERVERS
 SUPPORTED_EFFORTS = routing_state.FABLE_EFFORTS
 # Claude Code currently reports this exact internal helper alongside Fable for
@@ -32,6 +34,12 @@ SUPPORTED_EFFORTS = routing_state.FABLE_EFFORTS
 # rotates or any other model appears.
 FABLE_HELPER_MODEL = "claude-haiku-4-5-20251001"
 ALLOWED_RUNTIME_MODELS = frozenset({FABLE_MODEL, FABLE_HELPER_MODEL})
+ALLOWED_RUNTIME_MODELS_BY_PRIMARY = {
+    FABLE_MODEL: ALLOWED_RUNTIME_MODELS,
+    # No Opus helper identity has been independently verified. Fail closed if
+    # Claude Code reports anything beyond the sealed primary.
+    OPUS_MODEL: frozenset({OPUS_MODEL}),
+}
 CLAUDE_TIMEOUT_SECONDS = 600
 AUTH_TIMEOUT_SECONDS = 20
 # Applies to the combined user-controlled text sent by one model operation.
@@ -39,7 +47,52 @@ MAX_INPUT_CHARS = 200_000
 SENSITIVE_ENV = {
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_AWS_API_KEY",
+    "ANTHROPIC_AWS_BASE_URL",
+    "ANTHROPIC_AWS_WORKSPACE_ID",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_BEDROCK_BASE_URL",
+    "ANTHROPIC_BEDROCK_MANTLE_BASE_URL",
+    "ANTHROPIC_BETAS",
+    "ANTHROPIC_CUSTOM_HEADERS",
+    "ANTHROPIC_CUSTOM_MODEL_OPTION",
+    "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION",
+    "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME",
+    "ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL_SUPPORTED_CAPABILITIES",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES",
+    "ANTHROPIC_FOUNDRY_API_KEY",
+    "ANTHROPIC_FOUNDRY_AUTH_TOKEN",
+    "ANTHROPIC_FOUNDRY_BASE_URL",
+    "ANTHROPIC_FOUNDRY_RESOURCE",
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_SMALL_FAST_MODEL",
+    "ANTHROPIC_VERTEX_BASE_URL",
+    "ANTHROPIC_VERTEX_PROJECT_ID",
+    "CLAUDE_CODE_EFFORT_LEVEL",
+    "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
+    "CLAUDE_CODE_SKIP_BEDROCK_AUTH",
+    "CLAUDE_CODE_SKIP_FOUNDRY_AUTH",
+    "CLAUDE_CODE_SKIP_MANTLE_AUTH",
+    "CLAUDE_CODE_SKIP_VERTEX_AUTH",
+    "CLAUDE_CODE_SUBAGENT_MODEL",
+    "CLAUDE_CODE_USE_ANTHROPIC_AWS",
     "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_MANTLE",
     "CLAUDE_CODE_USE_VERTEX",
     "CLAUDE_CODE_USE_FOUNDRY",
 }
@@ -49,18 +102,18 @@ STALE_BRIDGE_RECOVERY = (
     "start a new task; do not re-authenticate solely for this loaded-bridge failure."
 )
 
-ADVISOR_SYSTEM_PROMPT = """You are Claude Fable 5 acting only as a plan advisor to Codex's root orchestrator.
+ADVISOR_SYSTEM_PROMPT = """You are the configured Claude model acting only as a plan advisor to Codex's root orchestrator.
 Review the supplied self-contained packet for material correctness, missing constraints, unsafe sequencing, ownership conflicts, and verification gaps. Do not edit files, call tools, spawn agents, contact the Planner or executors, or attempt implementation.
 
 Your first non-empty line must be exactly PLAN_APPROVED or PLAN_REVISE.
 Use PLAN_APPROVED only when no material gap is present. Use PLAN_REVISE when correction is needed. For PLAN_REVISE, assign every material finding a stable, unique finding ID and give a concrete correction. On later rounds, preserve IDs from the supplied cumulative ledger. Ignore style preferences. Report only to the root orchestrator."""
 
-PLANNER_CREATE_SYSTEM_PROMPT = """You are Claude Fable 5 acting only as a plan author for Codex's root orchestrator.
+PLANNER_CREATE_SYSTEM_PROMPT = """You are the configured Claude model acting only as a plan author for Codex's root orchestrator.
 Create a concrete implementation plan from the supplied self-contained packet. Include constraints, ownership, sequencing, acceptance criteria, security and compatibility boundaries, and behavioral plus regression verification. Do not edit files, call tools, spawn agents, contact the Advisor or executors, or attempt implementation.
 
 Your first non-empty line must be exactly PLAN_DRAFT. Return the complete draft plan after that signal. Report only to the root orchestrator."""
 
-PLANNER_REVISE_SYSTEM_PROMPT = """You are Claude Fable 5 acting only as a stateless plan reviser for Codex's root orchestrator.
+PLANNER_REVISE_SYSTEM_PROMPT = """You are the configured Claude model acting only as a stateless plan reviser for Codex's root orchestrator.
 Revise the supplied canonical current plan using the original task, its source plan version, the latest Advisor critique, and the compact cumulative history. Do not edit files, call tools, spawn agents, contact the Advisor or executors, or attempt implementation.
 
 Your response must use exactly this top-level structure:
@@ -81,7 +134,7 @@ Seat = Literal["planner", "advisor"]
 
 
 class AdvisorError(RuntimeError):
-    """Fail-closed error for any Fable bridge operation."""
+    """Fail-closed error for any bundled Claude bridge operation."""
 
 
 def codex_home() -> Path:
@@ -90,9 +143,30 @@ def codex_home() -> Path:
 
 
 def sanitized_environment() -> dict[str, str]:
-    env = os.environ.copy()
-    for name in SENSITIVE_ENV:
-        env.pop(name, None)
+    common_names = ("PATH", "LANG", "LC_ALL", "LC_CTYPE")
+    if os.name == "nt":
+        canonical_names = (
+            *common_names,
+            "SystemRoot",
+            "ComSpec",
+            "PATHEXT",
+            "TEMP",
+            "TMP",
+            "USERPROFILE",
+        )
+        inherited = {name.casefold(): value for name, value in os.environ.items()}
+        env = {
+            canonical: inherited[canonical.casefold()]
+            for canonical in canonical_names
+            if canonical.casefold() in inherited
+        }
+    else:
+        env = {
+            name: os.environ[name]
+            for name in (*common_names, "HOME", "TMPDIR")
+            if name in os.environ
+        }
+    env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
     return env
 
 
@@ -167,7 +241,9 @@ def _read_routing_state(home: Path | None = None) -> dict[str, Any]:
             raise AdvisorError("The saved routing state has multiple hard links.")
         payload = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
-        raise AdvisorError("Claude Fable 5 is not configured; run setup first.") from exc
+        raise AdvisorError(
+            "A bundled Claude planning model is not configured; run setup first."
+        ) from exc
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise AdvisorError("Could not read valid routing state.") from exc
     try:
@@ -189,20 +265,25 @@ def _read_routing_state(home: Path | None = None) -> dict[str, Any]:
 
 def _validate_seat(seat: str) -> Seat:
     if seat not in {"planner", "advisor"}:
-        raise AdvisorError("Fable seat must be `planner` or `advisor`.")
+        raise AdvisorError("Claude planning seat must be `planner` or `advisor`.")
     return seat  # type: ignore[return-value]
 
 
 def _validate_fable_route(route: Any, *, seat: Seat) -> dict[str, str]:
-    if not isinstance(route, dict) or route.get("kind") != "fable":
-        raise AdvisorError(f"Claude Fable 5 is not the configured {seat}.")
+    if not isinstance(route, dict) or route.get("kind") not in {
+        "fable",
+        "claude_subscription",
+    }:
+        raise AdvisorError(
+            f"A bundled Claude model is not the configured {seat}."
+        )
     return {"model": route["model"], "effort": route["effort"]}
 
 
 def load_fable_route(
     home: Path | None = None, *, seat: str = "advisor"
 ) -> dict[str, str]:
-    """Load and validate one explicitly authorized Fable seat.
+    """Load and validate one explicitly authorized bundled Claude seat.
 
     ``seat`` defaults to Advisor for compatibility with the original bridge.
     It is deliberately constrained and resolved from disk on every invocation.
@@ -230,20 +311,52 @@ def _first_non_empty_line(response: str) -> str:
     return next((line.strip() for line in response.splitlines() if line.strip()), "")
 
 
-def _validate_runtime_models(usage: Any) -> list[str]:
-    raw_models = list(usage) if isinstance(usage, dict) else []
-    if not all(isinstance(model, str) for model in raw_models):
+def _validate_runtime_models(
+    usage: Any, primary_model: str = FABLE_MODEL
+) -> list[str]:
+    allowed_models = ALLOWED_RUNTIME_MODELS_BY_PRIMARY.get(primary_model)
+    if allowed_models is None:
+        raise AdvisorError("The configured Claude primary model is not sealed.")
+    policy_label = "Fable" if primary_model == FABLE_MODEL else "Claude"
+    primary_label = (
+        "Claude Fable 5" if primary_model == FABLE_MODEL else "Claude Opus 5"
+    )
+    if not isinstance(usage, dict):
+        raise AdvisorError("Runtime metadata has a malformed modelUsage mapping.")
+    raw_models = list(usage)
+    if not all(isinstance(model, str) and bool(model.strip()) for model in raw_models):
         raise AdvisorError(
-            "Runtime metadata reported a model outside the allowed Fable runtime policy."
+            f"Runtime metadata reported a model outside the allowed {policy_label} "
+            "runtime policy."
         )
+    for model_usage in usage.values():
+        if not isinstance(model_usage, dict) or not model_usage:
+            raise AdvisorError("Runtime metadata has a malformed modelUsage value.")
+        for field, value in model_usage.items():
+            is_nonnegative_finite_number = (
+                type(value) is int
+                and value >= 0
+                or type(value) is float
+                and math.isfinite(value)
+                and value >= 0
+            )
+            if (
+                not isinstance(field, str)
+                or not field.strip()
+                or not is_nonnegative_finite_number
+            ):
+                raise AdvisorError(
+                    "Runtime metadata has a malformed modelUsage value."
+                )
     used_models = sorted(raw_models)
-    if FABLE_MODEL not in used_models:
+    if primary_model not in used_models:
         raise AdvisorError(
-            "Runtime metadata did not confirm the pinned Claude Fable 5 primary model."
+            f"Runtime metadata did not confirm the pinned {primary_label} primary model."
         )
-    if not set(used_models).issubset(ALLOWED_RUNTIME_MODELS):
+    if not set(used_models).issubset(allowed_models):
         raise AdvisorError(
-            "Runtime metadata reported a model outside the allowed Fable runtime policy."
+            f"Runtime metadata reported a model outside the allowed {policy_label} "
+            "runtime policy."
         )
     return used_models
 
@@ -256,14 +369,17 @@ def _invoke_fable(
     system_prompt: str,
     allowed_signals: set[str],
 ) -> tuple[str, str, dict[str, str], dict[str, str], list[str]]:
-    """Run one stateless, seat-authorized, no-tools Fable operation."""
+    """Run one stateless, seat-authorized, no-tools Claude operation."""
 
     route = load_fable_route(seat=seat)
+    display_name = (
+        "Claude Fable 5" if route["model"] == FABLE_MODEL else "Claude Opus 5"
+    )
     claude = resolve_claude()
     auth = check_claude_auth(claude)
     command = [
         str(claude),
-        "-p",
+        "--print",
         "--model",
         route["model"],
         "--effort",
@@ -293,30 +409,30 @@ def _invoke_fable(
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
-        raise AdvisorError(f"Claude Fable 5 {operation} timed out.") from exc
+        raise AdvisorError(f"{display_name} {operation} timed out.") from exc
     except OSError as exc:
-        raise AdvisorError(f"Could not start Claude Fable 5 {operation}.") from exc
+        raise AdvisorError(f"Could not start {display_name} {operation}.") from exc
     if result.returncode != 0:
         raise AdvisorError(
-            f"Claude Fable 5 {operation} exited with {result.returncode}; output withheld."
+            f"{display_name} {operation} exited with {result.returncode}; output withheld."
         )
     try:
         payload = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
-        raise AdvisorError(f"Claude Fable 5 {operation} returned malformed JSON.") from exc
+        raise AdvisorError(f"{display_name} {operation} returned malformed JSON.") from exc
     if not isinstance(payload, dict) or not isinstance(payload.get("result"), str):
-        raise AdvisorError(f"Claude Fable 5 {operation} returned an unexpected response.")
+        raise AdvisorError(f"{display_name} {operation} returned an unexpected response.")
     # Authorize the complete runtime identity set before interpreting or
     # returning any model-authored plan/review content.
-    used_models = _validate_runtime_models(payload.get("modelUsage"))
+    used_models = _validate_runtime_models(payload.get("modelUsage"), route["model"])
     response = payload["result"].strip()
     signal = _first_non_empty_line(response)
     if signal not in allowed_signals:
         if operation == "plan review":
-            raise AdvisorError("Claude Fable 5 omitted the required plan decision.")
+            raise AdvisorError(f"{display_name} omitted the required plan decision.")
         expected = " or ".join(sorted(allowed_signals))
         raise AdvisorError(
-            f"Claude Fable 5 {operation} omitted the required {expected} signal."
+            f"{display_name} {operation} omitted the required {expected} signal."
         )
     return signal, response, route, auth, used_models
 
@@ -327,7 +443,7 @@ def _base_result(
     return {
         # ``model`` is the route's pinned primary identity; ``used_models``
         # preserves every runtime-reported model, including an allowed helper.
-        "model": FABLE_MODEL,
+        "model": route["model"],
         "effort": route["effort"],
         "auth_method": auth["auth_method"],
         "used_models": used_models,
@@ -360,20 +476,20 @@ def _validate_revision_structure(response: str) -> None:
     ]
     if len(ledger_positions) != 1 or len(plan_positions) != 1:
         raise AdvisorError(
-            "Claude Fable 5 plan revision must contain exactly one FINDINGS_LEDGER "
+            "Claude plan revision must contain exactly one FINDINGS_LEDGER "
             "and one REVISED_PLAN section."
         )
     ledger_index = ledger_positions[0]
     plan_index = plan_positions[0]
     if ledger_index >= plan_index:
         raise AdvisorError(
-            "Claude Fable 5 plan revision sections are in the wrong order."
+            "Claude plan revision sections are in the wrong order."
         )
     ledger = "\n".join(lines[ledger_index + 1 : plan_index]).strip()
     revised_plan = "\n".join(lines[plan_index + 1 :]).strip()
     if not ledger or not revised_plan:
         raise AdvisorError(
-            "Claude Fable 5 plan revision has an empty FINDINGS_LEDGER or REVISED_PLAN section."
+            "Claude plan revision has an empty FINDINGS_LEDGER or REVISED_PLAN section."
         )
 
 
@@ -427,6 +543,8 @@ def review_plan(packet: str) -> dict[str, Any]:
 
 
 def _configured_fable_seats() -> dict[str, dict[str, str]]:
+    """Return configured bundled Claude seats (legacy public name)."""
+
     payload = _read_routing_state()
     routes: dict[str, dict[str, str]] = {}
     for seat in ("planner", "advisor"):
@@ -435,11 +553,13 @@ def _configured_fable_seats() -> dict[str, dict[str, str]]:
             continue
         if not isinstance(value, dict):
             raise AdvisorError(f"The saved {seat} route is invalid.")
-        if value.get("kind") != "fable":
+        if value.get("kind") not in {"fable", "claude_subscription"}:
             continue
         routes[seat] = _validate_fable_route(value, seat=_validate_seat(seat))
     if not routes:
-        raise AdvisorError("Claude Fable 5 is not configured for Planner or Advisor.")
+        raise AdvisorError(
+            "No bundled Claude model is configured for Planner or Advisor."
+        )
     return routes
 
 
@@ -473,8 +593,8 @@ def tool_definitions() -> list[dict[str, Any]]:
     return [
         {
             "name": "create_plan",
-            "title": "Create a plan with Claude Fable 5",
-            "description": "Create one stateless plan draft with the configured Fable Planner.",
+            "title": "Create a plan with the configured Claude model",
+            "description": "Create one stateless plan draft with the configured Claude Planner.",
             "inputSchema": {
                 "type": "object",
                 "properties": {"packet": {**string_property, "description": "Complete planning packet."}},
@@ -485,7 +605,7 @@ def tool_definitions() -> list[dict[str, Any]]:
         },
         {
             "name": "revise_plan",
-            "title": "Revise a plan with Claude Fable 5",
+            "title": "Revise a plan with the configured Claude model",
             "description": "Create one stateless revision with a findings ledger and complete revised plan.",
             "inputSchema": {
                 "type": "object",
@@ -502,8 +622,8 @@ def tool_definitions() -> list[dict[str, Any]]:
         },
         {
             "name": "review_plan",
-            "title": "Review a plan with Claude Fable 5",
-            "description": "Review one self-contained packet with the configured Fable Advisor.",
+            "title": "Review a plan with the configured Claude model",
+            "description": "Review one self-contained packet with the configured Claude Advisor.",
             "inputSchema": {
                 "type": "object",
                 "properties": {"packet": {**string_property, "description": "Complete context, plan, risks, slices, and checks."}},
@@ -514,8 +634,8 @@ def tool_definitions() -> list[dict[str, Any]]:
         },
         {
             "name": "status",
-            "title": "Check Claude Fable 5 Planner and Advisor status",
-            "description": "Check configured Fable seats and first-party login without a model call.",
+            "title": "Check bundled Claude Planner and Advisor status",
+            "description": "Check configured Claude seats and first-party login without a model call.",
             "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
             "annotations": annotations,
         },
@@ -547,7 +667,12 @@ def handle_request(request: dict[str, Any]) -> dict[str, Any] | None:
         result = {
             "protocolVersion": "2025-06-18",
             "capabilities": {"tools": {"listChanged": False}},
-            "serverInfo": {"name": "codex-orchestration-fable-advisor", "version": "2.0.0"},
+            # Preserve the historical launcher identity for loaded-plugin
+            # compatibility; the tool metadata describes either sealed model.
+            "serverInfo": {
+                "name": "codex-orchestration-fable-advisor",
+                "version": "2.0.0",
+            },
         }
     elif method == "ping":
         result = {}
