@@ -343,6 +343,46 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertIn('"%~dp0fake-tool.py"', wrapper)
         self.assertIn("%*", wrapper)
 
+    def test_app_server_close_requests_eof_before_forced_termination(self) -> None:
+        server = object.__new__(NATIVE.AppServer)
+        process = mock.Mock()
+        process.poll.return_value = None
+        process.stdin.closed = False
+        process.wait.return_value = 0
+        server._process = process
+        server._stderr = mock.Mock()
+
+        server.close()
+
+        process.stdin.close.assert_called_once_with()
+        process.wait.assert_called_once_with(timeout=3)
+        process.terminate.assert_not_called()
+        process.kill.assert_not_called()
+        server._stderr.close.assert_called_once_with()
+
+    def test_app_server_close_still_forces_a_process_that_ignores_eof(self) -> None:
+        server = object.__new__(NATIVE.AppServer)
+        process = mock.Mock()
+        process.poll.return_value = None
+        process.stdin.closed = False
+        process.wait.side_effect = [
+            subprocess.TimeoutExpired(["codex", "app-server"], 3),
+            0,
+        ]
+        server._process = process
+        server._stderr = mock.Mock()
+
+        server.close()
+
+        process.stdin.close.assert_called_once_with()
+        self.assertEqual(
+            process.wait.call_args_list,
+            [mock.call(timeout=3), mock.call(timeout=3)],
+        )
+        process.terminate.assert_called_once_with()
+        process.kill.assert_not_called()
+        server._stderr.close.assert_called_once_with()
+
     def run_script(
         self,
         *arguments: str,

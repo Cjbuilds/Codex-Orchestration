@@ -560,13 +560,23 @@ class AppServer:
 
     def close(self) -> None:
         process = getattr(self, "_process", None)
-        if process is not None and process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=3)
+        if process is not None:
+            stdin = process.stdin
+            if stdin is not None and not stdin.closed:
+                try:
+                    stdin.close()
+                except OSError:
+                    pass
+            if process.poll() is None:
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=3)
         stderr = getattr(self, "_stderr", None)
         if stderr is not None:
             stderr.close()
