@@ -190,13 +190,20 @@ the explicitly billable isolated Gate 0. New providers or subscription CLIs stil
 require a reviewed bundled manifest and adapter; arbitrary URLs and arbitrary local
 CLIs are not auto-trusted.
 
-Fable 5 and Opus 5 are sealed subscription exceptions and can be used directly
-as Planner or Advisor through first-party Claude login. Only one bundled Claude
-subscription seat may be configured at a time. See the
+Fable 5 and Opus 5 are sealed subscription exceptions available only as Planner
+or Advisor through first-party Claude login. Only one bundled Claude subscription
+seat may be configured at a time; neither model is a Designer, Executor, general
+custom role, or Desktop picker entry. See the
 [External Models reference](plugins/codex-orchestration/skills/codex-orchestration/references/external-models.md)
 for commands, lifecycle states, extension rules, and threat boundaries.
 Fable 5 is the bundled cross-provider exception retained for compatibility;
 Opus 5 is the second sealed bundled exception added in version 0.9.0.
+
+The bundled Claude bridge starts each authentication and model subprocess with
+only a minimal platform environment. It preserves canonical `HOME` on POSIX or
+`USERPROFILE` on Windows so the official CLI can find the user's first-party login,
+but it does not inherit credential, config-redirection, provider/model/effort,
+endpoint/gateway, proxy/CA/mTLS, or telemetry override families.
 
 Models already available through Codex can still become ordinary user-owned roles:
 
@@ -245,9 +252,9 @@ setup. This prevents silent subscription route replacement.
 `repair` is narrower than setup or disable. When status reports that plugin-managed
 mode/usage hints conflict with otherwise intact saved state, it can restore only
 those saved hint bytes after a dry run. It refuses missing state, unmarked text,
-namespace or spawn-metadata drift, Fable launcher drift, concurrent edits, and
-higher-layer overrides. It does not rewrite restore history or touch authentication,
-credentials, chats, or sessions.
+namespace or spawn-metadata drift, bundled Claude launcher drift, concurrent edits,
+and higher-layer overrides. It does not rewrite restore history or touch
+authentication, credentials, chats, or sessions.
 
 ## Important limits
 
@@ -280,10 +287,10 @@ the plugin or touch routing, credentials, chats, sessions, or the model picker.
 Restart Codex Desktop and start a new task after an update; the task that launched
 the updater keeps its already loaded instructions.
 
-If a Fable call fails in the task that performed an update but fresh status reports
-`first-party login ready`, the login is healthy and the already loaded MCP bridge is
-stale. Fully quit and reopen Codex, then start a new task; do not re-authenticate
-solely for that stale-bridge condition.
+If a bundled Claude call fails in the task that performed an update but fresh
+status reports `first-party login ready`, the login is healthy and the already
+loaded MCP bridge is stale. Fully quit and reopen Codex, then start a new task; do
+not re-authenticate solely for that stale-bridge condition.
 
 To move from version 0.6.x or older to 0.7.0, run the native Codex commands once:
 

@@ -9,6 +9,12 @@
   for Opus. Existing compatibility launcher IDs remain disabled until selected.
 - Require a full managed-policy disable before replacing or moving an Opus
   subscription seat, so setup never silently changes an existing Claude route.
+- Harden both bundled Claude subprocesses to a minimal platform environment,
+  retain only canonical home discovery for first-party login, and exclude
+  credential, routing, endpoint, transport, and telemetry override families.
+- Add protected macOS/Windows portability coverage for native routing, saved
+  routing state, and the shared Fable/Opus bridge, plus mandatory live Opus
+  Planner and Advisor release qualification.
 
 ## 0.8.0 — Unreleased
 

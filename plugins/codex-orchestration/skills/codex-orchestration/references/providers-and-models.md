@@ -230,14 +230,27 @@ Direct v2 `model` overrides retain the parent's provider. They are the simplest 
 
 Claude Fable 5 and Claude Opus 5 are explicit built-in exceptions for Planner or Advisor. The plugin does not pretend either is a Codex model or translate Anthropic into the Responses protocol. Instead, a disabled-by-default local MCP server invokes the official `claude` CLI with the user's first-party Pro or Max login. Setup enables one Python 3.11+ launcher variant, and disable restores every prior plugin override value. The historical `fable-advisor-*` IDs are compatibility names shared by both sealed models. Codex's TOML editor can retain an inert empty table header after its final key is deleted; the configurator does not risk a broad TOML rewrite for cosmetic cleanup.
 
-The bridge removes `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and Bedrock/Vertex/Foundry selection variables from the child environment. It re-checks `claude auth status`, pins the saved primary and effort, disables tools and session persistence, disables prompt suggestions, and requires JSON runtime metadata to contain that primary. Claude Code currently reports the internal helper `claude-haiku-4-5-20251001` during valid Fable calls; the bridge permits only that exact helper ID. No Opus helper identity is independently established, so the Opus runtime allowlist currently contains only `claude-opus-5`. Any missing primary or unknown additional model fails closed. Helper rotation therefore requires a reviewed plugin update rather than a wildcard. Setup and status never make a model call, and mocked local tests do not constitute a positive live Opus invocation.
+The bridge starts both `claude auth status` and model calls with only a minimal
+platform environment. It preserves canonical `HOME` on POSIX or `USERPROFILE` on
+Windows so the official CLI can discover the first-party login, but it does not
+inherit credential, config-redirection, provider/model/effort, endpoint/gateway,
+proxy/CA/mTLS, or telemetry override families. It pins the saved primary and effort,
+disables tools and session persistence, disables prompt suggestions, and requires
+JSON runtime metadata to contain that primary. Claude Code currently reports the
+internal helper `claude-haiku-4-5-20251001` during valid Fable calls; the bridge
+permits only that exact helper ID. No Opus helper identity is independently
+established, so the Opus runtime allowlist currently contains only `claude-opus-5`.
+Any missing primary or unknown additional model fails closed. Helper rotation
+therefore requires a reviewed plugin update rather than a wildcard. Setup and status
+never make a model call, and mocked local tests do not constitute a positive live
+Opus invocation.
 
 An MCP process is loaded for the lifetime of its Codex task. Updating the plugin or
 repairing policy state cannot replace that already loaded process. If a current-task
-Fable call fails after either operation while a fresh native status check still
-reports a ready first-party login, the loaded bridge is stale; fully quit and reopen
-Codex and start a new task. Do not re-authenticate unless the fresh status check
-itself reports authentication unavailable.
+bundled Claude call fails after either operation while a fresh native status check
+still reports a ready first-party login, the loaded bridge is stale; fully quit and
+reopen Codex and start a new task. Do not re-authenticate unless the fresh status
+check itself reports authentication unavailable.
 
 The saved policy authorizes the root to call these planning tools and prohibits children from doing so. Current MCP requests provide no caller identity to the server, so that specific caller boundary is instruction-enforced, not server-authenticated. The bridge mechanically uses the same full saved-state validator as native status/repair/disable, restricts the operation surface, and runs the selected Claude model without tools or persistence.
 

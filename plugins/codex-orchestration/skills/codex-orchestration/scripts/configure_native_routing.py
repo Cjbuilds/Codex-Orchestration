@@ -277,6 +277,11 @@ def _validate_args(args: argparse.Namespace) -> None:
     ):
         if value is not None and not pattern.fullmatch(value):
             raise ConfigurationError(f"Invalid {label}: {value!r}.")
+        if "model" in label and value in {FABLE_MODEL, OPUS_MODEL}:
+            raise ConfigurationError(
+                f"{label.title()} {value!r} is a reserved Claude model ID; "
+                "select its bundled sealed route instead."
+            )
     for label, value in (
         ("executor effort", args.executor_effort),
         ("planner effort", args.planner_effort),
@@ -898,10 +903,23 @@ def select_fable_server() -> str:
 
 
 def _parse_claude_version(output: str) -> tuple[int, int, int]:
-    match = re.search(r"(?<!\d)(\d+)\.(\d+)\.(\d+)(?!\d)", output)
+    match = re.fullmatch(
+        (
+            r"[ \t\r\n]*"
+            r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+            r" \(Claude Code\)"
+            r"[ \t\r\n]*"
+        ),
+        output,
+    )
     if match is None:
         raise ConfigurationError("Claude Code returned an unparseable version.")
-    return tuple(map(int, match.groups()))
+    try:
+        return tuple(map(int, match.groups()))
+    except ValueError as exc:
+        raise ConfigurationError(
+            "Claude Code returned an unparseable version."
+        ) from exc
 
 
 def verify_claude_prerequisites(model: str, effort: str) -> dict[str, str]:
@@ -979,7 +997,13 @@ def verify_claude_prerequisites(model: str, effort: str) -> dict[str, str]:
         "--output-format",
         "--system-prompt",
     )
-    missing = [flag for flag in required if flag not in help_result.stdout]
+    advertised_options = set(
+        re.findall(
+            r"(?<![A-Za-z0-9_-])--[A-Za-z0-9][A-Za-z0-9-]*(?![A-Za-z0-9_-])",
+            help_result.stdout,
+        )
+    )
+    missing = [flag for flag in required if flag not in advertised_options]
     if help_result.returncode != 0 or missing:
         detail = ", ".join(missing) if missing else f"exit {help_result.returncode}"
         raise ConfigurationError(

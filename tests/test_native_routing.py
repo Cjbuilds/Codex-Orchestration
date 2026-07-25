@@ -256,53 +256,92 @@ for line in sys.stdin:
 '''
 
 
+def _write_test_cli(
+    directory: Path,
+    name: str,
+    source: str,
+    *,
+    windows: bool | None = None,
+) -> tuple[Path, Path]:
+    is_windows = os.name == "nt" if windows is None else windows
+    source_path = directory / (f"{name}.py" if is_windows else name)
+    source_path.write_text(textwrap.dedent(source), encoding="utf-8")
+    source_path.chmod(0o755)
+    if not is_windows:
+        return source_path, source_path
+
+    launcher = directory / f"{name}.cmd"
+    launcher.write_text(
+        (
+            "@echo off\r\n"
+            f'"{sys.executable}" "%~dp0{source_path.name}" %*\r\n'
+        ),
+        encoding="utf-8",
+        newline="",
+    )
+    return source_path, launcher
+
+
 class NativeRoutingTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.home = self.root / "home"
         self.home.mkdir()
-        self.codex = self.root / "fake-codex"
-        self.codex.write_text(textwrap.dedent(FAKE_CODEX), encoding="utf-8")
-        self.codex.chmod(0o755)
+        _, self.codex = _write_test_cli(self.root, "fake-codex", FAKE_CODEX)
         self.bin = self.root / "bin"
         self.bin.mkdir()
-        self.claude = self.bin / "claude"
-        self.claude.write_text(
-            textwrap.dedent(
-                """\
-                #!/usr/bin/env python3
-                import json
-                import sys
-                if sys.argv[1:] == ["auth", "status"]:
-                    print(json.dumps({
-                        "loggedIn": True,
-                        "authMethod": "claude.ai",
-                        "apiProvider": "firstParty",
-                        "subscriptionType": "max",
-                    }))
-                    raise SystemExit(0)
-                if sys.argv[1:] == ["--help"]:
-                    print(
-                        "--print --model --effort <level> Effort level "
-                        "(low, medium, high, xhigh, max) "
-                        "--safe-mode --tools --permission-mode "
-                        "--no-session-persistence --prompt-suggestions "
-                        "--output-format --system-prompt"
-                    )
-                    raise SystemExit(0)
-                if sys.argv[1:] == ["--version"]:
-                    print("2.1.219 (Claude Code)")
-                    raise SystemExit(0)
-                raise SystemExit(2)
-                """
-            ),
-            encoding="utf-8",
+        self.claude, _ = _write_test_cli(
+            self.bin,
+            "claude",
+            """\
+            #!/usr/bin/env python3
+            import json
+            import sys
+            if sys.argv[1:] == ["auth", "status"]:
+                print(json.dumps({
+                    "loggedIn": True,
+                    "authMethod": "claude.ai",
+                    "apiProvider": "firstParty",
+                    "subscriptionType": "max",
+                }))
+                raise SystemExit(0)
+            if sys.argv[1:] == ["--help"]:
+                print(
+                    "--print --model --effort <level> Effort level "
+                    "(low, medium, high, xhigh, max) "
+                    "--safe-mode --tools --permission-mode "
+                    "--no-session-persistence --prompt-suggestions "
+                    "--output-format --system-prompt"
+                )
+                raise SystemExit(0)
+            if sys.argv[1:] == ["--version"]:
+                print("2.1.219 (Claude Code)")
+                raise SystemExit(0)
+            raise SystemExit(2)
+            """,
         )
-        self.claude.chmod(0o755)
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+
+    def test_fake_cli_fixture_builds_windows_native_launchers(self) -> None:
+        fixture_root = self.root / "windows-fixture"
+        fixture_root.mkdir()
+        source, launcher = _write_test_cli(
+            fixture_root,
+            "fake-tool",
+            "# fake Python CLI\n",
+            windows=True,
+        )
+
+        self.assertEqual(source.name, "fake-tool.py")
+        self.assertEqual(launcher.name, "fake-tool.cmd")
+        self.assertEqual(source.read_text(encoding="utf-8"), "# fake Python CLI\n")
+        wrapper = launcher.read_text(encoding="utf-8")
+        self.assertIn(f'"{sys.executable}"', wrapper)
+        self.assertIn('"%~dp0fake-tool.py"', wrapper)
+        self.assertIn("%*", wrapper)
 
     def run_script(
         self,
@@ -313,6 +352,8 @@ class NativeRoutingTests(unittest.TestCase):
         compatibility = ["--allow-incompatible-client"] if allow_incompatible else []
         env = os.environ.copy()
         env["PATH"] = f"{self.bin}{os.pathsep}{env.get('PATH', '')}"
+        if os.name == "nt":
+            env.setdefault("PATHEXT", ".COM;.EXE;.BAT;.CMD")
         result = subprocess.run(
             [
                 sys.executable,
@@ -511,6 +552,47 @@ class NativeRoutingTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 2)
                 self.assertIn("does not accept seat settings", result.stderr)
+
+    def test_reserved_claude_model_ids_require_their_sealed_cli_routes(self) -> None:
+        missing_codex = self.root / "must-not-start-app-server"
+        for option in (
+            "--executor-model",
+            "--planner-model",
+            "--advisor-model",
+            "--designer-model",
+        ):
+            for model in (NATIVE.FABLE_MODEL, NATIVE.OPUS_MODEL):
+                arguments = [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--codex-bin",
+                    str(missing_codex),
+                ]
+                if option != "--executor-model":
+                    arguments.extend(("--executor-model", "gpt-5.6-luna"))
+                arguments.extend((option, model))
+                with self.subTest(option=option, model=model):
+                    rejected = subprocess.run(
+                        arguments,
+                        text=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        timeout=20,
+                        check=False,
+                    )
+                    self.assertEqual(rejected.returncode, 2)
+                    self.assertIn("reserved Claude model", rejected.stderr)
+                    self.assertNotIn("Codex binary does not exist", rejected.stderr)
+                    self.assertFalse(
+                        (self.home / ".fake-user-config.json").exists()
+                    )
+                    self.assertFalse(
+                        (self.home / NATIVE.STATE_FILENAME).exists()
+                    )
+
+        self.write_personal_agent("claude_opus_5")
+        agent = self.run_script("--executor-agent", "claude_opus_5")
+        self.assertIn("Dry run only", agent.stdout)
 
     def test_capability_probe_checks_the_complete_routing_surface(self) -> None:
         completed = subprocess.CompletedProcess([], 0, stdout="supported")
@@ -1342,9 +1424,7 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertEqual(feature["tool_namespace"], "agents")
 
     def test_incompatible_client_blocks_setup_but_never_disable(self) -> None:
-        old_codex = self.root / "old-codex"
-        old_codex.write_text(textwrap.dedent(FAKE_CODEX), encoding="utf-8")
-        old_codex.chmod(0o755)
+        _, old_codex = _write_test_cli(self.root, "old-codex", FAKE_CODEX)
         refused = self.run_script(
             "--executor-model",
             "gpt-5.6-luna",
@@ -1388,9 +1468,7 @@ class NativeRoutingTests(unittest.TestCase):
             "high",
             "--apply",
         )
-        old_codex = self.root / "old-status-codex"
-        old_codex.write_text(textwrap.dedent(FAKE_CODEX), encoding="utf-8")
-        old_codex.chmod(0o755)
+        _, old_codex = _write_test_cli(self.root, "old-status-codex", FAKE_CODEX)
         incompatible = self.run_script(
             "--status",
             "--require-effective",
@@ -2159,6 +2237,63 @@ class NativeRoutingTests(unittest.TestCase):
         )
         self.assertIn("Planner: Claude Fable 5 high", fable.stdout)
 
+    def test_generic_opus_transitions_are_rejected_without_writes(self) -> None:
+        state_path = self.home / NATIVE.STATE_FILENAME
+        version_path = self.home / ".fake-version"
+
+        self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--advisor-fable",
+            "--apply",
+        )
+        before_config = self.read_fake_config()
+        before_state = state_path.read_text(encoding="utf-8")
+        before_version = version_path.read_text(encoding="utf-8")
+        fable_to_generic = self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--advisor-model",
+            NATIVE.OPUS_MODEL,
+            "--advisor-effort",
+            "high",
+            "--confirm-unlisted-models",
+            "--apply",
+            check=False,
+        )
+        self.assertEqual(fable_to_generic.returncode, 2)
+        self.assertIn("reserved Claude model", fable_to_generic.stderr)
+        self.assertEqual(self.read_fake_config(), before_config)
+        self.assertEqual(state_path.read_text(encoding="utf-8"), before_state)
+        self.assertEqual(version_path.read_text(encoding="utf-8"), before_version)
+
+        self.run_script("--disable", "--apply")
+        self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--advisor-model",
+            "gpt-5.6-terra",
+            "--apply",
+        )
+        forged = json.loads(state_path.read_text(encoding="utf-8"))
+        forged["advisor"]["model"] = NATIVE.OPUS_MODEL
+        state_path.write_text(json.dumps(forged), encoding="utf-8")
+        before_config = self.read_fake_config()
+        before_state = state_path.read_text(encoding="utf-8")
+        before_version = version_path.read_text(encoding="utf-8")
+        generic_to_fable = self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--advisor-fable",
+            "--apply",
+            check=False,
+        )
+        self.assertEqual(generic_to_fable.returncode, 2)
+        self.assertIn("Saved routing state is invalid", generic_to_fable.stderr)
+        self.assertEqual(self.read_fake_config(), before_config)
+        self.assertEqual(state_path.read_text(encoding="utf-8"), before_state)
+        self.assertEqual(version_path.read_text(encoding="utf-8"), before_version)
+
     def test_opus_version_and_effort_prerequisites_fail_closed(self) -> None:
         original = self.claude.read_text(encoding="utf-8")
         self.claude.write_text(
@@ -2174,6 +2309,76 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertEqual(too_old.returncode, 2)
         self.assertIn("requires Claude Code 2.1.219 or newer", too_old.stderr)
         self.assertFalse((self.home / NATIVE.STATE_FILENAME).exists())
+
+    def test_opus_version_output_must_be_one_canonical_version_line(self) -> None:
+        original = self.claude.read_text(encoding="utf-8")
+
+        for output in (
+            "2.1.219 (Claude Code)",
+            " \t2.1.219 (Claude Code)\r\n",
+            "2.1.220 (Claude Code)",
+            "2.2.0 (Claude Code)",
+            "3.0.0 (Claude Code)",
+        ):
+            with self.subTest(accepted=output):
+                self.claude.write_text(
+                    original.replace(
+                        'print("2.1.219 (Claude Code)")',
+                        f"print({output!r})",
+                    ),
+                    encoding="utf-8",
+                )
+                accepted = self.run_script(
+                    "--executor-model",
+                    "gpt-5.6-luna",
+                    "--advisor-opus",
+                )
+                self.assertIn("Dry run only", accepted.stdout)
+
+        for output in (
+            "wrapper 9.9.9\n2.1.219 (Claude Code)",
+            "2.1.219 (Claude Code)\n2.1.220 (Claude Code)",
+            "Claude Code 2.1.219",
+            "prefix2.1.219 (Claude Code)",
+            "2.1.219 (Claude Code)suffix",
+            "02.1.219 (Claude Code)",
+            f"{'9' * 5000}.1.1 (Claude Code)",
+        ):
+            with self.subTest(rejected=output):
+                self.claude.write_text(
+                    original.replace(
+                        'print("2.1.219 (Claude Code)")',
+                        f"print({output!r})",
+                    ),
+                    encoding="utf-8",
+                )
+                rejected = self.run_script(
+                    "--executor-model",
+                    "gpt-5.6-luna",
+                    "--advisor-opus",
+                    check=False,
+                )
+                self.assertEqual(rejected.returncode, 2)
+                self.assertIn("unparseable version", rejected.stderr)
+                self.assertFalse(
+                    (self.home / NATIVE.STATE_FILENAME).exists()
+                )
+
+        self.claude.write_text(
+            original.replace(
+                'print("2.1.219 (Claude Code)")',
+                "print('2.1.218 (Claude Code)')",
+            ),
+            encoding="utf-8",
+        )
+        too_old = self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--advisor-opus",
+            check=False,
+        )
+        self.assertEqual(too_old.returncode, 2)
+        self.assertIn("requires Claude Code 2.1.219 or newer", too_old.stderr)
 
     def test_bundled_claude_prerequisite_checks_every_runtime_control(self) -> None:
         original = self.claude.read_text(encoding="utf-8")
@@ -2282,6 +2487,56 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertEqual(malformed.returncode, 2)
         self.assertIn("unparseable version", malformed.stderr)
         self.assertFalse((self.home / NATIVE.STATE_FILENAME).exists())
+
+    def test_bundled_claude_requires_exact_long_option_tokens(self) -> None:
+        original = self.claude.read_text(encoding="utf-8")
+        required = (
+            "--print",
+            "--model",
+            "--effort",
+            "--safe-mode",
+            "--tools",
+            "--permission-mode",
+            "--no-session-persistence",
+            "--prompt-suggestions",
+            "--output-format",
+            "--system-prompt",
+        )
+        for flag in required:
+            for fake in (
+                f"{flag}-FAKE",
+                f"--FAKE{flag}",
+            ):
+                with self.subTest(flag=flag, fake=fake):
+                    self.claude.write_text(
+                        original.replace(flag, fake),
+                        encoding="utf-8",
+                    )
+                    rejected = self.run_script(
+                        "--executor-model",
+                        "gpt-5.6-luna",
+                        "--advisor-opus",
+                        check=False,
+                    )
+                    self.assertEqual(rejected.returncode, 2)
+                    self.assertIn(flag, rejected.stderr)
+                    self.assertFalse(
+                        (self.home / NATIVE.STATE_FILENAME).exists()
+                    )
+
+        duplicate_crlf = original.replace(
+            "--print --model",
+            r"--print\r\n--model",
+        )
+        for flag in required:
+            duplicate_crlf = duplicate_crlf.replace(flag, f"{flag} {flag}")
+        self.claude.write_text(duplicate_crlf, encoding="utf-8")
+        accepted = self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--advisor-opus",
+        )
+        self.assertIn("Dry run only", accepted.stdout)
 
     def test_opus_effort_set_matches_documented_contract(self) -> None:
         self.assertEqual(

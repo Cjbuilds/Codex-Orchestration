@@ -5,6 +5,9 @@ from pathlib import Path
 import re
 import subprocess
 import unittest
+from unittest import mock
+
+from scripts import preflight
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -133,6 +136,53 @@ class PackagingTests(unittest.TestCase):
             self.assertIn(f'"{module}"', preflight)
         self.assertIn("name: analyze (python)", codeql)
         self.assertEqual(codeql.count("github/codeql-action/analyze@"), 1)
+
+    def test_portability_runs_routing_and_subscription_bridge_regressions(self) -> None:
+        calls: list[tuple[str, tuple[str, ...], int]] = []
+
+        def record_unittest(
+            root: Path,
+            name: str,
+            modules: list[str] | None = None,
+            *,
+            timeout: int = 600,
+            env: dict[str, str] | None = None,
+        ) -> preflight.CheckResult:
+            del root, env
+            calls.append((name, tuple(modules or ()), timeout))
+            return preflight.CheckResult(name, "PASS")
+
+        with (
+            mock.patch.object(
+                preflight,
+                "compile_check",
+                return_value=preflight.CheckResult("compile", "PASS"),
+            ),
+            mock.patch.object(
+                preflight, "unittest_check", side_effect=record_unittest
+            ),
+        ):
+            results = preflight.ci_checks(
+                "portability",
+                REPO_ROOT,
+                base_sha=None,
+                head_sha=None,
+            )
+
+        expected = {
+            "portability-native-routing": ("tests.test_native_routing",),
+            "portability-routing-state": ("tests.test_routing_state",),
+            "portability-fable-advisor-mcp": ("tests.test_fable_advisor_mcp",),
+        }
+        observed = {name: modules for name, modules, _ in calls}
+        self.assertEqual(
+            {name: observed.get(name) for name in expected},
+            expected,
+        )
+        for name, _, timeout in calls:
+            if name in expected:
+                self.assertEqual(timeout, 300, name)
+        self.assertTrue(all(result.status == "PASS" for result in results))
 
     def test_workflow_actions_permissions_and_cli_versions_remain_pinned(self) -> None:
         ci = (REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")

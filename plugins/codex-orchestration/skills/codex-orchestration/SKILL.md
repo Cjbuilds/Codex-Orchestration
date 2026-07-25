@@ -128,14 +128,14 @@ If an old prompt contains `orchestrator:`, explain that the current task model a
 
 Normalize `Extra High` to `xhigh`. For Claude Fable 5, accept `Low`, `Medium`, `High`, `XHigh`, `Max`, or `Ultra`. Omission or `Auto` means `High`; `Ultra` is a user-facing alias for Claude Code's actual `max` setting and must be reported as that mapping. Route Fable with `--planner-fable --planner-effort <normalized-effort>` or `--advisor-fable --advisor-effort <normalized-effort>`, not through the Codex model catalog. For Claude Opus 5, accept exactly `Low`, `Medium`, `High`, `XHigh`, or `Max`; omission or `Auto` means `High`, and `Ultra` is not an alias. Route it with `--planner-opus` or `--advisor-opus` plus the normalized effort. Resolve every other display name to an exact ID only through the executing host's model catalog, picker, a loaded custom agent, or official provider documentation. Never invent an ID. For persistent direct routing, resolve `auto` to the catalog's concrete default.
 
-Persistent Designer accepts only a direct same-provider model, not a Fable MCP
-or unqualified custom-agent route. Route it with `--designer-model` plus
+Persistent Designer accepts only a direct same-provider model, not a bundled Claude
+MCP or unqualified custom-agent route. Route it with `--designer-model` plus
 `--designer-effort`. A Designer route may share a model with another seat; only
 Planner and Advisor require independent routes. For a cross-provider Designer,
 create and invoke a task-local External Model role named `designer`; `resolve` must
 reject matching project agents in the current workspace or any ancestor immediately
-before returning its route. Codex does not yet expose a scope-qualified agent identity,
-so persisting an agent name would let a later project's agent shadow it.
+before returning its route. Codex does not yet expose a scope-qualified agent
+identity, so persisting an agent name would let a later project's agent shadow it.
 
 Read [providers-and-models.md](references/providers-and-models.md) before setup, when clients disagree, when a model is absent, when providers differ, or when custom agents or legacy migration are involved.
 
@@ -367,9 +367,10 @@ Add `--planner-model` and `--planner-effort` for a same-provider Planner. For Cl
 
 Add `--designer-model` and `--designer-effort` for a persistent same-provider
 Designer. Designer omission persists `designer: none`. Designer cannot use the
-Fable MCP route or a persistent custom-agent name. Use a task-local External Model
-role named `designer` for cross-provider design work so the root can validate its
-personal file and reject project shadowing immediately before the bounded call.
+bundled Claude MCP route or a persistent custom-agent name. Use a task-local
+External Model role named `designer` for cross-provider design work so the root can
+validate its personal file and reject project shadowing immediately before the
+bounded call.
 
 The configurator capability-tests the complete four-field preset on the active target, `codex` on PATH when different, the known macOS Desktop binary when present, and every explicit `--compat-bin`. A successful isolated config probe means that client can parse the preset; it is not a live child-model confirmation. Report `route accepted` or `used and confirmed` only from the exact live spawn evidence defined below. Ask about other Codex/IDE installations that share this config only when the environment suggests they exist, and pass their binaries explicitly. If the request or active host indicates a named `--profile`, explain that normal setup manages the default user layer and is not verified for that profile; do not add a routine question for users with no profile signal. If a checked client rejects any managed field, stop before apply. Recommend updating it or using the task-local fallback. `--allow-incompatible-client` requires a separate explicit user decision because it can make the shared config unreadable to that client.
 
@@ -402,7 +403,7 @@ python3 <skill-dir>/scripts/configure_native_routing.py \
   --status --require-effective
 ```
 
-Run status from the target project. The first form is descriptive. Use `--require-effective` for automation and release gates; it returns nonzero for incompatible clients, conflicts, overrides, incomplete controls, an unavailable Fable or custom-agent route, or orphaned v0.4+ personal roles. Report the current task model as the orchestrator, Planner (`root` when omitted), configured Advisor, Designer, and Executor, whether the personal policy is installed and effective in that workspace, whether effective spawn controls are visible, whether the effective tool namespace is `agents`, the target config path, and checked-client compatibility. State that neither status form proves a live route or infers v2 activation for the model selected in a task; current Sol or Terra is the intended root.
+Run status from the target project. The first form is descriptive. Use `--require-effective` for automation and release gates; it returns nonzero for incompatible clients, conflicts, overrides, incomplete controls, an unavailable bundled Claude or custom-agent route, or orphaned v0.4+ personal roles. Report the current task model as the orchestrator, Planner (`root` when omitted), configured Advisor, Designer, and Executor, whether the personal policy is installed and effective in that workspace, whether effective spawn controls are visible, whether the effective tool namespace is `agents`, the target config path, and checked-client compatibility. State that neither status form proves a live route or infers v2 activation for the model selected in a task; current Sol or Terra is the intended root.
 
 When status reports `managed fields conflict with local restore state`, do not run
 setup or disable over the conflict and do not assume authentication failed. A literal
@@ -421,8 +422,9 @@ python3 <skill-dir>/scripts/configure_native_routing.py \
 ```
 
 Repair must require valid saved state and both live hints to retain the plugin
-ownership marker. It must refuse namespace, spawn-metadata, Fable launcher,
-scalar-shape, missing/unmarked hint, or other managed drift. It writes only the
+ownership marker. It must refuse namespace, spawn-metadata, drift in the historical
+Fable launcher IDs shared by both bundled Claude models, scalar-shape,
+missing/unmarked hint, or other managed drift. It writes only the
 different mode/usage fields through App Server compare-and-swap, leaves the original
 restore snapshot and seat records byte-for-byte unchanged, checks user and effective
 readback, rolls the two fields back when a higher layer overrides them, and preserves
@@ -467,7 +469,7 @@ Prerequisites:
 - `claude auth status` reports a first-party Pro or Max login;
 - a Python 3.11+ launcher is available.
 
-The plugin packages three disabled MCP launcher variants for macOS, Linux, and Windows. Setup enables exactly one compatible variant through the plugin's namespaced config when either bundled Claude model is selected. At planning or review time the MCP server removes API credentials plus endpoint, header, provider, model, and effort overrides, re-checks first-party login, and invokes `claude --print --model <sealed-model-id>` with `--safe-mode`, no tools, no session persistence, prompt suggestions disabled, and JSON output. Each saved seat pins its model and effort; the root cannot replace them through tool arguments.
+The plugin packages three disabled MCP launcher variants for macOS, Linux, and Windows. Setup enables exactly one compatible variant through the plugin's namespaced config when either bundled Claude model is selected. At planning or review time the MCP server gives authentication and model subprocesses only a minimal platform environment. It preserves canonical `HOME` on POSIX or `USERPROFILE` on Windows for first-party login discovery, but does not inherit credential, config-redirection, provider/model/effort, endpoint/gateway, proxy/CA/mTLS, or telemetry override families. It invokes `claude --print --model <sealed-model-id>` with `--safe-mode`, no tools, no session persistence, prompt suggestions disabled, and JSON output. Each saved seat pins its model and effort; the root cannot replace them through tool arguments.
 
 Fable effort is configurable per setup. The default is `high`; supported Claude Code values are `low`, `medium`, `high`, `xhigh`, and `max`. Accept `ultra` as an alias for `max`, save the effective Claude Code value, and disclose the alias mapping in setup output. Existing saved `max` routes remain valid.
 
@@ -482,9 +484,10 @@ The legacy Fable contract requires runtime `modelUsage` to contain the pinned `c
 primary; Opus applies the same primary-presence rule to `claude-opus-5`.
 
 Plugin and policy updates cannot replace the MCP process already loaded into the
-current task. If a Fable call fails after an update or repair, run fresh native
-status. When status reports Claude Fable 5 `ready — first-party login`, classify the
-current tool failure as a stale loaded bridge, not an authentication failure. Do not
+current task. If a bundled Claude call fails after an update or repair, run fresh
+native status. When status reports that configured bundled Claude seat
+`ready — first-party login`, classify the current tool failure as a stale loaded
+bridge, not an authentication failure. Do not
 request re-authentication. Fully quit and reopen Codex, then start a new task so the
 installed bridge, policy, and saved state load together. Ask for login only when the
 fresh status check itself reports authentication unavailable.

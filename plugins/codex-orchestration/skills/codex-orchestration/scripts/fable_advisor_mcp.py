@@ -11,6 +11,7 @@ no-tools/no-persistence process.
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 import stat
@@ -142,9 +143,30 @@ def codex_home() -> Path:
 
 
 def sanitized_environment() -> dict[str, str]:
-    env = os.environ.copy()
-    for name in SENSITIVE_ENV:
-        env.pop(name, None)
+    common_names = ("PATH", "LANG", "LC_ALL", "LC_CTYPE")
+    if os.name == "nt":
+        canonical_names = (
+            *common_names,
+            "SystemRoot",
+            "ComSpec",
+            "PATHEXT",
+            "TEMP",
+            "TMP",
+            "USERPROFILE",
+        )
+        inherited = {name.casefold(): value for name, value in os.environ.items()}
+        env = {
+            canonical: inherited[canonical.casefold()]
+            for canonical in canonical_names
+            if canonical.casefold() in inherited
+        }
+    else:
+        env = {
+            name: os.environ[name]
+            for name in (*common_names, "HOME", "TMPDIR")
+            if name in os.environ
+        }
+    env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
     return env
 
 
@@ -299,12 +321,33 @@ def _validate_runtime_models(
     primary_label = (
         "Claude Fable 5" if primary_model == FABLE_MODEL else "Claude Opus 5"
     )
-    raw_models = list(usage) if isinstance(usage, dict) else []
-    if not all(isinstance(model, str) for model in raw_models):
+    if not isinstance(usage, dict):
+        raise AdvisorError("Runtime metadata has a malformed modelUsage mapping.")
+    raw_models = list(usage)
+    if not all(isinstance(model, str) and bool(model.strip()) for model in raw_models):
         raise AdvisorError(
             f"Runtime metadata reported a model outside the allowed {policy_label} "
             "runtime policy."
         )
+    for model_usage in usage.values():
+        if not isinstance(model_usage, dict) or not model_usage:
+            raise AdvisorError("Runtime metadata has a malformed modelUsage value.")
+        for field, value in model_usage.items():
+            is_nonnegative_finite_number = (
+                type(value) is int
+                and value >= 0
+                or type(value) is float
+                and math.isfinite(value)
+                and value >= 0
+            )
+            if (
+                not isinstance(field, str)
+                or not field.strip()
+                or not is_nonnegative_finite_number
+            ):
+                raise AdvisorError(
+                    "Runtime metadata has a malformed modelUsage value."
+                )
     used_models = sorted(raw_models)
     if primary_model not in used_models:
         raise AdvisorError(

@@ -106,6 +106,10 @@ def _validate_route(route: Any, *, seat: str, schema: int) -> str:
             f"{seat} model route has an invalid model",
         )
         _require(
+            route["model"] not in {FABLE_MODEL, OPUS_MODEL},
+            f"{seat} model route uses a reserved Claude model",
+        )
+        _require(
             type(route["effort"]) is str
             and _EFFORT_RE.fullmatch(route["effort"]) is not None,
             f"{seat} model route has an invalid effort",

@@ -222,6 +222,59 @@ class RoutingStateTests(unittest.TestCase):
         with self.assertRaises(STATE.RoutingStateError):
             STATE.validate_routing_state(legacy)
 
+    def test_reserved_claude_models_cannot_use_generic_model_routes(self) -> None:
+        seats_by_schema = {
+            1: ("executor", "advisor"),
+            2: ("executor", "advisor"),
+            3: ("executor", "planner", "advisor"),
+            4: ("executor", "planner", "advisor", "designer"),
+            5: ("executor", "planner", "advisor", "designer"),
+        }
+        for schema, seats in seats_by_schema.items():
+            for seat in seats:
+                for model in (STATE.FABLE_MODEL, STATE.OPUS_MODEL):
+                    with self.subTest(schema=schema, seat=seat, model=model):
+                        invalid = genuine_state(schema)
+                        invalid[seat] = {
+                            "kind": "model",
+                            "model": model,
+                            "effort": "high",
+                        }
+                        if not any(
+                            isinstance(invalid.get(candidate), dict)
+                            and invalid[candidate].get("kind")
+                            in {"fable", "claude_subscription"}
+                            for candidate in ("planner", "advisor")
+                        ):
+                            for server in invalid["managed"].get("mcp", {}):
+                                invalid["managed"]["mcp"][server] = False
+                        with self.assertRaises(STATE.RoutingStateError):
+                            STATE.validate_routing_state(invalid)
+
+        for sealed, generic in (
+            (fable_route(), STATE.OPUS_MODEL),
+            (opus_route(), STATE.FABLE_MODEL),
+        ):
+            for sealed_seat, generic_seat in (
+                ("planner", "advisor"),
+                ("advisor", "planner"),
+            ):
+                with self.subTest(
+                    sealed_model=sealed["model"],
+                    sealed_seat=sealed_seat,
+                    generic_model=generic,
+                    generic_seat=generic_seat,
+                ):
+                    invalid = genuine_state(5)
+                    invalid[sealed_seat] = deepcopy(sealed)
+                    invalid[generic_seat] = {
+                        "kind": "model",
+                        "model": generic,
+                        "effort": "high",
+                    }
+                    with self.assertRaises(STATE.RoutingStateError):
+                        STATE.validate_routing_state(invalid)
+
     def test_legacy_schemas_reject_future_surfaces(self) -> None:
         scenarios = []
         schema_one = genuine_state(1)

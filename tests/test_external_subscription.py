@@ -153,6 +153,70 @@ class ExternalSubscriptionTests(unittest.TestCase):
                 )
             review.assert_not_called()
 
+    def test_opus_planner_create_and_revise_dispatch_exact_public_operations(
+        self,
+    ) -> None:
+        route = {"model": "claude-opus-5", "effort": "max"}
+        created = {
+            "model": "claude-opus-5",
+            "effort": "max",
+            "used_models": ["claude-opus-5"],
+            "signal": "PLAN_DRAFT",
+            "plan": "PLAN_DRAFT\nDraft",
+        }
+        revised = {
+            "model": "claude-opus-5",
+            "effort": "max",
+            "used_models": ["claude-opus-5"],
+            "signal": "PLAN_REVISION",
+            "revision": (
+                "PLAN_REVISION\n\n## FINDINGS_LEDGER\n"
+                "F-1 INCORPORATED\n\n## REVISED_PLAN\nv2 plan"
+            ),
+        }
+        revision_arguments = {
+            "task": "original task",
+            "current_plan": "v1 plan",
+            "critique": "F-1 missing check",
+            "history": "F-1 pending",
+        }
+        with (
+            mock.patch.object(
+                SUBSCRIPTION.fable_advisor_mcp,
+                "load_fable_route",
+                return_value=route,
+            ),
+            mock.patch.object(
+                SUBSCRIPTION.fable_advisor_mcp,
+                "create_plan",
+                return_value=created,
+            ) as create,
+            mock.patch.object(
+                SUBSCRIPTION.fable_advisor_mcp,
+                "revise_plan",
+                return_value=revised,
+            ) as revise,
+        ):
+            create_result = SUBSCRIPTION.invoke(
+                "create_plan",
+                {"packet": "bounded planning packet"},
+                provider_id="claude-opus",
+                model="claude-opus-5",
+                effort="max",
+            )
+            revise_result = SUBSCRIPTION.invoke(
+                "revise_plan",
+                revision_arguments,
+                provider_id="claude-opus",
+                model="claude-opus-5",
+                effort="max",
+            )
+
+        self.assertIs(create_result, created)
+        self.assertIs(revise_result, revised)
+        create.assert_called_once_with(packet="bounded planning packet")
+        revise.assert_called_once_with(**revision_arguments)
+
 
 if __name__ == "__main__":
     unittest.main()
