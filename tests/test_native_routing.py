@@ -1590,7 +1590,7 @@ class NativeRoutingTests(unittest.TestCase):
             "managed_by": "codex-orchestration",
             "config_file": str(self.home / "config.toml"),
         }
-        with mock.patch.object(NATIVE.os, "fchmod", None):
+        with mock.patch.object(NATIVE.os, "fchmod", None, create=True):
             NATIVE._write_state(state_path, state)
         self.assertEqual(json.loads(state_path.read_text(encoding="utf-8")), state)
 
