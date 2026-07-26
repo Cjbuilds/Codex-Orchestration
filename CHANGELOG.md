@@ -1,6 +1,13 @@
 # Changelog
 
-## 0.9.1 — Unreleased
+## 0.9.2 — Unreleased
+
+- Correct explicit invocation examples to use the namespaced
+  `$codex-orchestration:codex-orchestration` skill label, while preserving
+  natural-language implicit invocation and documenting `/skills` only as Codex's
+  built-in skill discovery.
+
+## 0.9.1 — 2026-07-25
 
 - Accept first-party Claude Team subscriptions alongside Pro and Max while
   preserving exact first-party authentication checks and account-data redaction.
@@ -69,8 +76,9 @@
 
 ## 0.7.0 — 2026-07-18
 
-- Add `/codex-orchestration --update`, a canonical-source-checked orchestration of
-  Codex's native plugin upgrade/install commands. It refuses disabled, local,
+- Add the `$codex-orchestration:codex-orchestration --update` skill prompt, a
+  canonical-source-checked orchestration of Codex's native plugin upgrade/install
+  commands. It refuses disabled, local,
   missing, duplicate, or unexpected sources and verifies final source, version, and
   enabled state without removing the plugin or touching routing, credentials, chats,
   or sessions.

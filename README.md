@@ -72,28 +72,33 @@ Start a new Codex task after installation. Setup requires Python 3.11 or newer.
 
 ## Quick start
 
+Start an ordinary Codex prompt with the literal skill label
+`$codex-orchestration:codex-orchestration`. These examples are prompts for Codex,
+not terminal commands. You can also browse installed skills with Codex's built-in
+`/skills` discovery.
+
 Use Fable 5 to plan, Sol to advise, and Luna to implement:
 
 ```text
-/codex-orchestration setup planner: Claude Fable 5 High, advisor: GPT-5.6 Sol High, executor: GPT-5.6 Luna Extra High
+$codex-orchestration:codex-orchestration setup planner: Claude Fable 5 High, advisor: GPT-5.6 Sol High, executor: GPT-5.6 Luna Extra High
 ```
 
 Add a dedicated Designer when the work needs a design handoff:
 
 ```text
-/codex-orchestration setup planner: Claude Fable 5 High, advisor: GPT-5.6 Sol High, designer: GPT-5.6 Terra High, executor: GPT-5.6 Luna Extra High
+$codex-orchestration:codex-orchestration setup planner: Claude Fable 5 High, advisor: GPT-5.6 Sol High, designer: GPT-5.6 Terra High, executor: GPT-5.6 Luna Extra High
 ```
 
 Or let your current Codex model plan and use Fable 5 only as Advisor:
 
 ```text
-/codex-orchestration setup advisor: Claude Fable 5 High, executor: GPT-5.6 Luna Extra High
+$codex-orchestration:codex-orchestration setup advisor: Claude Fable 5 High, executor: GPT-5.6 Luna Extra High
 ```
 
 Or use Claude Opus 5 as the Advisor:
 
 ```text
-/codex-orchestration setup advisor: Claude Opus 5 XHigh, executor: GPT-5.6 Luna Extra High
+$codex-orchestration:codex-orchestration setup advisor: Claude Opus 5 XHigh, executor: GPT-5.6 Luna Extra High
 ```
 
 After setup, start another new task and use Codex normally. The saved workflow applies automatically.
@@ -109,7 +114,7 @@ Fable 5 and Opus 5 use the official Claude Code CLI and a compatible first-party
 ## Choose your roles
 
 ```text
-/codex-orchestration setup planner: <model and effort>, advisor: <model and effort>, designer: <model and effort>, executor: <model and effort>
+$codex-orchestration:codex-orchestration setup planner: <model and effort>, advisor: <model and effort>, designer: <model and effort>, executor: <model and effort>
 ```
 
 - Omit `planner` to use the current Codex model as Planner.
@@ -147,13 +152,13 @@ status inspection only; it never authorizes configuration, credentials, or spend
 Examples:
 
 ```text
-/codex-orchestration setup planner: Claude Fable 5 High, advisor: GPT-5.6 Sol High, executor: GPT-5.6 Luna Extra High
+$codex-orchestration:codex-orchestration setup planner: Claude Fable 5 High, advisor: GPT-5.6 Sol High, executor: GPT-5.6 Luna Extra High
 
-/codex-orchestration setup planner: GPT-5.6 Sol Extra High, advisor: Claude Fable 5 High, executor: GPT-5.6 Luna Extra High
+$codex-orchestration:codex-orchestration setup planner: GPT-5.6 Sol Extra High, advisor: Claude Fable 5 High, executor: GPT-5.6 Luna Extra High
 
-/codex-orchestration setup designer: GPT-5.6 Terra High, executor: GPT-5.6 Luna Extra High
+$codex-orchestration:codex-orchestration setup designer: GPT-5.6 Terra High, executor: GPT-5.6 Luna Extra High
 
-/codex-orchestration setup executor: GPT-5.6 Luna Extra High
+$codex-orchestration:codex-orchestration setup executor: GPT-5.6 Luna Extra High
 ```
 
 ## Bring another model into Codex
@@ -167,11 +172,11 @@ authentication.
 Ask for a role in plain language:
 
 ```text
-/codex-orchestration configure external role researcher with OpenRouter model moonshotai/kimi-k3 at max; job: gather evidence and cite sources
+$codex-orchestration:codex-orchestration configure external role researcher with OpenRouter model moonshotai/kimi-k3 at max; job: gather evidence and cite sources
 
-/codex-orchestration configure external role designer with OpenRouter model moonshotai/kimi-k3 at max; job: produce a bounded UX specification
+$codex-orchestration:codex-orchestration configure external role designer with OpenRouter model moonshotai/kimi-k3 at max; job: produce a bounded UX specification
 
-/codex-orchestration call researcher at max — review this bounded research packet
+$codex-orchestration:codex-orchestration call researcher at max — review this bounded research packet
 ```
 
 Setup is deliberately staged: preview and prepare the audited provider adapter,
@@ -210,7 +215,7 @@ families.
 Models already available through Codex can still become ordinary user-owned roles:
 
 ```text
-/codex-orchestration create project role: researcher
+$codex-orchestration:codex-orchestration create project role: researcher
 ```
 
 Project roles live in `.codex/agents/`; personal roles live in
@@ -220,17 +225,20 @@ Project roles live in `.codex/agents/`; personal roles live in
 
 Create a Codex Goal normally, then tell Codex to use the saved workflow until the Goal is complete. Codex still owns Goal state, permissions, integration, and verification; the plugin only guides which models perform each role.
 
-## Useful commands
+## Useful prompts
+
+Enter these in Codex chat. They invoke the installed skill; they are not shell
+commands or registered slash commands.
 
 ```text
-/codex-orchestration status
-/codex-orchestration status --require-effective
-/codex-orchestration repair
-/codex-orchestration --update
-/codex-orchestration setup planner: Claude Fable 5 High, advisor: GPT-5.6 Sol High, designer: GPT-5.6 Terra High, executor: GPT-5.6 Luna Extra High
-/codex-orchestration setup advisor: Claude Opus 5 XHigh, executor: GPT-5.6 Luna Extra High
-/codex-orchestration Planner: Claude Fable 5 High, Designer: Kimi K3
-/codex-orchestration disable
+$codex-orchestration:codex-orchestration status
+$codex-orchestration:codex-orchestration status --require-effective
+$codex-orchestration:codex-orchestration repair
+$codex-orchestration:codex-orchestration --update
+$codex-orchestration:codex-orchestration setup planner: Claude Fable 5 High, advisor: GPT-5.6 Sol High, designer: GPT-5.6 Terra High, executor: GPT-5.6 Luna Extra High
+$codex-orchestration:codex-orchestration setup advisor: Claude Opus 5 XHigh, executor: GPT-5.6 Luna Extra High
+$codex-orchestration:codex-orchestration Planner: Claude Fable 5 High, Designer: Kimi K3
+$codex-orchestration:codex-orchestration disable
 ```
 
 `Designer: Kimi K3` selects the audited task-local External Model role without
@@ -248,8 +256,9 @@ unavailable. The seat label never authorizes credential entry or a paid probe.
 An Opus seat can be updated in place on the same Planner or Advisor seat,
 including its effort. Replacing Opus with Fable, replacing Fable with Opus,
 moving Opus between Planner and Advisor, or removing Opus through another setup
-requires `/codex-orchestration disable` first, followed by one fresh complete
-setup. This prevents silent subscription route replacement.
+requires the prompt `$codex-orchestration:codex-orchestration disable` first,
+followed by one fresh complete setup. This prevents silent subscription route
+replacement.
 
 `repair` is narrower than setup or disable. When status reports that plugin-managed
 mode/usage hints conflict with otherwise intact saved state, it can restore only
@@ -279,10 +288,10 @@ Technical details are in [providers and models](plugins/codex-orchestration/skil
 For version 0.7.0 and newer, ask the installed plugin to update itself:
 
 ```text
-/codex-orchestration --update
+$codex-orchestration:codex-orchestration --update
 ```
 
-The command refuses disabled, local, missing, duplicate, or unexpected sources,
+The skill refuses disabled, local, missing, duplicate, or unexpected sources,
 then delegates refresh and installation only to Codex's native plugin manager and
 verifies the final canonical source, version, and enabled state. It does not remove
 the plugin or touch routing, credentials, chats, sessions, or the model picker.
@@ -310,16 +319,16 @@ Model roles; version **0.9.0 or newer** adds Claude Opus 5 subscription routing.
 Confirm with
 `codex plugin list --json`, then restart Codex Desktop and start a new task.
 
-If the version stays old or `marketplaceSource.sourceType` is `local`, Codex is pointed at a local checkout rather than the GitHub marketplace. Run `/codex-orchestration disable` first if a saved policy is active, then remove the plugin and that marketplace registration, add `Cjbuilds/Codex-Orchestration` again, and reinstall. This does not delete the local source checkout.
+If the version stays old or `marketplaceSource.sourceType` is `local`, Codex is pointed at a local checkout rather than the GitHub marketplace. Enter the prompt `$codex-orchestration:codex-orchestration disable` first if a saved policy is active, then remove the plugin and that marketplace registration, add `Cjbuilds/Codex-Orchestration` again, and reinstall. This does not delete the local source checkout.
 
-Before downgrading to a version older than the currently saved routing schema, run `/codex-orchestration disable` with the current version first.
+Before downgrading to a version older than the currently saved routing schema, enter the prompt `$codex-orchestration:codex-orchestration disable` with the current version first.
 
 ## Uninstall
 
-First run:
+First enter this prompt in Codex:
 
 ```text
-/codex-orchestration disable
+$codex-orchestration:codex-orchestration disable
 ```
 
 Then remove the plugin:

@@ -9,27 +9,31 @@ The model selected when this Codex task started is already the orchestrator. Nev
 
 This skill adds a model route to Codex's existing multi-agent flow. It does not create another scheduler.
 
-## Understand the command
+## Understand invocation
 
-Support these simple forms:
+For explicit invocation, require the literal skill label
+`$codex-orchestration:codex-orchestration` at the start of an ordinary Codex
+prompt. These are prompts handled by this skill, not shell commands or registered
+slash commands. Codex's built-in `/skills` discovery may be used to browse and
+select the installed skill. Support these simple forms:
 
 ```text
-/codex-orchestration setup executor: GPT-5.6 Luna Extra High
-/codex-orchestration setup executor: GPT-5.6 Luna Extra High, advisor: Claude Fable 5 High
-/codex-orchestration setup planner: Claude Fable 5 High, advisor: GPT-5.6 Sol High, executor: GPT-5.6 Luna Extra High
-/codex-orchestration setup advisor: Claude Opus 5 XHigh, executor: GPT-5.6 Luna Extra High
-/codex-orchestration setup designer: GPT-5.6 Sol High, executor: GPT-5.6 Luna Extra High
-/codex-orchestration Planner: Claude Fable 5 High, Designer: Kimi K3
-/codex-orchestration --update
-/codex-orchestration create project role: researcher
-/codex-orchestration create personal roles: researcher, writer, reviewer
-/codex-orchestration configure external role researcher with OpenRouter model moonshotai/kimi-k3 at max
-/codex-orchestration call researcher at max — <one bounded task>
-/codex-orchestration status
-/codex-orchestration repair
-/codex-orchestration disable
-/codex-orchestration remove custom roles personally
-/codex-orchestration executor: GPT-5.6 Terra high — <one task only>
+$codex-orchestration:codex-orchestration setup executor: GPT-5.6 Luna Extra High
+$codex-orchestration:codex-orchestration setup executor: GPT-5.6 Luna Extra High, advisor: Claude Fable 5 High
+$codex-orchestration:codex-orchestration setup planner: Claude Fable 5 High, advisor: GPT-5.6 Sol High, executor: GPT-5.6 Luna Extra High
+$codex-orchestration:codex-orchestration setup advisor: Claude Opus 5 XHigh, executor: GPT-5.6 Luna Extra High
+$codex-orchestration:codex-orchestration setup designer: GPT-5.6 Sol High, executor: GPT-5.6 Luna Extra High
+$codex-orchestration:codex-orchestration Planner: Claude Fable 5 High, Designer: Kimi K3
+$codex-orchestration:codex-orchestration --update
+$codex-orchestration:codex-orchestration create project role: researcher
+$codex-orchestration:codex-orchestration create personal roles: researcher, writer, reviewer
+$codex-orchestration:codex-orchestration configure external role researcher with OpenRouter model moonshotai/kimi-k3 at max
+$codex-orchestration:codex-orchestration call researcher at max — <one bounded task>
+$codex-orchestration:codex-orchestration status
+$codex-orchestration:codex-orchestration repair
+$codex-orchestration:codex-orchestration disable
+$codex-orchestration:codex-orchestration remove custom roles personally
+$codex-orchestration:codex-orchestration executor: GPT-5.6 Terra high — <one task only>
 is Kimi available to use as Designer?
 can I use Kimi K3 for design?
 ```
@@ -141,10 +145,11 @@ Read [providers-and-models.md](references/providers-and-models.md) before setup,
 
 ## Update the plugin
 
-Treat `/codex-orchestration --update` as an explicit request to update only this
-plugin. It cannot be combined with setup, status, disable, seat settings, custom
-role operations, or task work. Resolve the absolute Codex binary used by the active
-host. First run `codex plugin list --json` and require exactly one enabled
+Treat the explicit prompt `$codex-orchestration:codex-orchestration --update` as a
+request to update only this plugin. It cannot be combined with setup, status,
+disable, seat settings, custom role operations, or task work. Resolve the absolute
+Codex binary used by the active host. First run `codex plugin list --json` and
+require exactly one enabled
 `codex-orchestration@codex-orchestration` entry whose marketplace source type is
 `git` and source is the canonical HTTPS GitHub repository. Refuse local, disabled,
 missing, duplicate, or unexpected sources without mutation. Then run only:

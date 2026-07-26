@@ -1,6 +1,6 @@
 {
   "name": "codex-orchestration",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "description": "Give Codex and audited external models safe, provider-pinned roles.",
   "author": {
     "name": "CJ Zafir",
@@ -36,9 +36,9 @@
       "Efficient execution"
     ],
     "defaultPrompt": [
-      "/codex-orchestration setup designer: GPT-5.6 Sol High, executor: GPT-5.6 Luna Extra High",
-      "/codex-orchestration --update",
-      "/codex-orchestration Planner: Claude Fable 5 High, Designer: Kimi K3"
+      "$codex-orchestration:codex-orchestration setup designer: GPT-5.6 Sol High, executor: GPT-5.6 Luna Extra High",
+      "$codex-orchestration:codex-orchestration --update",
+      "$codex-orchestration:codex-orchestration Planner: Claude Fable 5 High, Designer: Kimi K3"
     ]
   }
 }
