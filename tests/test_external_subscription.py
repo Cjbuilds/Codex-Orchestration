@@ -85,6 +85,35 @@ class ExternalSubscriptionTests(unittest.TestCase):
         create.assert_called_once_with(packet="bounded planning packet")
         self.assertIs(result, expected)
 
+    def test_fable_invoke_accepts_either_reviewed_primary_runtime_identity(
+        self,
+    ) -> None:
+        for primary in ("claude-fable-5", "claude-opus-4-8"):
+            expected = {
+                "model": "claude-fable-5",
+                "effort": "high",
+                "used_models": [
+                    primary,
+                    SUBSCRIPTION.fable_advisor_mcp.FABLE_HELPER_MODEL,
+                ],
+                "signal": "PLAN_DRAFT",
+            }
+            with self.subTest(primary=primary), mock.patch.object(
+                SUBSCRIPTION.fable_advisor_mcp,
+                "load_fable_route",
+                return_value={"model": "claude-fable-5", "effort": "high"},
+            ), mock.patch.object(
+                SUBSCRIPTION.fable_advisor_mcp,
+                "create_plan",
+                return_value=expected,
+            ):
+                self.assertIs(
+                    SUBSCRIPTION.invoke(
+                        "create_plan", {"packet": "bounded planning packet"}
+                    ),
+                    expected,
+                )
+
     def test_argument_shape_and_runtime_metadata_fail_closed(self) -> None:
         with self.assertRaisesRegex(
             SUBSCRIPTION.SubscriptionAdapterError, "arguments"

@@ -200,10 +200,12 @@ Fable 5 is the bundled cross-provider exception retained for compatibility;
 Opus 5 is the second sealed bundled exception added in version 0.9.0.
 
 The bundled Claude bridge starts each authentication and model subprocess with
-only a minimal platform environment. It preserves canonical `HOME` on POSIX or
-`USERPROFILE` on Windows so the official CLI can find the user's first-party login,
-but it does not inherit credential, config-redirection, provider/model/effort,
-endpoint/gateway, proxy/CA/mTLS, or telemetry override families.
+only a minimal platform environment. It preserves `HOME` plus canonical
+operating-system `USER` and `LOGNAME` on POSIX, or `USERPROFILE` on Windows, so
+the official CLI can find the user's first-party login. It does not trust ambient
+POSIX identity values or inherit credential, config-redirection,
+provider/model/effort, endpoint/gateway, proxy/CA/mTLS, or telemetry override
+families.
 
 Models already available through Codex can still become ordinary user-owned roles:
 

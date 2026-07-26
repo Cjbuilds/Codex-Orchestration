@@ -142,13 +142,23 @@ def invoke(
         result.get("effort") == selected_effort,
         "subscription runtime effort drifted",
     )
+    used_models = result.get("used_models")
     _require(
-        model in result.get("used_models", []),
+        type(used_models) is list
+        and bool(used_models)
+        and all(type(value) is str and bool(value.strip()) for value in used_models),
+        "subscription runtime metadata is invalid",
+    )
+    reviewed_primaries = (
+        fable_advisor_mcp.REVIEWED_PRIMARY_MODELS_BY_ROUTE[model]
+    )
+    _require(
+        bool(set(used_models).intersection(reviewed_primaries)),
         "subscription runtime metadata omitted the primary model",
     )
     allowed_runtime = fable_advisor_mcp.ALLOWED_RUNTIME_MODELS_BY_PRIMARY[model]
     _require(
-        set(result.get("used_models", [])).issubset(allowed_runtime),
+        set(used_models).issubset(allowed_runtime),
         "subscription runtime metadata included an unsealed helper model",
     )
     return result

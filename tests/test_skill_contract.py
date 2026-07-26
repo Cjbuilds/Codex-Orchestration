@@ -301,9 +301,13 @@ Executor — GPT-5.6 Sol high: Activated
         self.assertIn("--planner-fable --planner-effort <normalized-effort>", SKILL)
         self.assertIn("built-in cross-provider Planner or Advisor exception", SKILL)
         self.assertIn("All bundled variants are disabled by default", SKILL)
-        self.assertIn("first-party Pro or Max account", SKILL)
+        self.assertIn("first-party Pro, Max, or Team account", SKILL)
         self.assertIn("never extracts a token", SKILL)
-        self.assertIn("runtime `modelUsage` to contain the pinned `claude-fable-5`", SKILL)
+        self.assertIn(
+            "reviewed Fable primary identity (`claude-fable-5` or "
+            "`claude-opus-4-8`)",
+            SKILL,
+        )
         self.assertIn("explicit exact helper allowlist", SKILL)
         self.assertIn("unknown additional or missing primary model", SKILL)
         self.assertIn("`create_plan`", SKILL)
