@@ -26,6 +26,7 @@ NATIVE_SCRIPT = (
 ROUTING_STATE = (SKILL_ROOT / "scripts" / "routing_state.py").read_text(
     encoding="utf-8"
 )
+RELEASE = (REPO_ROOT / "RELEASE.md").read_text(encoding="utf-8")
 
 
 class SkillContractTests(unittest.TestCase):
@@ -330,7 +331,8 @@ Executor — GPT-5.6 Sol high: Activated
         self.assertIn("report only to the root", SKILL)
         self.assertIn("contact Executors", SKILL)
         self.assertIn("it never counts as approval", SKILL)
-        self.assertIn("Never exceed five total Advisor reviews", SKILL)
+        self.assertIn("Never exceed eight total Advisor reviews", SKILL)
+        self.assertIn("If review eight still returns `PLAN_REVISE`", SKILL)
         self.assertIn("NOT_ADVISOR_APPROVED", SKILL)
         self.assertNotIn("at most one confirmation pass", SKILL)
 
@@ -344,6 +346,41 @@ Executor — GPT-5.6 Sol high: Activated
         self.assertIn("explicitly made that seat best-effort", SKILL)
         self.assertIn("An unavailable Executor may leave work with the root", SKILL)
         self.assertIn("Planner and Advisor never contact one another directly", SKILL)
+
+    def test_active_advisor_guidance_uses_the_eight_review_bound(self) -> None:
+        active_guidance = {
+            "README.md": README,
+            "SKILL.md": SKILL,
+            "providers-and-models.md": REFERENCE,
+            "RELEASE.md": RELEASE,
+            "configure_native_routing.py": NATIVE_SCRIPT,
+        }
+        stale_limit_word = "fi" + "ve"
+        stale_phrases = (
+            f"{stale_limit_word}-round bounded approval loop",
+            f"at most {stale_limit_word} Advisor reviews",
+            f"{stale_limit_word} total Advisor reviews",
+            f"Review {stale_limit_word} without approval",
+            f"review {stale_limit_word} still returns",
+            f"{stale_limit_word}-review approval bound",
+            f"{stale_limit_word}-review budget",
+            f"round-{stale_limit_word} PLAN_REVISE",
+            f"rounds two through {stale_limit_word}",
+        )
+        for path, content in active_guidance.items():
+            with self.subTest(path=path):
+                for phrase in stale_phrases:
+                    self.assertNotIn(phrase, content)
+
+        self.assertIn("safety limit of eight reviews", README)
+        self.assertIn("eight-round bounded approval loop", REFERENCE)
+        self.assertIn("at most eight Advisor reviews", REFERENCE)
+        self.assertIn("eight-review approval bound", RELEASE)
+        self.assertEqual(NATIVE_SCRIPT.count("ADVISOR_REVIEW_LIMIT ="), 1)
+        # Product/model names and unrelated concurrency facts remain five-based.
+        self.assertIn("Claude Fable 5", README)
+        self.assertIn("Claude Opus 5", RELEASE)
+        self.assertIn("five-hour", REFERENCE)
 
     def test_route_reporting_is_truthful(self) -> None:
         self.assertIn("native policy installed", SKILL)
