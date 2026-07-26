@@ -1,6 +1,12 @@
 # Changelog
 
-## 0.9.2 — Unreleased
+## 0.9.3 — Unreleased
+
+- Raise the bounded Advisor approval loop from five to eight reviews while
+  preserving immediate approval exit and fail-closed plan, ledger, and
+  round-limit handling before Executor work.
+
+## 0.9.2 — 2026-07-25
 
 - Correct explicit invocation examples to use the namespaced
   `$codex-orchestration:codex-orchestration` skill label, while preserving

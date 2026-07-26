@@ -452,13 +452,24 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertIn("never spawn descendants", mode)
         self.assertIn("Explicit user instructions win", mode)
         self.assertIn("Persistent and task-local Planner and Advisor routes", mode)
-        self.assertIn("at most five total Advisor reviews", mode)
+        self.assertEqual(NATIVE.ADVISOR_REVIEW_LIMIT, 8)
+        self.assertIn("at most eight total Advisor reviews", mode)
         self.assertIn("PLAN_APPROVED ends review early", mode)
-        self.assertIn("round-five PLAN_REVISE halts before Executor", mode)
+        self.assertIn("rounds two through eight", mode)
+        self.assertIn(
+            "current plan and version plus a compact cumulative ledger, not prior transcripts",
+            mode,
+        )
+        self.assertIn("round-eight PLAN_REVISE halts before Executor", mode)
+        self.assertIn("non-approval artifact", mode)
         self.assertIn("NOT_ADVISOR_APPROVED", mode)
         self.assertIn("Planner failure permits the root to take over", mode)
         self.assertIn("stale plan version", mode)
         self.assertIn("invalid or incomplete ledger", mode)
+        stale_limit_word = "fi" + "ve"
+        self.assertNotIn(f"{stale_limit_word} total Advisor reviews", mode)
+        self.assertNotIn(f"round-{stale_limit_word} PLAN_REVISE", mode)
+        self.assertNotIn(f"rounds two through {stale_limit_word}", mode)
         self.assertIn("There is no Finalizer seat", mode)
         self.assertIn("configured Designer", mode)
         self.assertIn("design artifacts", mode)
@@ -489,6 +500,29 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertIn("If you are a spawned child, do not call this tool", usage)
         self.assertNotIn("tool_namespace", mode + usage)
         self.assertNotIn("enabled = true", mode + usage)
+
+    def test_policy_renders_every_review_bound_from_the_authoritative_limit(
+        self,
+    ) -> None:
+        executor = {"kind": "model", "model": "gpt-5.6-luna", "effort": "xhigh"}
+        planner = {"kind": "model", "model": "gpt-5.6-sol", "effort": "high"}
+        advisor = {"kind": "model", "model": "gpt-5.6-terra", "effort": "high"}
+
+        with mock.patch.object(NATIVE, "ADVISOR_REVIEW_LIMIT", 7):
+            mode, _ = NATIVE.build_policy(executor, planner, advisor)
+
+        for expected in (
+            "at most seven total Advisor reviews",
+            "rounds two through seven",
+            "round-seven PLAN_REVISE",
+        ):
+            self.assertIn(expected, mode)
+        for hard_coded in (
+            "at most eight total Advisor reviews",
+            "rounds two through eight",
+            "round-eight PLAN_REVISE",
+        ):
+            self.assertNotIn(hard_coded, mode)
 
     def test_policy_root_fallback_planner_without_advisor_and_fable_hints(self) -> None:
         executor = {"kind": "model", "model": "gpt-5.6-luna", "effort": "high"}
