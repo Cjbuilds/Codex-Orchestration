@@ -6,6 +6,7 @@
         "skills/codex-orchestration/scripts/fable_advisor_mcp.py"
       ],
       "cwd": ".",
+      "tool_timeout_sec": 660,
       "enabled": false
     },
     "fable-advisor-python": {
@@ -14,6 +15,7 @@
         "skills/codex-orchestration/scripts/fable_advisor_mcp.py"
       ],
       "cwd": ".",
+      "tool_timeout_sec": 660,
       "enabled": false
     },
     "fable-advisor-py": {
@@ -23,6 +25,7 @@
         "skills/codex-orchestration/scripts/fable_advisor_mcp.py"
       ],
       "cwd": ".",
+      "tool_timeout_sec": 660,
       "enabled": false
     }
   }

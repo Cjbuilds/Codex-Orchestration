@@ -476,6 +476,12 @@ Prerequisites:
 
 The plugin packages three disabled MCP launcher variants for macOS, Linux, and Windows. Setup enables exactly one compatible variant through the plugin's namespaced config when either bundled Claude model is selected. At planning or review time the MCP server gives authentication and model subprocesses only a minimal platform environment. It preserves `HOME` plus canonical operating-system `USER` and `LOGNAME` on POSIX, or `USERPROFILE` on Windows, for first-party login discovery. It does not trust ambient POSIX identity values and does not inherit credential, config-redirection, provider/model/effort, endpoint/gateway, proxy/CA/mTLS, or telemetry override families. It invokes `claude --print --model <sealed-model-id>` with `--safe-mode`, no tools, no session persistence, prompt suggestions disabled, and JSON output. Advisor review additionally requires Claude Code's `--json-schema` capability. Each saved seat pins its model and effort; the root cannot replace them through tool arguments.
 
+Each bundled launcher gives Codex a 660-second MCP tool timeout, slightly longer
+than the bridge's 600-second Claude subprocess timeout. Keep the outer timeout
+strictly greater than the inner timeout so an XHigh call can return either its
+schema-validated result or the bridge's fail-closed timeout error instead of being
+cancelled first by Codex's shorter default.
+
 Fable effort is configurable per setup. The default is `high`; supported Claude Code values are `low`, `medium`, `high`, `xhigh`, and `max`. Accept `ultra` as an alias for `max`, save the effective Claude Code value, and disclose the alias mapping in setup output. Existing saved `max` routes remain valid.
 
 Opus effort is also configurable and defaults to `high`. Its sealed set is

@@ -1,6 +1,12 @@
 # Changelog
 
-## 0.9.3 — Unreleased
+## 0.9.4 — Unreleased
+
+- Give every bundled Claude MCP launcher a 660-second Codex tool timeout so
+  Opus 5 XHigh reviews can use the bridge's full 600-second subprocess budget
+  and still return a schema-validated decision or fail-closed timeout result.
+
+## 0.9.3 — 2026-07-26
 
 - Raise the bounded Advisor approval loop from five to eight reviews while
   preserving immediate approval exit and fail-closed plan, ledger, and
