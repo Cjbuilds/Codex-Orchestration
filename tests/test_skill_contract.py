@@ -40,10 +40,11 @@ class SkillContractTests(unittest.TestCase):
     def test_public_controls_are_simple_and_setup_is_persistent(self) -> None:
         self.assertIn("setup executor: GPT-5.6 Luna Extra High", SKILL)
         self.assertIn("setup planner: Claude Fable 5 High", SKILL)
-        self.assertIn("/codex-orchestration status", SKILL)
-        self.assertIn("/codex-orchestration repair", SKILL)
-        self.assertIn("/codex-orchestration disable", SKILL)
-        self.assertIn("/codex-orchestration --update", SKILL)
+        invocation = "$codex-orchestration:codex-orchestration"
+        self.assertIn(f"{invocation} status", SKILL)
+        self.assertIn(f"{invocation} repair", SKILL)
+        self.assertIn(f"{invocation} disable", SKILL)
+        self.assertIn(f"{invocation} --update", SKILL)
         self.assertIn("current-task override", SKILL)
         self.assertIn("no longer needs to invoke this skill", SKILL)
 

@@ -255,7 +255,7 @@ class PackagingTests(unittest.TestCase):
 
         self.assertEqual(manifest["name"], "codex-orchestration")
         self.assertEqual(manifest["skills"], "./skills/")
-        self.assertEqual(manifest["version"], "0.9.1")
+        self.assertEqual(manifest["version"], "0.9.2")
         self.assertEqual(manifest["mcpServers"], "./.mcp.json")
         self.assertRegex(
             manifest["version"],
@@ -278,7 +278,7 @@ class PackagingTests(unittest.TestCase):
         self.assertFalse((SKILL_ROOT / "scripts" / "update_plugin.py").exists())
         self.assertIn("config/batchWrite", native.read_text(encoding="utf-8"))
         self.assertIn('"--repair"', native.read_text(encoding="utf-8"))
-        self.assertIn('"version": "0.9.1"', native.read_text(encoding="utf-8"))
+        self.assertIn('"version": "0.9.2"', native.read_text(encoding="utf-8"))
         self.assertIn("validate_routing_state", routing_state.read_text(encoding="utf-8"))
         self.assertIn("Standalone custom agent", custom.read_text(encoding="utf-8"))
 
@@ -339,8 +339,44 @@ class PackagingTests(unittest.TestCase):
         metadata = (SKILL_ROOT / "agents" / "openai.yaml").read_text(encoding="utf-8")
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
         skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+        manifest = json.loads(
+            (PLUGIN_ROOT / ".codex-plugin" / "plugin.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        prompts = "\n".join(manifest["interface"]["defaultPrompt"])
+        invocation = "$codex-orchestration:codex-orchestration"
+        raw_slash = "/codex-orchestration"
+        allowed_readme_fragments = (
+            "[External Models reference](plugins/codex-orchestration/skills/"
+            "codex-orchestration/references/external-models.md)",
+            "[providers and models](plugins/codex-orchestration/skills/"
+            "codex-orchestration/references/providers-and-models.md)",
+        )
 
-        self.assertIn("$codex-orchestration", metadata)
+        def assert_only_reviewed_raw_slashes(
+            surface: str, allowed: tuple[str, ...] = ()
+        ) -> None:
+            scrubbed = surface
+            for fragment in allowed:
+                self.assertEqual(scrubbed.count(fragment), 1, fragment)
+                scrubbed = scrubbed.replace(fragment, "", 1)
+            self.assertNotIn(raw_slash, scrubbed)
+
+        surfaces = (
+            ("README", readme, allowed_readme_fragments),
+            ("SKILL", skill, ()),
+            ("manifest defaultPrompt", prompts, ()),
+            ("OpenAI metadata", metadata, ()),
+        )
+        for name, surface, allowed in surfaces:
+            self.assertIn(invocation, surface, name)
+            assert_only_reviewed_raw_slashes(surface, allowed)
+            mutant = surface.replace(invocation, raw_slash, 1)
+            self.assertNotEqual(mutant, surface, name)
+            with self.subTest(mutated_surface=name), self.assertRaises(AssertionError):
+                assert_only_reviewed_raw_slashes(mutant, allowed)
+
         self.assertIn("allow_implicit_invocation: true", metadata)
         self.assertNotIn("allow_implicit_invocation: false", metadata)
         self.assertIn(
@@ -349,14 +385,40 @@ class PackagingTests(unittest.TestCase):
         )
         self.assertIn("available or callable as Designer", skill)
         self.assertIn("is Kimi available to use as Designer?", readme)
-        self.assertIn("/codex-orchestration setup executor:", readme)
+        self.assertIn(f"{invocation} setup executor:", readme)
         self.assertIn("GPT-5.6 Luna Extra High", readme)
-        self.assertIn("/codex-orchestration create project role:", readme)
-        self.assertIn("/codex-orchestration status", readme)
-        self.assertIn("/codex-orchestration disable", readme)
-        self.assertIn("/codex-orchestration --update", readme)
+        self.assertIn(f"{invocation} create project role:", readme)
+        self.assertIn(f"{invocation} status", readme)
+        self.assertIn(f"{invocation} disable", readme)
+        self.assertIn(f"{invocation} --update", readme)
         self.assertIn("designer: GPT-5.6", readme)
-        self.assertIn("codex plugin add codex-orchestration@codex-orchestration", readme)
+        self.assertIn(
+            "codex plugin add codex-orchestration@codex-orchestration", readme
+        )
+
+        unreviewed_raw_cases = (
+            "/codex-orchestration status",
+            "try /codex-orchestration repair",
+            "Prompt:/codex-orchestration status",
+            "**/codex-orchestration**",
+            "[/codex-orchestration]",
+            "“/codex-orchestration”",
+            "Prompt ](/codex-orchestration status)",
+            r"Prompt \](/codex-orchestration status)",
+            "`[docs](/codex-orchestration)`",
+            "[docs](/codex-orchestration status)",
+            '[docs](/safe "try /codex-orchestration status")',
+            "https://example.com/?next=/codex-orchestration",
+            "/codex-orchestration@marketplace",
+        )
+        for unreviewed in unreviewed_raw_cases:
+            with self.subTest(unreviewed_raw=unreviewed), self.assertRaises(
+                AssertionError
+            ):
+                assert_only_reviewed_raw_slashes(
+                    f"{readme}\n{unreviewed}",
+                    allowed_readme_fragments,
+                )
 
     def test_starter_prompts_fit_codex_limits(self) -> None:
         manifest = json.loads(
@@ -374,7 +436,9 @@ class PackagingTests(unittest.TestCase):
             line for line in metadata.splitlines() if "default_prompt:" in line
         )
         yaml_prompt = prompt_line.split(":", 1)[1].strip().strip('"')
-        self.assertTrue(yaml_prompt.startswith("Use $codex-orchestration"))
+        self.assertTrue(
+            yaml_prompt.startswith("Use $codex-orchestration:codex-orchestration")
+        )
         self.assertLessEqual(len(yaml_prompt), 128)
 
     def test_ci_runs_dual_version_plugin_lifecycle(self) -> None:
@@ -389,7 +453,7 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("@openai/codex@0.144.1", workflow)
         smoke_text = smoke.read_text(encoding="utf-8")
         self.assertIn('OLD_VERSION = "0.5.0"', smoke_text)
-        self.assertIn('NEW_VERSION = "0.9.1"', smoke_text)
+        self.assertIn('NEW_VERSION = "0.9.2"', smoke_text)
         self.assertIn("old Advisor-only cache unexpectedly supports Planner", smoke_text)
         self.assertIn("Upgraded installed skill is missing Planner contract", smoke_text)
         self.assertIn("reused the Advisor-only 0.5.0 cache directory", smoke_text)
@@ -492,7 +556,7 @@ class PackagingTests(unittest.TestCase):
     def test_update_and_uninstall_remove_managed_state_explicitly(self) -> None:
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
 
-        self.assertIn("/codex-orchestration status", readme)
+        self.assertIn("$codex-orchestration:codex-orchestration status", readme)
         self.assertIn("Version **0.6.0 or newer**", readme)
         self.assertIn("`marketplaceSource.sourceType` is `local`", readme)
         self.assertIn("`disable` restores the routing values", readme)

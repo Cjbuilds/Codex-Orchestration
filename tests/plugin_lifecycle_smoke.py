@@ -32,7 +32,7 @@ PLUGIN_ID = "codex-orchestration@codex-orchestration"
 MARKETPLACE_NAME = "codex-orchestration"
 OLD_RELEASE = "a1d9c546665c3253cdcaa8fe5c0c060199a6126c"
 OLD_VERSION = "0.5.0"
-NEW_VERSION = "0.9.1"
+NEW_VERSION = "0.9.2"
 COMMAND_TIMEOUT_SECONDS = 60
 
 
@@ -533,8 +533,8 @@ def main() -> int:
                 "Designer may edit only explicitly delegated design artifacts",
                 "is Kimi available to use as Designer?",
                 "Implicit invocation is discovery, not mutation authority",
-                "/codex-orchestration repair",
-                "/codex-orchestration --update",
+                "$codex-orchestration:codex-orchestration repair",
+                "$codex-orchestration:codex-orchestration --update",
             ):
                 if expected not in installed_skill:
                     raise SmokeFailure(
