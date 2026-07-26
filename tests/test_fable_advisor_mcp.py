@@ -674,6 +674,90 @@ class FableAdvisorMcpTests(unittest.TestCase):
                 )
                 self.assertEqual(result["decision"], "PLAN_APPROVED")
 
+    def test_runtime_model_usage_accepts_claude_identity_metadata(self) -> None:
+        self.write_state(planner=self.route())
+        model_usage = {
+            FABLE.FABLE_MODEL: {
+                "inputTokens": 367,
+                "outputTokens": 1039,
+                "cacheReadInputTokens": 0,
+                "cacheCreationInputTokens": 0,
+                "webSearchRequests": 0,
+                "costUSD": 0.05562,
+                "contextWindow": 1_000_000,
+                "maxOutputTokens": 64_000,
+                "canonicalModel": FABLE.FABLE_MODEL,
+                "provider": "firstParty",
+            }
+        }
+        result, _ = self.invoke_with_results(
+            FABLE.create_plan,
+            "packet",
+            model_response="PLAN_DRAFT\nDraft",
+            model_usage=model_usage,
+        )
+        self.assertEqual(result["used_models"], [FABLE.FABLE_MODEL])
+
+    def test_runtime_model_usage_accepts_reviewed_canonical_aliases(self) -> None:
+        alias_pairs = (
+            (FABLE.FABLE_MODEL, FABLE.FABLE_RESOLVED_PRIMARY_MODEL),
+            (FABLE.FABLE_RESOLVED_PRIMARY_MODEL, FABLE.FABLE_MODEL),
+        )
+        for reported_model, canonical_model in alias_pairs:
+            with self.subTest(
+                reported_model=reported_model, canonical_model=canonical_model
+            ):
+                self.assertEqual(
+                    FABLE._validate_runtime_models(
+                        {
+                            reported_model: {
+                                "canonicalModel": canonical_model,
+                                "provider": "firstParty",
+                                "outputTokens": 1,
+                            }
+                        }
+                    ),
+                    [reported_model],
+                )
+
+    def test_runtime_model_usage_identity_metadata_requires_numeric_usage(self) -> None:
+        with self.assertRaisesRegex(FABLE.AdvisorError, "[Rr]untime metadata"):
+            FABLE._validate_runtime_models(
+                {
+                    FABLE.FABLE_MODEL: {
+                        "canonicalModel": FABLE.FABLE_MODEL,
+                        "provider": "firstParty",
+                    }
+                }
+            )
+
+    def test_runtime_model_usage_identity_metadata_fails_closed(self) -> None:
+        malformed_metadata = (
+            (
+                FABLE.FABLE_MODEL,
+                {"canonicalModel": FABLE.OPUS_MODEL, "outputTokens": 1},
+            ),
+            (
+                FABLE.FABLE_MODEL,
+                {"canonicalModel": FABLE.FABLE_HELPER_MODEL, "outputTokens": 1},
+            ),
+            (
+                FABLE.FABLE_HELPER_MODEL,
+                {"canonicalModel": FABLE.FABLE_MODEL, "outputTokens": 1},
+            ),
+            (FABLE.FABLE_MODEL, {"provider": "bedrock", "outputTokens": 1}),
+            (
+                FABLE.FABLE_MODEL,
+                {"unexpectedIdentity": "firstParty", "outputTokens": 1},
+            ),
+        )
+        for reported_model, metadata in malformed_metadata:
+            with self.subTest(reported_model=reported_model, metadata=metadata):
+                with self.assertRaisesRegex(
+                    FABLE.AdvisorError, "[Rr]untime metadata"
+                ):
+                    FABLE._validate_runtime_models({reported_model: metadata})
+
     def test_each_operation_pins_its_authorized_seat_effort(self) -> None:
         self.write_state(planner=self.route("low"))
         created, create_calls = self.invoke_with_results(
@@ -750,7 +834,13 @@ class FableAdvisorMcpTests(unittest.TestCase):
             FABLE.review_plan,
             "packet",
             model_response="PLAN_APPROVED\nNo material gap.",
-            model_usage={FABLE.OPUS_MODEL: {"outputTokens": 12}},
+            model_usage={
+                FABLE.OPUS_MODEL: {
+                    "canonicalModel": FABLE.OPUS_MODEL,
+                    "provider": "firstParty",
+                    "outputTokens": 12,
+                }
+            },
         )
         self.assertEqual(result["model"], FABLE.OPUS_MODEL)
         self.assertEqual(result["effort"], "xhigh")
@@ -782,6 +872,18 @@ class FableAdvisorMcpTests(unittest.TestCase):
                 "packet",
                 model_response="PLAN_APPROVED\nNo material gap.",
                 model_usage={FABLE.FABLE_HELPER_MODEL: {"outputTokens": 1}},
+            )
+        with self.assertRaisesRegex(FABLE.AdvisorError, "[Rr]untime metadata"):
+            self.invoke_with_results(
+                FABLE.review_plan,
+                "packet",
+                model_response="PLAN_APPROVED\nNo material gap.",
+                model_usage={
+                    FABLE.OPUS_MODEL: {
+                        "canonicalModel": FABLE.FABLE_MODEL,
+                        "outputTokens": 12,
+                    }
+                },
             )
 
     def test_opus_planner_create_and_revise_pin_exact_route_and_primary_usage(
