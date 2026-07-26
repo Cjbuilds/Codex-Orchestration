@@ -21,6 +21,7 @@ OPERATION_SEATS = {
     "create_plan": "planner",
     "revise_plan": "planner",
     "review_plan": "advisor",
+    "create_design": "designer",
 }
 
 
@@ -70,8 +71,15 @@ def status(
 ) -> dict[str, Any]:
     """Check route and first-party login without making a model call."""
 
-    _require(seat in {"planner", "advisor"}, "subscription seat is unsupported")
-    operation = "create_plan" if seat == "planner" else "review_plan"
+    _require(
+        seat in {"planner", "advisor", "designer"},
+        "subscription seat is unsupported",
+    )
+    operation = {
+        "planner": "create_plan",
+        "advisor": "review_plan",
+        "designer": "create_design",
+    }[seat]
     provider, selected_effort = validate_route(
         provider_id, model, effort, operation
     )
@@ -109,6 +117,7 @@ def invoke(
         "create_plan": {"packet"},
         "revise_plan": {"task", "current_plan", "critique", "history"},
         "review_plan": {"packet"},
+        "create_design": {"packet"},
     }
     _require(
         type(arguments) is dict and set(arguments) == expected_keys[operation],
@@ -132,6 +141,7 @@ def invoke(
         "create_plan": fable_advisor_mcp.create_plan,
         "revise_plan": fable_advisor_mcp.revise_plan,
         "review_plan": fable_advisor_mcp.review_plan,
+        "create_design": fable_advisor_mcp.create_design,
     }
     result = dispatch[operation](**arguments)
     _require(

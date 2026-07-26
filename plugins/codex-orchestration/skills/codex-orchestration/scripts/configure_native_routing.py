@@ -41,8 +41,8 @@ except ModuleNotFoundError as exc:  # pragma: no cover - Python < 3.11
     raise SystemExit("Python 3.11 or newer is required (missing tomllib).") from exc
 
 
-POLICY_VERSION = 5
-STATE_SCHEMA = 5
+POLICY_VERSION = 6
+STATE_SCHEMA = 6
 ADVISOR_REVIEW_LIMIT = 8
 STATE_FILENAME = ".codex-orchestration-routing.json"
 PROBE_VALUE = "CODEX_ORCHESTRATION_CAPABILITY_PROBE"
@@ -152,7 +152,18 @@ def parse_args() -> argparse.Namespace:
         help="Exact supported advisor effort, or auto.",
     )
 
-    parser.add_argument("--designer-model", help="Optional exact designer model ID.")
+    designer = parser.add_mutually_exclusive_group()
+    designer.add_argument(
+        "--designer-opus",
+        action="store_true",
+        help="Use the bundled Claude Opus 5 Designer through Claude Code.",
+    )
+    # Keep --designer-model in the group for argparse's mutual exclusion.
+    designer.add_argument(
+        "--designer-model",
+        dest="designer_model",
+        help="Optional exact designer model ID.",
+    )
     parser.add_argument(
         "--designer-effort",
         default="auto",
@@ -207,6 +218,7 @@ def _validate_args(args: argparse.Namespace) -> None:
             args.advisor_agent,
             args.advisor_fable,
             args.advisor_opus,
+            args.designer_opus,
             args.designer_model,
             args.executor_effort != "auto",
             args.planner_effort != "auto",
@@ -254,6 +266,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         normalize_opus_effort(args.planner_effort)
     if args.advisor_opus:
         normalize_opus_effort(args.advisor_effort)
+    if args.designer_opus:
+        normalize_opus_effort(args.designer_effort)
     if sum(
         bool(selected)
         for selected in (
@@ -265,7 +279,7 @@ def _validate_args(args: argparse.Namespace) -> None:
     ) > 1:
         raise ConfigurationError(
             "Planner and Advisor routes must be distinct; configure at most one "
-            "bundled Claude subscription seat."
+            "bundled Claude subscription planning seat."
         )
     for label, value, pattern in (
         ("executor model", args.executor_model, MODEL_RE),
@@ -457,7 +471,7 @@ class AppServer:
                     "clientInfo": {
                         "name": "codex_orchestration_installer",
                         "title": "Codex Orchestration Installer",
-                        "version": "0.9.3",
+                        "version": "0.10.0",
                     },
                     "capabilities": {"experimentalApi": True},
                 },
@@ -647,29 +661,52 @@ def fable_key_path(server: str) -> str:
 def validate_planning_routes(
     planner: dict[str, Any] | None,
     advisor: dict[str, Any] | None,
+    designer: dict[str, Any] | None = None,
 ) -> None:
     """Reject routes that cannot provide independent planning and review seats."""
 
-    if planner is None or advisor is None:
-        return
-    planner_kind = planner.get("kind")
-    advisor_kind = advisor.get("kind")
-    subscription_kinds = {"fable", "claude_subscription"}
-    identical = (
-        planner_kind == advisor_kind == "model"
-        and planner.get("model") == advisor.get("model")
-    ) or (
-        planner_kind == advisor_kind == "agent"
-        and planner.get("agent") == advisor.get("agent")
-    ) or (
-        planner_kind in subscription_kinds and advisor_kind in subscription_kinds
-    )
-    if identical:
-        raise ConfigurationError(
-            "Planner and Advisor routes must be distinct (different direct model IDs, "
-            "different custom-agent names, and at most one bundled Claude "
-            "subscription seat)."
+    if planner is not None and advisor is not None:
+        planner_kind = planner.get("kind")
+        advisor_kind = advisor.get("kind")
+        subscription_kinds = {"fable", "claude_subscription"}
+        identical = (
+            planner_kind == advisor_kind == "model"
+            and planner.get("model") == advisor.get("model")
+        ) or (
+            planner_kind == advisor_kind == "agent"
+            and planner.get("agent") == advisor.get("agent")
+        ) or (
+            planner_kind in subscription_kinds and advisor_kind in subscription_kinds
         )
+        if identical:
+            raise ConfigurationError(
+                "Planner and Advisor routes must be distinct (different direct model IDs, "
+                "different custom-agent names, and at most one bundled Claude "
+                "subscription seat)."
+            )
+    if isinstance(designer, dict) and designer.get("kind") == "claude_subscription":
+        if planner is not None and planner.get("kind") in {
+            "fable",
+            "claude_subscription",
+        }:
+            if planner.get("kind") != "claude_subscription" or planner.get(
+                "model"
+            ) != OPUS_MODEL or planner.get("server") != designer.get("server"):
+                raise ConfigurationError(
+                    "Designer subscription must share the exact Opus identity with "
+                    "the configured Planner or Advisor subscription seat."
+                )
+        if advisor is not None and advisor.get("kind") in {
+            "fable",
+            "claude_subscription",
+        }:
+            if advisor.get("kind") != "claude_subscription" or advisor.get(
+                "model"
+            ) != OPUS_MODEL or advisor.get("server") != designer.get("server"):
+                raise ConfigurationError(
+                    "Designer subscription must share the exact Opus identity with "
+                    "the configured Planner or Advisor subscription seat."
+                )
 
 
 def _read_state(path: Path) -> dict[str, Any] | None:
@@ -1208,7 +1245,7 @@ On PLAN_REVISE, record the latest finding IDs before revision. After the Planner
 
 When executor delegation materially improves speed, cost, quality, or context isolation, use only the configured executor route. Give each executor one bounded, self-contained packet with objective, relevant facts, constraints, owned files or read-only scope, dependencies, acceptance criteria, verification, and handoff format. Inspect every handoff, integrate it, and run final checks yourself.
 
-Explicit user instructions win, including no-subagents and task-local seat overrides. Persistent and task-local Planner and Advisor routes must remain distinct: reject the same direct model ID, the same custom-agent name, or more than one bundled Claude subscription seat. This policy does not create or change a Goal, weaken approvals, alter permissions, or force a worker count.
+Explicit user instructions win, including no-subagents and task-local seat overrides. Persistent and task-local Planner and Advisor routes must remain distinct: reject the same direct model ID, the same custom-agent name, or more than one bundled Claude subscription planning seat. An Opus Designer may share the exact Opus subscription identity with one planning seat. This policy does not create or change a Goal, weaken approvals, alter permissions, or force a worker count.
 
 Planner and Advisor are policy-isolated, root-directed seats: they cannot contact each other, Designer, or Executors, spawn descendants, edit files, execute work, or release Executor. They return only to the root. Designer is also root-directed: it cannot contact Planner, Advisor, or Executor, spawn descendants, redesign the root plan, change implementation code, or release Executor. Designer may edit only explicitly delegated design artifacts. Bundled Claude MCP requests do not carry caller identity, so caller isolation is instruction-enforced even though the bridge itself disables tools and persistence. If you are a spawned child, stay inside the supplied packet, report only to the root, never call planning tools, and never spawn descendants. An Executor never redesigns the root plan or contacts Planner, Advisor, or Designer.
 """
@@ -1253,12 +1290,21 @@ Planner and Advisor are policy-isolated, root-directed seats: they cannot contac
     else:
         advisor_hint = "No advisor route is configured."
     if designer is not None:
-        designer_hint = (
-            "For delegated design work, call this tool with "
-            f"{_spawn_route(designer)}, fork_turns = \"none\". Send approved "
-            "requirements, bounded deliverables, explicit design-artifact ownership, "
-            "constraints, and the required handoff format."
-        )
+        if designer["kind"] == "claude_subscription":
+            designer_hint = (
+                "For delegated design work, call `create_design` from MCP server "
+                f"{json.dumps(designer['server'])}. Send approved requirements, "
+                "bounded deliverables, explicit design-artifact ownership, constraints, "
+                "and the required handoff format. Require the first nonblank line "
+                "DESIGN_HANDOFF."
+            )
+        else:
+            designer_hint = (
+                "For delegated design work, call this tool with "
+                f"{_spawn_route(designer)}, fork_turns = \"none\". Send approved "
+                "requirements, bounded deliverables, explicit design-artifact ownership, "
+                "constraints, and the required handoff format."
+            )
     else:
         designer_hint = "No Designer route is configured."
     usage = f"""{MANAGED_MARKER}
@@ -1274,7 +1320,7 @@ For delegated executor work, call this tool with {_spawn_route(executor)}, fork_
 
 {provider_guard}
 
-Never use fork_turns = "all" with model, reasoning_effort, or agent_type: a full-history fork inherits the root route and rejects those overrides. Never silently substitute the root model when an exact child route is unavailable. Report the unavailable route to the root. A user's explicit current-task model, effort, agent, or no-subagents instruction overrides this saved default, but a task-local Planner and Advisor must still be distinct: reject the same direct model ID, the same custom-agent name, or more than one bundled Claude subscription seat.
+Never use fork_turns = "all" with model, reasoning_effort, or agent_type: a full-history fork inherits the root route and rejects those overrides. Never silently substitute the root model when an exact child route is unavailable. Report the unavailable route to the root. A user's explicit current-task model, effort, agent, or no-subagents instruction overrides this saved default, but a task-local Planner and Advisor must still be distinct: reject the same direct model ID, the same custom-agent name, or more than one bundled Claude subscription planning seat. An Opus Designer may share the exact Opus subscription identity with one planning seat.
 
 If you are a spawned child, do not call this tool or create descendants. Finish only your assigned packet and return to the root.
 """
@@ -1384,55 +1430,63 @@ def _managed_matches(state: dict[str, Any], current: dict[str, Any]) -> bool:
     return True
 
 
-def _subscription_seat(
+def _subscription_seats(
     planner: dict[str, Any] | None,
     advisor: dict[str, Any] | None,
-) -> tuple[str, dict[str, Any]] | None:
-    for seat, route in (("planner", planner), ("advisor", advisor)):
+    designer: dict[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    routes: dict[str, dict[str, Any]] = {}
+    for seat, route in (
+        ("planner", planner),
+        ("advisor", advisor),
+        ("designer", designer),
+    ):
         if isinstance(route, dict) and route.get("kind") in {
             "fable",
             "claude_subscription",
         }:
-            return seat, route
-    return None
+            routes[seat] = route
+    return routes
 
 
 def _guard_subscription_transition(
     existing_state: dict[str, Any] | None,
     planner: dict[str, Any] | None,
     advisor: dict[str, Any] | None,
+    designer: dict[str, Any] | None = None,
 ) -> None:
     """Require an explicit full disable before replacing or moving Opus."""
 
     if existing_state is None:
         return
-    existing = _subscription_seat(
-        existing_state.get("planner"), existing_state.get("advisor")
+    existing = _subscription_seats(
+        existing_state.get("planner"),
+        existing_state.get("advisor"),
+        existing_state.get("designer"),
     )
-    requested = _subscription_seat(planner, advisor)
-    if existing is None:
+    requested = _subscription_seats(planner, advisor, designer)
+    if not existing:
         return
-    existing_seat, existing_route = existing
-    opus_involved = existing_route.get("model") == OPUS_MODEL or (
-        requested is not None and requested[1].get("model") == OPUS_MODEL
-    )
-    if not opus_involved:
+    if not any(route.get("model") == OPUS_MODEL for route in existing.values()) and not any(
+        route.get("model") == OPUS_MODEL for route in requested.values()
+    ):
         return
-    same_route = (
-        requested is not None
-        and requested[0] == existing_seat
-        and requested[1].get("model") == existing_route.get("model")
-    )
-    if same_route:
+    def identity(route: dict[str, Any]) -> tuple[Any, Any, Any]:
+        return route.get("kind"), route.get("model"), route.get("server")
+    if all(
+        seat in requested and identity(requested[seat]) == identity(route)
+        for seat, route in existing.items()
+    ):
         return
-    requested_label = (
-        f"{requested[0]} {requested[1].get('model')}"
-        if requested is not None
-        else "no bundled Claude subscription seat"
+    existing_label = ", ".join(
+        f"{seat} {route.get('model')}" for seat, route in existing.items()
     )
+    requested_label = ", ".join(
+        f"{seat} {route.get('model')}" for seat, route in requested.items()
+    ) or "no bundled Claude subscription seat"
     raise ConfigurationError(
         "Refusing to replace or move the existing "
-        f"{existing_seat} {existing_route.get('model')} route with {requested_label}. "
+        f"{existing_label} route with {requested_label}. "
         "First run configure_native_routing.py --disable --apply, then run one "
         "fresh complete setup command."
     )
@@ -1530,7 +1584,7 @@ def _status(
             print(f"Designer: {_route_summary(designer) if designer else 'none'}")
             subscription_routes = [
                 route
-                for route in (planner, advisor)
+                for route in (planner, advisor, designer)
                 if isinstance(route, dict)
                 and route.get("kind") in {"fable", "claude_subscription"}
             ]
@@ -1631,7 +1685,7 @@ def _prepare_setup_state(
     current = _current_values(config)
     feature = current["feature"]
     scalar_feature = isinstance(feature, bool)
-    _guard_subscription_transition(existing_state, planner, advisor)
+    _guard_subscription_transition(existing_state, planner, advisor, designer)
 
     if existing_state is not None:
         if not _managed_matches(existing_state, current):
@@ -1788,7 +1842,7 @@ def _prepare_setup_state(
         any(
             isinstance(route, dict)
             and route.get("kind") in {"fable", "claude_subscription"}
-            for route in (planner, advisor)
+            for route in (planner, advisor, designer)
         )
         or isinstance(existing_managed, dict)
         and isinstance(existing_managed.get("mcp"), dict)
@@ -1801,7 +1855,7 @@ def _prepare_setup_state(
         subscription_route = next(
             (
                 route
-                for route in (planner, advisor)
+                for route in (planner, advisor, designer)
                 if isinstance(route, dict)
                 and route.get("kind") in {"fable", "claude_subscription"}
             ),
@@ -1990,12 +2044,12 @@ def _repair(
     subscription_configured = any(
         isinstance(route, dict)
         and route.get("kind") in {"fable", "claude_subscription"}
-        for route in (state.get("planner"), state.get("advisor"))
+        for route in (state.get("planner"), state.get("advisor"), state.get("designer"))
     )
     if subscription_configured:
         configured_model = next(
             route.get("model")
-            for route in (state.get("planner"), state.get("advisor"))
+            for route in (state.get("planner"), state.get("advisor"), state.get("designer"))
             if isinstance(route, dict)
             and route.get("kind") in {"fable", "claude_subscription"}
         )
@@ -2276,6 +2330,7 @@ def main() -> int:
                     or args.planner_opus
                     or args.advisor_fable
                     or args.advisor_opus
+                    or args.designer_opus
                 )
                 else None
             )
@@ -2339,7 +2394,14 @@ def main() -> int:
                     "server": subscription_server,
                 }
 
-            if args.designer_model:
+            if args.designer_opus:
+                designer = {
+                    "kind": "claude_subscription",
+                    "model": OPUS_MODEL,
+                    "effort": normalize_opus_effort(args.designer_effort),
+                    "server": subscription_server,
+                }
+            elif args.designer_model:
                 designer_effort = resolve_model_effort(
                     "Designer",
                     args.designer_model,
@@ -2352,10 +2414,10 @@ def main() -> int:
                     "model": args.designer_model,
                     "effort": designer_effort,
                 }
-            validate_planning_routes(planner, advisor)
+            validate_planning_routes(planner, advisor, designer)
             subscription_prerequisites = {
                 (route["model"], route["effort"])
-                for route in (planner, advisor)
+                for route in (planner, advisor, designer)
                 if isinstance(route, dict)
                 and route.get("kind") in {"fable", "claude_subscription"}
             }
@@ -2401,7 +2463,7 @@ def main() -> int:
             if subscription_auth is not None:
                 subscription_label = (
                     "Claude Opus 5"
-                    if args.planner_opus or args.advisor_opus
+                    if args.planner_opus or args.advisor_opus or args.designer_opus
                     else "Claude Fable 5"
                 )
                 print(

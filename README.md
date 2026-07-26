@@ -101,6 +101,11 @@ Or use Claude Opus 5 as the Advisor:
 $codex-orchestration:codex-orchestration setup advisor: Claude Opus 5 XHigh, executor: GPT-5.6 Luna Extra High
 ```
 
+Opus can also be the persistent Designer and share the same exact subscription
+identity with one Opus Planner or Advisor. The native form is
+`--designer-opus --designer-effort max`; its sealed read-only MCP adapter exposes
+`create_design` and requires a first-line `DESIGN_HANDOFF` response.
+
 After setup, start another new task and use Codex normally. The saved workflow applies automatically.
 
 Fable defaults to **High**. You can choose **Low**, **Medium**, **High**, **XHigh**, or **Max**. **Ultra** is accepted as an alias for Max because Claude Code does not expose a separate Ultra effort.
@@ -195,14 +200,16 @@ the explicitly billable isolated Gate 0. New providers or subscription CLIs stil
 require a reviewed bundled manifest and adapter; arbitrary URLs and arbitrary local
 CLIs are not auto-trusted.
 
-Fable 5 and Opus 5 are sealed subscription exceptions available only as Planner
-or Advisor through first-party Claude login. Only one bundled Claude subscription
-seat may be configured at a time; neither model is a Designer, Executor, general
-custom role, or Desktop picker entry. See the
+Fable 5 is a sealed subscription exception available only as Planner or Advisor
+through first-party Claude login. Opus 5 may be configured as Designer and may
+share its exact subscription identity with exactly one Planner or Advisor seat;
+Fable remains Planner/Advisor-only. Neither model is an Executor, general custom
+role, or Desktop picker entry. The Opus Designer uses the read-only `create_design`
+MCP operation and supports `low`, `medium`, `high`, `xhigh`, and `max`. See the
 [External Models reference](plugins/codex-orchestration/skills/codex-orchestration/references/external-models.md)
 for commands, lifecycle states, extension rules, and threat boundaries.
 Fable 5 is the bundled cross-provider exception retained for compatibility;
-Opus 5 is the second sealed bundled exception added in version 0.9.0.
+Opus 5 is the second sealed bundled exception, now also available as Designer.
 
 The bundled Claude bridge starts each authentication and model subprocess with
 only a minimal platform environment. It preserves `HOME` plus canonical

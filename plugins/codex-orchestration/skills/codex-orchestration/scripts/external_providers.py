@@ -102,13 +102,17 @@ def validate_provider(value: Any, *, expected_id: str | None = None) -> dict[str
             adapter["module"] == "fable_advisor_mcp",
             "subscription adapter module is not sealed",
         )
+        expected_seats = ["planner", "advisor"]
+        expected_operations = ["create_plan", "revise_plan", "review_plan"]
+        if provider_id == "claude-opus":
+            expected_seats.append("designer")
+            expected_operations.append("create_design")
         _require(
-            adapter["allowed_seats"] == ["planner", "advisor"],
+            adapter["allowed_seats"] == expected_seats,
             "subscription seats are unsupported",
         )
         _require(
-            adapter["allowed_operations"]
-            == ["create_plan", "revise_plan", "review_plan"],
+            adapter["allowed_operations"] == expected_operations,
             "subscription operations are unsupported",
         )
         _require(

@@ -73,7 +73,7 @@ Explicit seat labels are authoritative. `planner:` configures only Planner, `adv
 
 The executor is required for setup or a task-local override. It is not required for a custom-role creation request. Planner, advisor, and designer are optional: omitted planner means the current root model plans, omitted advisor means `advisor: none`, and omitted designer means `designer: none`. Do not ask separate planner or advisor questions, or a separate designer question, unless the user asks for help choosing them.
 
-For both persistent setup and task-local overrides, reject an identical Planner and Advisor route: the same direct model ID, the same custom-agent name, or more than one bundled Claude subscription seat across Fable 5 and Opus 5. Independent critique is required.
+For both persistent setup and task-local overrides, reject an identical Planner and Advisor route: the same direct model ID, the same custom-agent name, or more than one bundled Claude subscription planning seat across Fable 5 and Opus 5. An Opus Designer may share exactly that Opus subscription identity with one planning seat. Independent critique is required.
 
 If the executor is missing, ask only:
 
@@ -130,11 +130,14 @@ continue that work.
 
 If an old prompt contains `orchestrator:`, explain that the current task model already owns that role. Ignore that seat instead of switching or persisting it.
 
-Normalize `Extra High` to `xhigh`. For Claude Fable 5, accept `Low`, `Medium`, `High`, `XHigh`, `Max`, or `Ultra`. Omission or `Auto` means `High`; `Ultra` is a user-facing alias for Claude Code's actual `max` setting and must be reported as that mapping. Route Fable with `--planner-fable --planner-effort <normalized-effort>` or `--advisor-fable --advisor-effort <normalized-effort>`, not through the Codex model catalog. For Claude Opus 5, accept exactly `Low`, `Medium`, `High`, `XHigh`, or `Max`; omission or `Auto` means `High`, and `Ultra` is not an alias. Route it with `--planner-opus` or `--advisor-opus` plus the normalized effort. Resolve every other display name to an exact ID only through the executing host's model catalog, picker, a loaded custom agent, or official provider documentation. Never invent an ID. For persistent direct routing, resolve `auto` to the catalog's concrete default.
+Normalize `Extra High` to `xhigh`. For Claude Fable 5, accept `Low`, `Medium`, `High`, `XHigh`, `Max`, or `Ultra`. Omission or `Auto` means `High`; `Ultra` is a user-facing alias for Claude Code's actual `max` setting and must be reported as that mapping. Route Fable with `--planner-fable --planner-effort <normalized-effort>` or `--advisor-fable --advisor-effort <normalized-effort>`, not through the Codex model catalog. For Claude Opus 5, accept exactly `Low`, `Medium`, `High`, `XHigh`, or `Max`; omission or `Auto` means `High`, and `Ultra` is not an alias. Route it with `--planner-opus`, `--advisor-opus`, or `--designer-opus` plus the normalized effort. Resolve every other display name to an exact ID only through the executing host's model catalog, picker, a loaded custom agent, or official provider documentation. Never invent an ID. For persistent direct routing, resolve `auto` to the catalog's concrete default.
 
-Persistent Designer accepts only a direct same-provider model, not a bundled Claude
-MCP or unqualified custom-agent route. Route it with `--designer-model` plus
-`--designer-effort`. A Designer route may share a model with another seat; only
+Persistent Designer accepts a direct same-provider model or the sealed Claude Opus
+subscription route. Route Opus with `--designer-opus --designer-effort` (including
+`xhigh` or `max`); it may share the exact Opus subscription identity with exactly
+one Planner or Advisor seat. Fable remains Planner/Advisor-only. The Opus Designer
+uses the read-only MCP `create_design` operation and requires `DESIGN_HANDOFF` as
+its first nonblank response line. A direct Designer route may share a model with another seat; only
 Planner and Advisor require independent routes. For a cross-provider Designer,
 create and invoke a task-local External Model role named `designer`; `resolve` must
 reject matching project agents in the current workspace or any ancestor immediately
@@ -304,7 +307,8 @@ accepted only through preview/apply `trust-helper` at the same absolute path, wh
 clears qualification and requires authentication plus Gate 0 again.
 
 Claude Fable 5 and Claude Opus 5 are the sealed first-party subscription adapters.
-They use only the Planner/Advisor MCP operations and existing first-party login,
+Fable uses only Planner/Advisor MCP operations; Opus additionally uses the
+read-only `create_design` Designer operation. Both use existing first-party login,
 no-tools, no-session-persistence, runtime-model-metadata contract. Do not route
 them through the native External Model provider configurator and do not generalize
 their adapter to arbitrary CLIs.
@@ -625,9 +629,9 @@ A configured Planner or Advisor is required by default. Route failure, malformed
 
 Do not persist a best-effort flag. An explicit task override applies only to that task.
 
-Reject persistent setup or task-local activation when configured Planner and Advisor routes are identical: the same direct model ID, same custom-agent name, or more than one bundled Claude subscription seat. Independent critique is the reason for the Advisor role.
+Reject persistent setup or task-local activation when configured Planner and Advisor routes are identical: the same direct model ID, same custom-agent name, or more than one bundled Claude subscription planning seat. An Opus Designer may share exactly that Opus subscription identity with one planning seat. Independent critique is the reason for the Advisor role.
 
-Bundled Claude Planner routes use `create_plan` and `revise_plan`; bundled Claude Advisor routes use `review_plan`. These operations are seat-bound: never send a supplied Planner route to `review_plan`, and never use an Advisor route to create or revise the plan. The policy authorizes only the root to make these read-only calls; Executors must never use or direct them.
+Bundled Claude Planner routes use `create_plan` and `revise_plan`; bundled Claude Advisor routes use `review_plan`; an Opus Designer uses `create_design`. These operations are seat-bound: never send a supplied Planner route to `review_plan`, and never use an Advisor route to create or revise the plan. The policy authorizes only the root to make these read-only calls; Executors must never use or direct them.
 
 For compatibility with the established seat contract: Fable Planner uses `create_plan` and `revise_plan`; Fable Advisor uses `review_plan`. Opus uses the same operation-to-seat mapping.
 

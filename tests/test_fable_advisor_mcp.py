@@ -636,6 +636,11 @@ class FableAdvisorMcpTests(unittest.TestCase):
             {"outputTokens": True},
             {"": 12},
             {"outputTokens": "12"},
+            {"outputTokens": 12, "canonicalModel": 7},
+            {"outputTokens": 12, "canonicalModel": "claude-sonnet-5"},
+            {"outputTokens": 12, "provider": 7},
+            {"outputTokens": 12, "provider": "bedrock"},
+            {"outputTokens": 12, "unexpectedIdentity": "firstParty"},
         )
         for usage_value in malformed_values:
             with self.subTest(usage_value=usage_value):
@@ -673,6 +678,32 @@ class FableAdvisorMcpTests(unittest.TestCase):
                     model_usage=usage,
                 )
                 self.assertEqual(result["decision"], "PLAN_APPROVED")
+
+    def test_runtime_model_usage_accepts_claude_code_2_1_220_identity_fields(
+        self,
+    ) -> None:
+        model_usage = {
+            FABLE.FABLE_MODEL: {
+                "inputTokens": 10,
+                "outputTokens": 12,
+                "cacheReadInputTokens": 3,
+                "cacheCreationInputTokens": 4,
+                "webSearchRequests": 0,
+                "costUSD": 0.25,
+                "contextWindow": 200_000,
+                "maxOutputTokens": 32_000,
+                "canonicalModel": FABLE.FABLE_MODEL,
+                "provider": "firstParty",
+            }
+        }
+        result, _ = self.invoke_with_results(
+            FABLE.review_plan,
+            "packet",
+            model_response="PLAN_APPROVED\nNo material gap found.",
+            model_usage=model_usage,
+        )
+        self.assertEqual(result["decision"], "PLAN_APPROVED")
+        self.assertEqual(result["used_models"], [FABLE.FABLE_MODEL])
 
     def test_each_operation_pins_its_authorized_seat_effort(self) -> None:
         self.write_state(planner=self.route("low"))
@@ -843,6 +874,58 @@ class FableAdvisorMcpTests(unittest.TestCase):
             "# CANONICAL_CURRENT_PLAN_WITH_SOURCE_VERSION\nv1 canonical plan",
             revise_kwargs["input"],
         )
+
+    def test_opus_designer_create_design_is_pinned_read_only_and_json_rpc_dispatches(
+        self,
+    ) -> None:
+        self.write_state(schema=6, designer=self.opus_route("max"))
+        result, calls = self.invoke_with_results(
+            FABLE.create_design,
+            "approved design packet",
+            model_response="DESIGN_HANDOFF\nA bounded design handoff.",
+            model_usage={FABLE.OPUS_MODEL: {"outputTokens": 12}},
+        )
+        self.assertEqual(result["signal"], "DESIGN_HANDOFF")
+        self.assertEqual(result["design"], "DESIGN_HANDOFF\nA bounded design handoff.")
+        command, kwargs = calls[1]
+        self.assertEqual(command[command.index("--model") + 1], FABLE.OPUS_MODEL)
+        self.assertEqual(command[command.index("--effort") + 1], "max")
+        self.assertEqual(command[command.index("--tools") + 1], "")
+        self.assertIn("--no-session-persistence", command)
+        self.assertNotIn("--json-schema", command)
+        self.assertEqual(kwargs["input"], "approved design packet")
+        self.assertEqual(
+            command[command.index("--system-prompt") + 1],
+            FABLE.DESIGNER_SYSTEM_PROMPT,
+        )
+
+        with self.assertRaisesRegex(FABLE.AdvisorError, "DESIGN_HANDOFF"):
+            self.invoke_with_results(
+                FABLE.create_design,
+                "packet",
+                model_response="WRONG_SIGNAL\nNo handoff.",
+                model_usage={FABLE.OPUS_MODEL: {"outputTokens": 1}},
+            )
+
+        self.write_state(schema=6, designer=self.route())
+        with self.assertRaises(FABLE.AdvisorError):
+            FABLE.load_fable_route(self.home, seat="designer")
+
+        dispatched = {"signal": "DESIGN_HANDOFF", "design": "handoff"}
+        with mock.patch.object(FABLE, "create_design", return_value=dispatched):
+            response = FABLE.handle_request(
+                {
+                    "method": "tools/call",
+                    "id": 7,
+                    "params": {
+                        "name": "create_design",
+                        "arguments": {"packet": "packet"},
+                    },
+                }
+            )
+        self.assertEqual(response["id"], 7)
+        self.assertEqual(response["result"]["isError"], False)
+        self.assertIn("DESIGN_HANDOFF", response["result"]["content"][0]["text"])
 
     def test_authorization_state_tampering_fails_before_any_subprocess(self) -> None:
         mutations = {
@@ -1246,7 +1329,7 @@ class FableAdvisorMcpTests(unittest.TestCase):
         tools = listed["result"]["tools"]
         self.assertEqual(
             [tool["name"] for tool in tools],
-            ["create_plan", "revise_plan", "review_plan", "status"],
+            ["create_plan", "revise_plan", "review_plan", "create_design", "status"],
         )
         for tool in tools:
             annotations = tool["annotations"]

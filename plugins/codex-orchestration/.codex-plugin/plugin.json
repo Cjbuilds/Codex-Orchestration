@@ -1,6 +1,6 @@
 {
   "name": "codex-orchestration",
-  "version": "0.9.3",
+  "version": "0.10.0",
   "description": "Give Codex and audited external models safe, provider-pinned roles.",
   "author": {
     "name": "CJ Zafir",
@@ -21,7 +21,7 @@
   "interface": {
     "displayName": "Codex Orchestration",
     "shortDescription": "Plan, review, design, and build with multiple models",
-    "longDescription": "Use sealed Fable 5 or Opus 5 as one bundled Planner-or-Advisor subscription seat, and audited API models in supported bounded roles, without changing the root model or Desktop model picker.",
+    "longDescription": "Use sealed Fable 5 or Opus 5 as one bundled Planner-or-Advisor subscription seat; Opus may also be a persistent Designer, and audited API models remain available in supported bounded roles, without changing the root model or Desktop model picker.",
     "developerName": "CJ Zafir",
     "category": "Productivity",
     "websiteURL": "https://github.com/Cjbuilds/Codex-Orchestration",

@@ -246,6 +246,69 @@ class ExternalSubscriptionTests(unittest.TestCase):
         create.assert_called_once_with(packet="bounded planning packet")
         revise.assert_called_once_with(**revision_arguments)
 
+    def test_opus_designer_create_design_dispatch_and_status_are_sealed(self) -> None:
+        route = {"model": "claude-opus-5", "effort": "max"}
+        expected = {
+            "model": "claude-opus-5",
+            "effort": "max",
+            "used_models": ["claude-opus-5"],
+            "signal": "DESIGN_HANDOFF",
+            "design": "DESIGN_HANDOFF\nHandoff",
+        }
+        with (
+            mock.patch.object(
+                SUBSCRIPTION.fable_advisor_mcp,
+                "load_fable_route",
+                return_value=route,
+            ),
+            mock.patch.object(
+                SUBSCRIPTION.fable_advisor_mcp,
+                "create_design",
+                return_value=expected,
+            ) as create,
+        ):
+            result = SUBSCRIPTION.invoke(
+                "create_design",
+                {"packet": "approved design packet"},
+                provider_id="claude-opus",
+                model="claude-opus-5",
+                effort="max",
+            )
+        self.assertIs(result, expected)
+        create.assert_called_once_with(packet="approved design packet")
+
+        with self.assertRaises(SUBSCRIPTION.SubscriptionAdapterError):
+            SUBSCRIPTION.validate_route(
+                "claude-fable", "claude-fable-5", "high", "create_design"
+            )
+
+        with (
+            mock.patch.object(
+                SUBSCRIPTION.fable_advisor_mcp,
+                "load_fable_route",
+                return_value=route,
+            ),
+            mock.patch.object(
+                SUBSCRIPTION.fable_advisor_mcp,
+                "resolve_claude",
+                return_value=Path("/trusted/claude"),
+            ),
+            mock.patch.object(
+                SUBSCRIPTION.fable_advisor_mcp,
+                "check_claude_auth",
+                return_value={"auth_method": "claude.ai", "api_provider": "firstParty"},
+            ),
+        ):
+            status = SUBSCRIPTION.status(
+                provider_id="claude-opus",
+                model="claude-opus-5",
+                effort="max",
+                seat="designer",
+            )
+        self.assertEqual(status["seat"], "designer")
+        self.assertEqual(status["effort"], "max")
+        self.assertFalse(status["model_call"])
+
 
 if __name__ == "__main__":
     unittest.main()
