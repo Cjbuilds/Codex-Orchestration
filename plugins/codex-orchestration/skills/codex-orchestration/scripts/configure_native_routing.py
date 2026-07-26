@@ -456,7 +456,7 @@ class AppServer:
                     "clientInfo": {
                         "name": "codex_orchestration_installer",
                         "title": "Codex Orchestration Installer",
-                        "version": "0.9.0",
+                        "version": "0.9.1",
                     },
                     "capabilities": {"experimentalApi": True},
                 },
@@ -1005,6 +1005,7 @@ def verify_claude_prerequisites(model: str, effort: str) -> dict[str, str]:
         "--no-session-persistence",
         "--prompt-suggestions",
         "--output-format",
+        "--json-schema",
         "--system-prompt",
     )
     advertised_options = set(

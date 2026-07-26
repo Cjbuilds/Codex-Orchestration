@@ -228,22 +228,25 @@ On Windows, in-place update and removal stage the replacement beside the existin
 
 Direct v2 `model` overrides retain the parent's provider. They are the simplest route for an OpenAI root and OpenAI Luna/Terra child.
 
-Claude Fable 5 and Claude Opus 5 are explicit built-in exceptions for Planner or Advisor. The plugin does not pretend either is a Codex model or translate Anthropic into the Responses protocol. Instead, a disabled-by-default local MCP server invokes the official `claude` CLI with the user's first-party Pro or Max login. Setup enables one Python 3.11+ launcher variant, and disable restores every prior plugin override value. The historical `fable-advisor-*` IDs are compatibility names shared by both sealed models. Codex's TOML editor can retain an inert empty table header after its final key is deleted; the configurator does not risk a broad TOML rewrite for cosmetic cleanup.
+Claude Fable 5 and Claude Opus 5 are explicit built-in exceptions for Planner or Advisor. The plugin does not pretend either is a Codex model or translate Anthropic into the Responses protocol. Instead, a disabled-by-default local MCP server invokes the official `claude` CLI with the user's first-party Pro, Max, or Team login. Setup enables one Python 3.11+ launcher variant, and disable restores every prior plugin override value. The historical `fable-advisor-*` IDs are compatibility names shared by both sealed models. Codex's TOML editor can retain an inert empty table header after its final key is deleted; the configurator does not risk a broad TOML rewrite for cosmetic cleanup.
 
-The bridge starts both `claude auth status` and model calls with only a minimal
-platform environment. It preserves canonical `HOME` on POSIX or `USERPROFILE` on
-Windows so the official CLI can discover the first-party login, but it does not
-inherit credential, config-redirection, provider/model/effort, endpoint/gateway,
-proxy/CA/mTLS, or telemetry override families. It pins the saved primary and effort,
-disables tools and session persistence, disables prompt suggestions, and requires
-JSON runtime metadata to contain that primary. Claude Code currently reports the
-internal helper `claude-haiku-4-5-20251001` during valid Fable calls; the bridge
-permits only that exact helper ID. No Opus helper identity is independently
-established, so the Opus runtime allowlist currently contains only `claude-opus-5`.
-Any missing primary or unknown additional model fails closed. Helper rotation
-therefore requires a reviewed plugin update rather than a wildcard. Setup and status
-never make a model call, and mocked local tests do not constitute a positive live
-Opus invocation.
+The bridge starts both `claude auth status --json` and model calls with only a
+minimal platform environment. It preserves `HOME` plus canonical
+operating-system `USER` and `LOGNAME` on POSIX, or `USERPROFILE` on Windows, so
+the official CLI can discover the first-party login. Ambient POSIX identity,
+credential, config-redirection, provider/model/effort, endpoint/gateway,
+proxy/CA/mTLS, and telemetry override families are not trusted. It pins the
+saved route and effort, disables tools and session persistence, disables prompt
+suggestions, and requires JSON runtime metadata to contain an allowed primary.
+For the Fable route, the reviewed primary identities are `claude-fable-5` and
+its resolved runtime identity `claude-opus-4-8`; only the exact internal helper
+`claude-haiku-4-5-20251001` is additionally permitted. The separate Opus route
+still requires `claude-opus-5`, with no helper. Advisor decisions use
+`--json-schema` and are locally revalidated; raw prose is not approval. Any
+missing primary or unknown additional model fails closed. Identity rotation
+therefore requires a reviewed plugin update rather than a wildcard. Setup and
+status never make a model call, and mocked local tests do not constitute a
+positive live Opus invocation.
 
 An MCP process is loaded for the lifetime of its Codex task. Updating the plugin or
 repairing policy state cannot replace that already loaded process. If a current-task

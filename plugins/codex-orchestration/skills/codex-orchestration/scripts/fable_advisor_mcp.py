@@ -33,7 +33,16 @@ SUPPORTED_EFFORTS = routing_state.FABLE_EFFORTS
 # some calls. Keep the runtime policy explicit and fail closed if that identity
 # rotates or any other model appears.
 FABLE_HELPER_MODEL = "claude-haiku-4-5-20251001"
-ALLOWED_RUNTIME_MODELS = frozenset({FABLE_MODEL, FABLE_HELPER_MODEL})
+FABLE_RESOLVED_PRIMARY_MODEL = "claude-opus-4-8"
+REVIEWED_PRIMARY_MODELS_BY_ROUTE = {
+    FABLE_MODEL: frozenset({FABLE_MODEL, FABLE_RESOLVED_PRIMARY_MODEL}),
+    # The resolved Fable identity is not an alias for the separately sealed
+    # Opus route. Opus remains primary-only until independently re-qualified.
+    OPUS_MODEL: frozenset({OPUS_MODEL}),
+}
+ALLOWED_RUNTIME_MODELS = frozenset(
+    {*REVIEWED_PRIMARY_MODELS_BY_ROUTE[FABLE_MODEL], FABLE_HELPER_MODEL}
+)
 ALLOWED_RUNTIME_MODELS_BY_PRIMARY = {
     FABLE_MODEL: ALLOWED_RUNTIME_MODELS,
     # No Opus helper identity has been independently verified. Fail closed if
@@ -44,6 +53,18 @@ CLAUDE_TIMEOUT_SECONDS = 600
 AUTH_TIMEOUT_SECONDS = 20
 # Applies to the combined user-controlled text sent by one model operation.
 MAX_INPUT_CHARS = 200_000
+PLAN_REVIEW_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "signal": {
+            "type": "string",
+            "enum": ["PLAN_APPROVED", "PLAN_REVISE"],
+        },
+        "body": {"type": "string", "minLength": 1},
+    },
+    "required": ["signal", "body"],
+    "additionalProperties": False,
+}
 SENSITIVE_ENV = {
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
@@ -105,8 +126,7 @@ STALE_BRIDGE_RECOVERY = (
 ADVISOR_SYSTEM_PROMPT = """You are the configured Claude model acting only as a plan advisor to Codex's root orchestrator.
 Review the supplied self-contained packet for material correctness, missing constraints, unsafe sequencing, ownership conflicts, and verification gaps. Do not edit files, call tools, spawn agents, contact the Planner or executors, or attempt implementation.
 
-Your first non-empty line must be exactly PLAN_APPROVED or PLAN_REVISE.
-Use PLAN_APPROVED only when no material gap is present. Use PLAN_REVISE when correction is needed. For PLAN_REVISE, assign every material finding a stable, unique finding ID and give a concrete correction. On later rounds, preserve IDs from the supplied cumulative ledger. Ignore style preferences. Report only to the root orchestrator."""
+Return the required structured fields `signal` and `body`. Use signal PLAN_APPROVED only when no material gap is present. Use PLAN_REVISE when correction is needed. The body must be non-empty. For PLAN_REVISE, assign every material finding a stable, unique finding ID and give a concrete correction. On later rounds, preserve IDs from the supplied cumulative ledger. Ignore style preferences. Report only to the root orchestrator."""
 
 PLANNER_CREATE_SYSTEM_PROMPT = """You are the configured Claude model acting only as a plan author for Codex's root orchestrator.
 Create a concrete implementation plan from the supplied self-contained packet. Include constraints, ownership, sequencing, acceptance criteria, security and compatibility boundaries, and behavioral plus regression verification. Do not edit files, call tools, spawn agents, contact the Advisor or executors, or attempt implementation.
@@ -142,6 +162,22 @@ def codex_home() -> Path:
     return Path(value).expanduser() if value else Path.home() / ".codex"
 
 
+def _canonical_posix_identity() -> str:
+    try:
+        import pwd
+
+        name = pwd.getpwuid(os.getuid()).pw_name
+    except (ImportError, KeyError, OSError, AttributeError) as exc:
+        raise AdvisorError(
+            "Could not determine the canonical POSIX login identity for Claude Code."
+        ) from exc
+    if not isinstance(name, str) or not name.strip():
+        raise AdvisorError(
+            "Could not determine the canonical POSIX login identity for Claude Code."
+        )
+    return name
+
+
 def sanitized_environment() -> dict[str, str]:
     common_names = ("PATH", "LANG", "LC_ALL", "LC_CTYPE")
     if os.name == "nt":
@@ -166,6 +202,9 @@ def sanitized_environment() -> dict[str, str]:
             for name in (*common_names, "HOME", "TMPDIR")
             if name in os.environ
         }
+        identity = _canonical_posix_identity()
+        env["USER"] = identity
+        env["LOGNAME"] = identity
     env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
     return env
 
@@ -215,17 +254,21 @@ def _run_json(command: list[str], *, timeout: int) -> dict[str, Any]:
 
 def check_claude_auth(claude: Path | None = None) -> dict[str, str]:
     executable = claude or resolve_claude()
-    payload = _run_json([str(executable), "auth", "status"], timeout=AUTH_TIMEOUT_SECONDS)
+    payload = _run_json(
+        [str(executable), "auth", "status", "--json"],
+        timeout=AUTH_TIMEOUT_SECONDS,
+    )
     subscription = payload.get("subscriptionType")
     if not (
         payload.get("loggedIn") is True
         and payload.get("authMethod") == "claude.ai"
         and payload.get("apiProvider") == "firstParty"
-        and subscription in {"pro", "max"}
+        and isinstance(subscription, str)
+        and subscription in {"pro", "max", "team"}
     ):
         raise AdvisorError(
-            "Claude Code must be logged in through a first-party Pro or Max account; "
-            "run `claude auth login` and try again."
+            "Claude Code must be logged in through a first-party Pro, Max, or Team "
+            "account; run `claude auth login` and try again."
         )
     return {"auth_method": "claude.ai", "api_provider": "firstParty"}
 
@@ -315,7 +358,8 @@ def _validate_runtime_models(
     usage: Any, primary_model: str = FABLE_MODEL
 ) -> list[str]:
     allowed_models = ALLOWED_RUNTIME_MODELS_BY_PRIMARY.get(primary_model)
-    if allowed_models is None:
+    reviewed_primaries = REVIEWED_PRIMARY_MODELS_BY_ROUTE.get(primary_model)
+    if allowed_models is None or reviewed_primaries is None:
         raise AdvisorError("The configured Claude primary model is not sealed.")
     policy_label = "Fable" if primary_model == FABLE_MODEL else "Claude"
     primary_label = (
@@ -349,9 +393,10 @@ def _validate_runtime_models(
                     "Runtime metadata has a malformed modelUsage value."
                 )
     used_models = sorted(raw_models)
-    if primary_model not in used_models:
+    if not set(used_models).intersection(reviewed_primaries):
         raise AdvisorError(
-            f"Runtime metadata did not confirm the pinned {primary_label} primary model."
+            f"Runtime metadata did not confirm the pinned {primary_label} primary "
+            "model or a reviewed resolved identity."
         )
     if not set(used_models).issubset(allowed_models):
         raise AdvisorError(
@@ -359,6 +404,104 @@ def _validate_runtime_models(
             "runtime policy."
         )
     return used_models
+
+
+def _normalize_model_payload(
+    payload: Any, *, display_name: str, operation: str
+) -> dict[str, Any]:
+    """Accept one legacy result object or one unambiguous result event."""
+
+    message = f"{display_name} {operation} returned an unexpected response."
+    if isinstance(payload, dict):
+        if "type" in payload and payload.get("type") != "result":
+            raise AdvisorError(message)
+        if "subtype" in payload and payload.get("subtype") != "success":
+            raise AdvisorError(message)
+        return payload
+    if not isinstance(payload, list) or not payload:
+        raise AdvisorError(message)
+    if not all(
+        isinstance(event, dict)
+        and isinstance(event.get("type"), str)
+        and bool(event["type"])
+        for event in payload
+    ):
+        raise AdvisorError(message)
+    result_events = [event for event in payload if event.get("type") == "result"]
+    if len(result_events) != 1:
+        raise AdvisorError(message)
+    selected = result_events[0]
+    if selected.get("subtype") not in (None, "success"):
+        raise AdvisorError(message)
+    content_fields = {"result", "modelUsage", "structured_output"}
+    if any(
+        event is not selected and content_fields.intersection(event)
+        for event in payload
+    ):
+        raise AdvisorError(message)
+    return selected
+
+
+def _validate_review_output(value: Any, *, display_name: str) -> dict[str, str]:
+    if not isinstance(value, dict) or set(value) != set(PLAN_REVIEW_SCHEMA["required"]):
+        raise AdvisorError(
+            f"{display_name} plan review returned invalid structured output."
+        )
+    signal = value.get("signal")
+    body = value.get("body")
+    if (
+        not isinstance(signal, str)
+        or signal not in {"PLAN_APPROVED", "PLAN_REVISE"}
+        or not isinstance(body, str)
+        or not body.strip()
+    ):
+        raise AdvisorError(
+            f"{display_name} plan review returned invalid structured output."
+        )
+    return {"signal": signal, "body": body.strip()}
+
+
+def _review_response(payload: dict[str, Any], *, display_name: str) -> tuple[str, str]:
+    structured_present = "structured_output" in payload
+    result_present = "result" in payload
+    structured = (
+        _validate_review_output(
+            payload.get("structured_output"),
+            display_name=display_name,
+        )
+        if structured_present
+        else None
+    )
+    legacy: dict[str, str] | None = None
+    if result_present:
+        raw_result = payload.get("result")
+        if not isinstance(raw_result, str):
+            raise AdvisorError(
+                f"{display_name} plan review returned invalid structured output."
+            )
+        try:
+            decoded_result = json.loads(raw_result)
+        except json.JSONDecodeError:
+            if structured is None:
+                raise AdvisorError(
+                    f"{display_name} plan review returned invalid structured output."
+                )
+        else:
+            legacy = _validate_review_output(
+                decoded_result,
+                display_name=display_name,
+            )
+    if structured is None and legacy is None:
+        raise AdvisorError(
+            f"{display_name} plan review returned invalid structured output."
+        )
+    if structured is not None and legacy is not None and structured != legacy:
+        raise AdvisorError(
+            f"{display_name} plan review returned conflicting structured output."
+        )
+    selected = structured or legacy
+    assert selected is not None
+    return selected["signal"], f"{selected['signal']}\n{selected['body']}"
 
 
 def _invoke_fable(
@@ -397,6 +540,17 @@ def _invoke_fable(
         "--system-prompt",
         system_prompt,
     ]
+    if operation == "plan review":
+        command.extend(
+            (
+                "--json-schema",
+                json.dumps(
+                    PLAN_REVIEW_SCHEMA,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+            )
+        )
     try:
         result = subprocess.run(
             command,
@@ -417,19 +571,33 @@ def _invoke_fable(
             f"{display_name} {operation} exited with {result.returncode}; output withheld."
         )
     try:
-        payload = json.loads(result.stdout)
+        decoded = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
         raise AdvisorError(f"{display_name} {operation} returned malformed JSON.") from exc
-    if not isinstance(payload, dict) or not isinstance(payload.get("result"), str):
-        raise AdvisorError(f"{display_name} {operation} returned an unexpected response.")
+    payload = _normalize_model_payload(
+        decoded,
+        display_name=display_name,
+        operation=operation,
+    )
     # Authorize the complete runtime identity set before interpreting or
     # returning any model-authored plan/review content.
     used_models = _validate_runtime_models(payload.get("modelUsage"), route["model"])
-    response = payload["result"].strip()
-    signal = _first_non_empty_line(response)
+    if operation == "plan review":
+        signal, response = _review_response(payload, display_name=display_name)
+    else:
+        if "structured_output" in payload or not isinstance(
+            payload.get("result"), str
+        ):
+            raise AdvisorError(
+                f"{display_name} {operation} returned an unexpected response."
+            )
+        response = payload["result"].strip()
+        signal = _first_non_empty_line(response)
     if signal not in allowed_signals:
         if operation == "plan review":
-            raise AdvisorError(f"{display_name} omitted the required plan decision.")
+            raise AdvisorError(
+                f"{display_name} returned an invalid structured plan decision."
+            )
         expected = " or ".join(sorted(allowed_signals))
         raise AdvisorError(
             f"{display_name} {operation} omitted the required {expected} signal."

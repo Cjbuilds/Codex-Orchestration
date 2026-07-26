@@ -298,7 +298,7 @@ class NativeRoutingTests(unittest.TestCase):
             #!/usr/bin/env python3
             import json
             import sys
-            if sys.argv[1:] == ["auth", "status"]:
+            if sys.argv[1:] in (["auth", "status"], ["auth", "status", "--json"]):
                 print(json.dumps({
                     "loggedIn": True,
                     "authMethod": "claude.ai",
@@ -312,7 +312,7 @@ class NativeRoutingTests(unittest.TestCase):
                     "(low, medium, high, xhigh, max) "
                     "--safe-mode --tools --permission-mode "
                     "--no-session-persistence --prompt-suggestions "
-                    "--output-format --system-prompt"
+                    "--output-format --json-schema --system-prompt"
                 )
                 raise SystemExit(0)
             if sys.argv[1:] == ["--version"]:
@@ -2432,6 +2432,7 @@ class NativeRoutingTests(unittest.TestCase):
             "--no-session-persistence",
             "--prompt-suggestions",
             "--output-format",
+            "--json-schema",
             "--system-prompt",
         )
         for flag in required:
@@ -2540,6 +2541,7 @@ class NativeRoutingTests(unittest.TestCase):
             "--no-session-persistence",
             "--prompt-suggestions",
             "--output-format",
+            "--json-schema",
             "--system-prompt",
         )
         for flag in required:
@@ -2669,7 +2671,7 @@ class NativeRoutingTests(unittest.TestCase):
 
         self.assertEqual(status.returncode, 1)
         self.assertIn(
-            "must be logged in through a first-party Pro or Max account",
+            "must be logged in through a first-party Pro, Max, or Team account",
             status.stdout,
         )
 

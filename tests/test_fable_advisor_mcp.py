@@ -27,6 +27,8 @@ assert SPEC and SPEC.loader
 FABLE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(FABLE)
 DEFAULT_MODEL_USAGE = object()
+DEFAULT_STRUCTURED_OUTPUT = object()
+AUTO_STRUCTURED_OUTPUT = object()
 
 
 class FableAdvisorMcpTests(unittest.TestCase):
@@ -115,7 +117,9 @@ class FableAdvisorMcpTests(unittest.TestCase):
     ) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(command, returncode, stdout, stderr)
 
-    def auth_result(self) -> subprocess.CompletedProcess[str]:
+    def auth_result(
+        self, subscription_type: object = "max"
+    ) -> subprocess.CompletedProcess[str]:
         return self.completed(
             ["claude", "auth", "status"],
             json.dumps(
@@ -123,24 +127,38 @@ class FableAdvisorMcpTests(unittest.TestCase):
                     "loggedIn": True,
                     "authMethod": "claude.ai",
                     "apiProvider": "firstParty",
-                    "subscriptionType": "max",
+                    "subscriptionType": subscription_type,
                 }
             ),
         )
 
     def model_result(
-        self, response: str, *, model_usage: object = DEFAULT_MODEL_USAGE
+        self,
+        response: str,
+        *,
+        model_usage: object = DEFAULT_MODEL_USAGE,
+        structured_output: object = DEFAULT_STRUCTURED_OUTPUT,
+        as_events: bool = False,
     ) -> subprocess.CompletedProcess[str]:
+        payload: dict[str, object] = {
+            "result": response,
+            "modelUsage": model_usage
+            if model_usage is not DEFAULT_MODEL_USAGE
+            else {"claude-fable-5": {"outputTokens": 12}},
+        }
+        if structured_output is not DEFAULT_STRUCTURED_OUTPUT:
+            payload["structured_output"] = structured_output
+        outer: object = (
+            [
+                {"type": "system", "subtype": "init"},
+                {"type": "result", "subtype": "success", **payload},
+            ]
+            if as_events
+            else payload
+        )
         return self.completed(
             ["claude"],
-            json.dumps(
-                {
-                    "result": response,
-                    "modelUsage": model_usage
-                    if model_usage is not DEFAULT_MODEL_USAGE
-                    else {"claude-fable-5": {"outputTokens": 12}},
-                }
-            ),
+            json.dumps(outer),
         )
 
     def invoke_with_results(
@@ -149,6 +167,8 @@ class FableAdvisorMcpTests(unittest.TestCase):
         *args: str,
         model_response: str,
         model_usage: object = DEFAULT_MODEL_USAGE,
+        structured_output: object = AUTO_STRUCTURED_OUTPUT,
+        as_events: bool = False,
     ) -> tuple[dict[str, object], list[tuple[list[str], dict[str, object]]]]:
         calls: list[tuple[list[str], dict[str, object]]] = []
 
@@ -156,9 +176,37 @@ class FableAdvisorMcpTests(unittest.TestCase):
             command: list[str], **kwargs: object
         ) -> subprocess.CompletedProcess[str]:
             calls.append((command, kwargs))
-            if command[-2:] == ["auth", "status"]:
+            if command[-2:] == ["auth", "status"] or command[-3:] == [
+                "auth",
+                "status",
+                "--json",
+            ]:
                 return self.auth_result()
-            return self.model_result(model_response, model_usage=model_usage)
+            selected_structured_output = structured_output
+            if (
+                selected_structured_output is AUTO_STRUCTURED_OUTPUT
+                and function is FABLE.review_plan
+            ):
+                lines = model_response.strip().splitlines()
+                if (
+                    lines
+                    and lines[0] in {"PLAN_APPROVED", "PLAN_REVISE"}
+                    and "\n".join(lines[1:]).strip()
+                ):
+                    selected_structured_output = {
+                        "signal": lines[0],
+                        "body": "\n".join(lines[1:]).strip(),
+                    }
+                else:
+                    selected_structured_output = DEFAULT_STRUCTURED_OUTPUT
+            elif selected_structured_output is AUTO_STRUCTURED_OUTPUT:
+                selected_structured_output = DEFAULT_STRUCTURED_OUTPUT
+            return self.model_result(
+                model_response,
+                model_usage=model_usage,
+                structured_output=selected_structured_output,
+                as_events=as_events,
+            )
 
         with (
             mock.patch.dict(os.environ, {"CODEX_HOME": str(self.home)}),
@@ -169,6 +217,25 @@ class FableAdvisorMcpTests(unittest.TestCase):
         ):
             result = function(*args)
         return result, calls
+
+    def invoke_with_stdout(
+        self, function: object, *args: str, stdout: str
+    ) -> dict[str, object]:
+        with (
+            mock.patch.dict(os.environ, {"CODEX_HOME": str(self.home)}),
+            mock.patch.object(
+                FABLE, "resolve_claude", return_value=Path("/fake/claude")
+            ),
+            mock.patch.object(
+                FABLE.subprocess,
+                "run",
+                side_effect=[
+                    self.auth_result(),
+                    self.completed(["claude"], stdout),
+                ],
+            ),
+        ):
+            return function(*args)
 
     def test_review_is_pinned_sanitized_read_only_and_runtime_confirmed(self) -> None:
         env = {
@@ -181,9 +248,24 @@ class FableAdvisorMcpTests(unittest.TestCase):
             command: list[str], **kwargs: object
         ) -> subprocess.CompletedProcess[str]:
             calls.append((command, kwargs))
-            if command[-2:] == ["auth", "status"]:
+            if command[-2:] == ["auth", "status"] or command[-3:] == [
+                "auth",
+                "status",
+                "--json",
+            ]:
                 return self.auth_result()
-            return self.model_result("PLAN_APPROVED\nNo material gap found.")
+            return self.model_result(
+                json.dumps(
+                    {
+                        "signal": "PLAN_APPROVED",
+                        "body": "No material gap found.",
+                    }
+                ),
+                structured_output={
+                    "signal": "PLAN_APPROVED",
+                    "body": "No material gap found.",
+                },
+            )
 
         with (
             mock.patch.dict(os.environ, env, clear=False),
@@ -199,7 +281,7 @@ class FableAdvisorMcpTests(unittest.TestCase):
         self.assertEqual(result["used_models"], ["claude-fable-5"])
         self.assertNotIn("subscription_type", result)
         auth_command, auth_kwargs = calls[0]
-        self.assertEqual(auth_command[-2:], ["auth", "status"])
+        self.assertEqual(auth_command[-3:], ["auth", "status", "--json"])
         review_command, review_kwargs = calls[1]
         for flag in (
             "--print",
@@ -209,6 +291,7 @@ class FableAdvisorMcpTests(unittest.TestCase):
             "--no-session-persistence",
             "--prompt-suggestions",
             "--output-format",
+            "--json-schema",
             "--system-prompt",
         ):
             self.assertIn(flag, review_command)
@@ -227,6 +310,10 @@ class FableAdvisorMcpTests(unittest.TestCase):
         )
         self.assertEqual(
             review_command[review_command.index("--output-format") + 1], "json"
+        )
+        self.assertEqual(
+            json.loads(review_command[review_command.index("--json-schema") + 1]),
+            FABLE.PLAN_REVIEW_SCHEMA,
         )
         self.assertEqual(review_kwargs["input"], "Review this complete plan.")
         for kwargs in (auth_kwargs, review_kwargs):
@@ -265,6 +352,8 @@ class FableAdvisorMcpTests(unittest.TestCase):
                     "LC_CTYPE": "UTF-8",
                     "HOME": "/trusted/home",
                     "TMPDIR": "/trusted/tmp",
+                    "USER": "hostile-user",
+                    "LOGNAME": "hostile-logname",
                     "SystemRoot": r"C:\should-not-pass",
                     **hostile,
                 },
@@ -275,6 +364,8 @@ class FableAdvisorMcpTests(unittest.TestCase):
                     "LC_CTYPE": "UTF-8",
                     "HOME": "/trusted/home",
                     "TMPDIR": "/trusted/tmp",
+                    "USER": "trusted-user",
+                    "LOGNAME": "trusted-user",
                     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
                 },
             ),
@@ -318,13 +409,33 @@ class FableAdvisorMcpTests(unittest.TestCase):
                     command: list[str], **kwargs: object
                 ) -> subprocess.CompletedProcess[str]:
                     calls.append((command, kwargs))
-                    if command[-2:] == ["auth", "status"]:
+                    if command[-2:] == ["auth", "status"] or command[-3:] == [
+                        "auth",
+                        "status",
+                        "--json",
+                    ]:
                         return self.auth_result()
-                    return self.model_result("PLAN_APPROVED\nNo material gap found.")
+                    return self.model_result(
+                        json.dumps(
+                            {
+                                "signal": "PLAN_APPROVED",
+                                "body": "No material gap found.",
+                            }
+                        ),
+                        structured_output={
+                            "signal": "PLAN_APPROVED",
+                            "body": "No material gap found.",
+                        },
+                    )
 
                 with (
                     mock.patch.dict(os.environ, inherited, clear=True),
                     mock.patch.object(FABLE.os, "name", platform),
+                    mock.patch.object(
+                        FABLE,
+                        "_canonical_posix_identity",
+                        return_value="trusted-user",
+                    ),
                     mock.patch.object(
                         FABLE,
                         "load_fable_route",
@@ -340,17 +451,135 @@ class FableAdvisorMcpTests(unittest.TestCase):
                 for _, kwargs in calls:
                     self.assertEqual(kwargs["env"], expected)
 
+    def test_auth_accepts_only_exact_first_party_pro_max_or_team_tuples(self) -> None:
+        valid_subscriptions = ("pro", "max", "team")
+        executable = Path("/fake/claude")
+        for subscription in valid_subscriptions:
+            with self.subTest(subscription=subscription), mock.patch.object(
+                FABLE,
+                "_run_json",
+                return_value={
+                    "loggedIn": True,
+                    "authMethod": "claude.ai",
+                    "apiProvider": "firstParty",
+                    "subscriptionType": subscription,
+                },
+            ) as run:
+                self.assertEqual(
+                    FABLE.check_claude_auth(executable),
+                    {
+                        "auth_method": "claude.ai",
+                        "api_provider": "firstParty",
+                    },
+                )
+                self.assertEqual(
+                    run.call_args.args[0],
+                    [str(executable), "auth", "status", "--json"],
+                )
+
+        invalid_payloads = (
+            {
+                "loggedIn": False,
+                "authMethod": "claude.ai",
+                "apiProvider": "firstParty",
+                "subscriptionType": "team",
+            },
+            {
+                "loggedIn": 1,
+                "authMethod": "claude.ai",
+                "apiProvider": "firstParty",
+                "subscriptionType": "team",
+            },
+            {
+                "loggedIn": True,
+                "authMethod": "console",
+                "apiProvider": "firstParty",
+                "subscriptionType": "team",
+            },
+            {
+                "loggedIn": True,
+                "authMethod": "claude.ai",
+                "apiProvider": "bedrock",
+                "subscriptionType": "team",
+            },
+            {
+                "loggedIn": True,
+                "authMethod": "claude.ai",
+                "apiProvider": "firstParty",
+                "subscriptionType": "Team",
+            },
+            {
+                "loggedIn": True,
+                "authMethod": "claude.ai",
+                "apiProvider": "firstParty",
+                "subscriptionType": "enterprise",
+            },
+            {
+                "loggedIn": True,
+                "authMethod": "claude.ai",
+                "apiProvider": "firstParty",
+                "subscriptionType": [],
+            },
+            {
+                "loggedIn": True,
+                "authMethod": "claude.ai",
+                "apiProvider": "firstParty",
+            },
+        )
+        secret = "TOP-SECRET-AUTH-METADATA"
+        for payload in invalid_payloads:
+            with self.subTest(payload=payload), mock.patch.object(
+                FABLE, "_run_json", return_value={**payload, "account": secret}
+            ):
+                with self.assertRaises(FABLE.AdvisorError) as failure:
+                    FABLE.check_claude_auth(executable)
+                self.assertIn("Pro, Max, or Team", str(failure.exception))
+                self.assertNotIn(secret, str(failure.exception))
+
+    def test_posix_identity_lookup_failure_stops_before_any_subprocess(self) -> None:
+        executable = Path("/fake/claude")
+        with (
+            mock.patch.object(FABLE.os, "name", "posix"),
+            mock.patch.object(
+                FABLE,
+                "_canonical_posix_identity",
+                side_effect=FABLE.AdvisorError("canonical identity unavailable"),
+            ),
+            mock.patch.object(FABLE.subprocess, "run") as run,
+        ):
+            with self.assertRaisesRegex(
+                FABLE.AdvisorError, "canonical identity unavailable"
+            ):
+                FABLE.check_claude_auth(executable)
+        run.assert_not_called()
+
     def test_runtime_model_policy_accepts_only_fable_and_exact_allowed_helper(
         self,
     ) -> None:
+        resolved_primary = "claude-opus-4-8"
         allowed_scenarios = (
             ({FABLE.FABLE_MODEL: {"outputTokens": 12}}, [FABLE.FABLE_MODEL]),
+            ({resolved_primary: {"outputTokens": 12}}, [resolved_primary]),
+            (
+                {
+                    resolved_primary: {"outputTokens": 12},
+                    FABLE.FABLE_HELPER_MODEL: {"outputTokens": 1},
+                },
+                sorted((resolved_primary, FABLE.FABLE_HELPER_MODEL)),
+            ),
             (
                 {
                     FABLE.FABLE_MODEL: {"outputTokens": 12},
+                    resolved_primary: {"outputTokens": 12},
                     FABLE.FABLE_HELPER_MODEL: {"outputTokens": 1},
                 },
-                sorted((FABLE.FABLE_MODEL, FABLE.FABLE_HELPER_MODEL)),
+                sorted(
+                    (
+                        FABLE.FABLE_MODEL,
+                        resolved_primary,
+                        FABLE.FABLE_HELPER_MODEL,
+                    )
+                ),
             ),
         )
         for model_usage, expected_models in allowed_scenarios:
@@ -759,6 +988,164 @@ class FableAdvisorMcpTests(unittest.TestCase):
             self.assertNotIn("--resume", command)
             self.assertNotIn("--session-id", command)
 
+    def test_review_uses_and_locally_enforces_the_exact_structured_schema(self) -> None:
+        structured = {
+            "signal": "PLAN_APPROVED",
+            "body": "No material gap found.",
+        }
+        result, calls = self.invoke_with_results(
+            FABLE.review_plan,
+            "packet",
+            model_response="This prose is not the decision contract.",
+            structured_output=structured,
+        )
+        self.assertEqual(result["decision"], "PLAN_APPROVED")
+        self.assertEqual(result["review"], "PLAN_APPROVED\nNo material gap found.")
+        command = calls[1][0]
+        self.assertEqual(command.count("--json-schema"), 1)
+        self.assertEqual(
+            json.loads(command[command.index("--json-schema") + 1]),
+            {
+                "type": "object",
+                "properties": {
+                    "signal": {
+                        "type": "string",
+                        "enum": ["PLAN_APPROVED", "PLAN_REVISE"],
+                    },
+                    "body": {"type": "string", "minLength": 1},
+                },
+                "required": ["signal", "body"],
+                "additionalProperties": False,
+            },
+        )
+
+        legacy, _ = self.invoke_with_results(
+            FABLE.review_plan,
+            "packet",
+            model_response=json.dumps(
+                {
+                    "signal": "PLAN_REVISE",
+                    "body": "F-1: add the missing negative regression.",
+                }
+            ),
+        )
+        self.assertEqual(legacy["decision"], "PLAN_REVISE")
+        self.assertEqual(
+            legacy["review"],
+            "PLAN_REVISE\nF-1: add the missing negative regression.",
+        )
+
+        malformed = (
+            ("PLAN_APPROVED\nraw prose is not structured", DEFAULT_STRUCTURED_OUTPUT),
+            (json.dumps({"signal": "PLAN_APPROVED"}), DEFAULT_STRUCTURED_OUTPUT),
+            (
+                json.dumps({"signal": "PLAN_APPROVED", "body": "ok", "extra": 1}),
+                DEFAULT_STRUCTURED_OUTPUT,
+            ),
+            (
+                json.dumps({"signal": "PLAN_DRAFT", "body": "wrong signal"}),
+                DEFAULT_STRUCTURED_OUTPUT,
+            ),
+            (
+                json.dumps({"signal": "PLAN_APPROVED", "body": "   "}),
+                DEFAULT_STRUCTURED_OUTPUT,
+            ),
+            (
+                json.dumps({"signal": "PLAN_APPROVED", "body": 7}),
+                DEFAULT_STRUCTURED_OUTPUT,
+            ),
+            (
+                json.dumps({"signal": "PLAN_APPROVED", "body": "one"}),
+                {"signal": "PLAN_REVISE", "body": "two"},
+            ),
+        )
+        secret = "TOP-SECRET-STRUCTURED-OUTPUT"
+        for response, structured_output in malformed:
+            with self.subTest(response=response, structured=structured_output):
+                with self.assertRaises(FABLE.AdvisorError) as failure:
+                    self.invoke_with_results(
+                        FABLE.review_plan,
+                        "packet",
+                        model_response=response.replace("raw prose", secret),
+                        structured_output=structured_output,
+                    )
+                self.assertNotIn(secret, str(failure.exception))
+
+    def test_cli_output_container_accepts_one_result_and_rejects_ambiguity(
+        self,
+    ) -> None:
+        self.write_state(planner=self.route())
+        created, _ = self.invoke_with_results(
+            FABLE.create_plan,
+            "packet",
+            model_response="PLAN_DRAFT\nDraft",
+            as_events=True,
+        )
+        self.assertEqual(created["signal"], "PLAN_DRAFT")
+
+        revision = (
+            "PLAN_REVISION\n## FINDINGS_LEDGER\n"
+            "F-1 INCORPORATED: fixed.\n## REVISED_PLAN\nv2"
+        )
+        revised, _ = self.invoke_with_results(
+            FABLE.revise_plan,
+            "task",
+            "v1",
+            "F-1",
+            "history",
+            model_response=revision,
+            as_events=True,
+        )
+        self.assertEqual(revised["signal"], "PLAN_REVISION")
+
+        self.write_state(advisor=self.route())
+        reviewed, _ = self.invoke_with_results(
+            FABLE.review_plan,
+            "packet",
+            model_response="ignored prose",
+            structured_output={
+                "signal": "PLAN_APPROVED",
+                "body": "No material gap.",
+            },
+            as_events=True,
+        )
+        self.assertEqual(reviewed["decision"], "PLAN_APPROVED")
+
+        result_event = {
+            "type": "result",
+            "subtype": "success",
+            "result": json.dumps(
+                {"signal": "PLAN_APPROVED", "body": "No material gap."}
+            ),
+            "modelUsage": {FABLE.FABLE_MODEL: {"outputTokens": 12}},
+        }
+        secret = "TOP-SECRET-AMBIGUOUS-EVENT"
+        malformed_outers: tuple[object, ...] = (
+            [],
+            [{"type": "system", "subtype": "init"}],
+            [result_event, result_event],
+            [{"type": "system"}, secret, result_event],
+            {**result_event, "type": "assistant"},
+            {**result_event, "type": None},
+            {
+                "subtype": "error",
+                "result": json.dumps(
+                    {"signal": "PLAN_APPROVED", "body": secret}
+                ),
+                "modelUsage": {FABLE.FABLE_MODEL: {"outputTokens": 12}},
+            },
+            secret,
+        )
+        for outer in malformed_outers:
+            with self.subTest(outer=outer):
+                with self.assertRaises(FABLE.AdvisorError) as failure:
+                    self.invoke_with_stdout(
+                        FABLE.review_plan,
+                        "packet",
+                        stdout=json.dumps(outer),
+                    )
+                self.assertNotIn(secret, str(failure.exception))
+
     def test_malformed_json_unconfirmed_model_and_bad_review_fail_closed(self) -> None:
         bad_outputs = (
             ("not json", "malformed JSON"),
@@ -788,7 +1175,7 @@ class FableAdvisorMcpTests(unittest.TestCase):
                         FABLE.create_plan("packet")
 
         self.write_state(advisor=self.route())
-        with self.assertRaisesRegex(FABLE.AdvisorError, "required plan decision"):
+        with self.assertRaisesRegex(FABLE.AdvisorError, "structured output"):
             self.invoke_with_results(
                 FABLE.review_plan, "packet", model_response="Looks good."
             )

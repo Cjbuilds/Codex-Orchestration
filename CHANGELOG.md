@@ -1,6 +1,20 @@
 # Changelog
 
-## 0.9.0 — Unreleased
+## 0.9.1 — Unreleased
+
+- Accept first-party Claude Team subscriptions alongside Pro and Max while
+  preserving exact first-party authentication checks and account-data redaction.
+- Restore macOS Keychain discovery with canonical POSIX `USER` and `LOGNAME`
+  values without inheriting ambient identity, credential, provider, proxy, or
+  routing overrides.
+- Accept either reviewed Fable runtime primary (`claude-fable-5` or
+  `claude-opus-4-8`) plus only the exact reviewed Haiku helper, while keeping
+  the separate Opus route pinned to `claude-opus-5` with no helper.
+- Require schema-validated Advisor decisions, normalize one unambiguous Claude
+  result object/event, and reject malformed, conflicting, or raw-prose review
+  output without exposing model-authored content in errors.
+
+## 0.9.0 — 2026-07-25
 
 - Add Claude Opus 5 as a sealed first-party subscription Planner or Advisor
   through Claude Code 2.1.219 or newer, with exact effort validation and
