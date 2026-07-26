@@ -255,7 +255,7 @@ class PackagingTests(unittest.TestCase):
 
         self.assertEqual(manifest["name"], "codex-orchestration")
         self.assertEqual(manifest["skills"], "./skills/")
-        self.assertEqual(manifest["version"], "0.9.3")
+        self.assertEqual(manifest["version"], "0.9.4")
         self.assertEqual(manifest["mcpServers"], "./.mcp.json")
         self.assertRegex(
             manifest["version"],
@@ -278,7 +278,7 @@ class PackagingTests(unittest.TestCase):
         self.assertFalse((SKILL_ROOT / "scripts" / "update_plugin.py").exists())
         self.assertIn("config/batchWrite", native.read_text(encoding="utf-8"))
         self.assertIn('"--repair"', native.read_text(encoding="utf-8"))
-        self.assertIn('"version": "0.9.3"', native.read_text(encoding="utf-8"))
+        self.assertIn('"version": "0.9.4"', native.read_text(encoding="utf-8"))
         self.assertIn("validate_routing_state", routing_state.read_text(encoding="utf-8"))
         self.assertIn("Standalone custom agent", custom.read_text(encoding="utf-8"))
 
@@ -332,7 +332,24 @@ class PackagingTests(unittest.TestCase):
         for server in servers.values():
             self.assertFalse(server["enabled"])
             self.assertEqual(server["cwd"], ".")
+            self.assertEqual(server["tool_timeout_sec"], 660)
             self.assertIn("fable_advisor_mcp.py", server["args"][-1])
+        bridge = (
+            SKILL_ROOT / "scripts" / "fable_advisor_mcp.py"
+        ).read_text(encoding="utf-8")
+        timeout_match = re.search(
+            r"(?m)^CLAUDE_TIMEOUT_SECONDS\s*=\s*(\d+)$",
+            bridge,
+        )
+        self.assertIsNotNone(timeout_match)
+        assert timeout_match is not None
+        bridge_timeout = int(timeout_match.group(1))
+        self.assertTrue(
+            all(
+                server["tool_timeout_sec"] > bridge_timeout
+                for server in servers.values()
+            )
+        )
         self.assertTrue((SKILL_ROOT / "scripts" / "fable_advisor_mcp.py").is_file())
 
     def test_explicit_and_natural_language_invocation_metadata_is_consistent(self) -> None:
@@ -453,7 +470,7 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("@openai/codex@0.144.1", workflow)
         smoke_text = smoke.read_text(encoding="utf-8")
         self.assertIn('OLD_VERSION = "0.5.0"', smoke_text)
-        self.assertIn('NEW_VERSION = "0.9.3"', smoke_text)
+        self.assertIn('NEW_VERSION = "0.9.4"', smoke_text)
         self.assertIn("old Advisor-only cache unexpectedly supports Planner", smoke_text)
         self.assertIn("Upgraded installed skill is missing Planner contract", smoke_text)
         self.assertIn("reused the Advisor-only 0.5.0 cache directory", smoke_text)
