@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.4 — Unreleased
+
+- Accept Claude Code 2.1.220's first-party `canonicalModel` and `provider`
+  fields in runtime `modelUsage` while allowing only reviewed primary
+  alias/canonical pairs or an exact helper identity, requiring
+  `provider=firstParty`, retaining at least one numeric usage field, and
+  rejecting every other string-valued field.
+
 ## 0.9.3 — Unreleased
 
 - Raise the bounded Advisor approval loop from five to eight reviews while

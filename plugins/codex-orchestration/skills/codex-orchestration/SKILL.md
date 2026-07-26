@@ -489,6 +489,10 @@ The configured Fable route remains `claude-fable-5`, while runtime `modelUsage`
 may confirm either reviewed Fable primary identity. This does not make
 `claude-opus-4-8` an Opus route alias. Opus still requires the exact
 `claude-opus-5` primary.
+Claude Code's optional first-party `canonicalModel` and `provider` usage metadata
+are accepted only when the canonical identity stays within the reviewed primary
+alias set or exactly matches its helper key, the provider is exactly `firstParty`,
+and the entry still contains numeric usage.
 
 Plugin and policy updates cannot replace the MCP process already loaded into the
 current task. If a bundled Claude call fails after an update or repair, run fresh
