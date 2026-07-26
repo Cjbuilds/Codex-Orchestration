@@ -537,6 +537,7 @@ class FableAdvisorMcpTests(unittest.TestCase):
                 self.assertNotIn(secret, str(failure.exception))
 
     def test_posix_identity_lookup_failure_stops_before_any_subprocess(self) -> None:
+        executable = Path("/fake/claude")
         with (
             mock.patch.object(FABLE.os, "name", "posix"),
             mock.patch.object(
@@ -549,7 +550,7 @@ class FableAdvisorMcpTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 FABLE.AdvisorError, "canonical identity unavailable"
             ):
-                FABLE.check_claude_auth(Path("/fake/claude"))
+                FABLE.check_claude_auth(executable)
         run.assert_not_called()
 
     def test_runtime_model_policy_accepts_only_fable_and_exact_allowed_helper(
