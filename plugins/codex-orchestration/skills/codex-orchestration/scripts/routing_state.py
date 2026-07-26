@@ -25,7 +25,7 @@ FABLE_SERVERS = frozenset(
     }
 )
 
-_SCHEMA_POLICY_PAIRS = {1: 1, 2: 2, 3: 3, 4: 4, 5: 5}
+_SCHEMA_POLICY_PAIRS = {1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6}
 _MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+/@-]{0,199}$")
 _AGENT_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 _EFFORT_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
@@ -143,7 +143,8 @@ def _validate_route(route: Any, *, seat: str, schema: int) -> str:
         )
     elif kind == "claude_subscription":
         _require(
-            seat in {"planner", "advisor"} and schema >= 5,
+            (seat in {"planner", "advisor"} and schema >= 5)
+            or (seat == "designer" and schema >= 6),
             f"{seat} cannot use a Claude subscription route in schema {schema}",
         )
         _require(
@@ -274,8 +275,9 @@ def validate_routing_state(value: Any) -> dict[str, Any]:
     if designer is not None:
         designer_kind = _validate_route(designer, seat="designer", schema=schema)
         _require(
-            designer_kind == "model",
-            "persistent Designer must use a direct model route",
+            designer_kind == "model"
+            or (designer_kind == "claude_subscription" and schema >= 6),
+            "persistent Designer must use a direct model or sealed Opus route",
         )
     _validate_route_separation(planner, advisor)
 
@@ -311,16 +313,37 @@ def validate_routing_state(value: Any) -> dict[str, Any]:
     ):
         _validate_snapshot(previous[key], expected_type)
 
-    subscription_routes = [
+    planning_subscription_routes = [
         route
         for route in (planner, advisor)
         if type(route) is dict
         and route.get("kind") in {"fable", "claude_subscription"}
     ]
     _require(
-        len(subscription_routes) <= 1,
-        "more than one Claude subscription seat is configured",
+        len(planning_subscription_routes) <= 1,
+        "more than one Claude subscription planning seat is configured",
     )
+    designer_subscription = (
+        designer
+        if type(designer) is dict
+        and designer.get("kind") == "claude_subscription"
+        else None
+    )
+    if designer_subscription is not None:
+        _require(
+            not planning_subscription_routes
+            or (
+                planning_subscription_routes[0]["kind"] == "claude_subscription"
+                and planning_subscription_routes[0]["model"] == OPUS_MODEL
+                and planning_subscription_routes[0]["server"]
+                == designer_subscription["server"]
+            ),
+            "Designer subscription must share the exact Opus subscription identity",
+        )
+    subscription_routes = [
+        *planning_subscription_routes,
+        *([designer_subscription] if designer_subscription is not None else []),
+    ]
     if managed_has_mcp:
         managed_mcp = managed["mcp"]
         previous_mcp = previous["mcp"]

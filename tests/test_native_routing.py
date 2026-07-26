@@ -496,7 +496,9 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertIn('Never use fork_turns = "all"', usage)
         self.assertIn("task-local Planner and Advisor must still be distinct", usage)
         self.assertIn("same direct model ID", usage)
-        self.assertIn("more than one bundled Claude subscription seat", usage)
+        self.assertIn(
+            "more than one bundled Claude subscription planning seat", usage
+        )
         self.assertIn("If you are a spawned child, do not call this tool", usage)
         self.assertNotIn("tool_namespace", mode + usage)
         self.assertNotIn("enabled = true", mode + usage)
@@ -753,8 +755,8 @@ class NativeRoutingTests(unittest.TestCase):
         state = json.loads(
             (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
         )
-        self.assertEqual(state["schema"], 5)
-        self.assertEqual(state["policy_version"], 5)
+        self.assertEqual(state["schema"], 6)
+        self.assertEqual(state["policy_version"], 6)
         self.assertEqual(state["planner"]["effort"], "xhigh")
         self.assertEqual(state["designer"]["effort"], "medium")
 
@@ -762,6 +764,61 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertIn("Planner: gpt-5.6-sol@xhigh", status.stdout)
         self.assertIn("Designer: gpt-5.6-luna@medium", status.stdout)
         self.assertEqual(status.returncode, 0)
+
+    def test_opus_advisor_and_designer_setup_persists_schema_six_and_create_design_policy(
+        self,
+    ) -> None:
+        setup = self.run_script(
+            "--advisor-opus",
+            "--advisor-effort",
+            "xhigh",
+            "--designer-opus",
+            "--designer-effort",
+            "max",
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--executor-effort",
+            "xhigh",
+            "--apply",
+        )
+        self.assertIn("Advisor: Claude Opus 5 xhigh", setup.stdout)
+        self.assertIn("Designer: Claude Opus 5 max", setup.stdout)
+        state = json.loads(
+            (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
+        )
+        self.assertEqual(state["schema"], 6)
+        self.assertEqual(state["policy_version"], 6)
+        self.assertEqual(state["advisor"]["model"], NATIVE.OPUS_MODEL)
+        self.assertEqual(state["advisor"]["effort"], "xhigh")
+        self.assertEqual(state["designer"]["model"], NATIVE.OPUS_MODEL)
+        self.assertEqual(state["designer"]["effort"], "max")
+        self.assertEqual(state["managed"]["mcp"], {"fable-advisor-python3": True})
+        config = self.read_fake_config()
+        usage = config["features"]["multi_agent_v2"]["usage_hint_text"]
+        self.assertIn("create_design", usage)
+        self.assertIn("DESIGN_HANDOFF", usage)
+
+    def test_opus_designer_cli_rejects_mixed_and_mutually_exclusive_routes(self) -> None:
+        exclusive = self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--designer-opus",
+            "--designer-model",
+            "gpt-5.6-sol",
+            check=False,
+        )
+        self.assertEqual(exclusive.returncode, 2)
+        self.assertIn("not allowed with argument", exclusive.stderr)
+        mixed = self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--advisor-fable",
+            "--designer-opus",
+            "--confirm-unlisted-models",
+            check=False,
+        )
+        self.assertEqual(mixed.returncode, 2)
+        self.assertIn("exact Opus identity", mixed.stderr)
 
     def test_legacy_state_schemas_upgrade_to_four_without_losing_restore(self) -> None:
         for legacy_schema in (1, 2, 3):
@@ -805,8 +862,8 @@ class NativeRoutingTests(unittest.TestCase):
                     "--apply",
                 )
                 upgraded = json.loads(state_path.read_text(encoding="utf-8"))
-                self.assertEqual(upgraded["schema"], 5)
-                self.assertEqual(upgraded["policy_version"], 5)
+                self.assertEqual(upgraded["schema"], 6)
+                self.assertEqual(upgraded["policy_version"], 6)
                 self.assertEqual(upgraded["previous"], original_previous)
                 self.assertEqual(upgraded["planner"]["model"], "gpt-5.6-sol")
                 self.assertEqual(upgraded["designer"]["model"], "gpt-5.6-luna")
@@ -1990,7 +2047,9 @@ class NativeRoutingTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 2)
-        self.assertIn("at most one bundled Claude subscription seat", result.stderr)
+        self.assertIn(
+            "at most one bundled Claude subscription planning seat", result.stderr
+        )
         self.assertFalse((self.home / NATIVE.STATE_FILENAME).exists())
 
     def test_fable_planner_with_gpt_advisor_uses_one_launcher_and_restores(self) -> None:
@@ -2200,7 +2259,7 @@ class NativeRoutingTests(unittest.TestCase):
         state = json.loads(
             (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
         )
-        self.assertEqual(state["schema"], 5)
+        self.assertEqual(state["schema"], 6)
         self.assertEqual(
             state["advisor"],
             {

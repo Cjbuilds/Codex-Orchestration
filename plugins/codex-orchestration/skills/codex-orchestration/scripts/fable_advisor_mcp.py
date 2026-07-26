@@ -147,10 +147,15 @@ Provide the complete revised plan, clearly identifying its source plan version a
 
 Both sections must be non-empty. Your first non-empty line must be exactly PLAN_REVISION. The root orchestrator, not you, validates finding coverage and plan-version semantics. Report only to the root orchestrator."""
 
+DESIGNER_SYSTEM_PROMPT = """You are the configured Claude model acting only as a bounded Designer for Codex's root orchestrator.
+Produce a concrete visual, UX, interaction, information-architecture, or design-system handoff from the supplied approved requirements. Do not edit implementation code, call tools, spawn agents, contact the Planner, Advisor, or Executor, or release implementation work. Respect explicit artifact ownership and return only the requested design deliverables.
+
+Your first non-empty line must be exactly DESIGN_HANDOFF. Report only to the root orchestrator."""
+
 # Backward-compatible public constant for existing importers.
 SYSTEM_PROMPT = ADVISOR_SYSTEM_PROMPT
 
-Seat = Literal["planner", "advisor"]
+Seat = Literal["planner", "advisor", "designer"]
 
 
 class AdvisorError(RuntimeError):
@@ -307,8 +312,10 @@ def _read_routing_state(home: Path | None = None) -> dict[str, Any]:
 
 
 def _validate_seat(seat: str) -> Seat:
-    if seat not in {"planner", "advisor"}:
-        raise AdvisorError("Claude planning seat must be `planner` or `advisor`.")
+    if seat not in {"planner", "advisor", "designer"}:
+        raise AdvisorError(
+            "Claude subscription seat must be `planner`, `advisor`, or `designer`."
+        )
     return seat  # type: ignore[return-value]
 
 
@@ -320,6 +327,8 @@ def _validate_fable_route(route: Any, *, seat: Seat) -> dict[str, str]:
         raise AdvisorError(
             f"A bundled Claude model is not the configured {seat}."
         )
+    if seat == "designer" and route["kind"] != "claude_subscription":
+        raise AdvisorError("Claude Fable is not authorized for the Designer seat.")
     return {"model": route["model"], "effort": route["effort"]}
 
 
@@ -377,18 +386,23 @@ def _validate_runtime_models(
         if not isinstance(model_usage, dict) or not model_usage:
             raise AdvisorError("Runtime metadata has a malformed modelUsage value.")
         for field, value in model_usage.items():
-            is_nonnegative_finite_number = (
-                type(value) is int
-                and value >= 0
-                or type(value) is float
-                and math.isfinite(value)
-                and value >= 0
-            )
-            if (
-                not isinstance(field, str)
-                or not field.strip()
-                or not is_nonnegative_finite_number
-            ):
+            if not isinstance(field, str) or not field.strip():
+                raise AdvisorError(
+                    "Runtime metadata has a malformed modelUsage value."
+                )
+            if field == "canonicalModel":
+                valid_value = type(value) is str and value in allowed_models
+            elif field == "provider":
+                valid_value = value == "firstParty"
+            else:
+                valid_value = (
+                    type(value) is int
+                    and value >= 0
+                    or type(value) is float
+                    and math.isfinite(value)
+                    and value >= 0
+                )
+            if not valid_value:
                 raise AdvisorError(
                     "Runtime metadata has a malformed modelUsage value."
                 )
@@ -580,7 +594,7 @@ def _invoke_fable(
         operation=operation,
     )
     # Authorize the complete runtime identity set before interpreting or
-    # returning any model-authored plan/review content.
+    # returning any model-authored plan/review/design content.
     used_models = _validate_runtime_models(payload.get("modelUsage"), route["model"])
     if operation == "plan review":
         signal, response = _review_response(payload, display_name=display_name)
@@ -710,12 +724,28 @@ def review_plan(packet: str) -> dict[str, Any]:
     }
 
 
+def create_design(packet: str) -> dict[str, Any]:
+    values = _validate_inputs("design handoff", packet=packet)
+    signal, response, route, auth, used_models = _invoke_fable(
+        operation="design handoff",
+        seat="designer",
+        prompt=values["packet"],
+        system_prompt=DESIGNER_SYSTEM_PROMPT,
+        allowed_signals={"DESIGN_HANDOFF"},
+    )
+    return {
+        "signal": signal,
+        "design": response,
+        **_base_result(route=route, auth=auth, used_models=used_models),
+    }
+
+
 def _configured_fable_seats() -> dict[str, dict[str, str]]:
     """Return configured bundled Claude seats (legacy public name)."""
 
     payload = _read_routing_state()
     routes: dict[str, dict[str, str]] = {}
-    for seat in ("planner", "advisor"):
+    for seat in ("planner", "advisor", "designer"):
         value = payload.get(seat)
         if value is None:
             continue
@@ -726,7 +756,7 @@ def _configured_fable_seats() -> dict[str, dict[str, str]]:
         routes[seat] = _validate_fable_route(value, seat=_validate_seat(seat))
     if not routes:
         raise AdvisorError(
-            "No bundled Claude model is configured for Planner or Advisor."
+            "No bundled Claude model is configured for Planner, Advisor, or Designer."
         )
     return routes
 
@@ -801,8 +831,20 @@ def tool_definitions() -> list[dict[str, Any]]:
             "annotations": annotations,
         },
         {
+            "name": "create_design",
+            "title": "Create a design handoff with Claude Opus 5",
+            "description": "Create one stateless Designer handoff with the configured Claude Opus subscription seat.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"packet": {**string_property, "description": "Approved design packet."}},
+                "required": ["packet"],
+                "additionalProperties": False,
+            },
+            "annotations": annotations,
+        },
+        {
             "name": "status",
-            "title": "Check bundled Claude Planner and Advisor status",
+            "title": "Check bundled Claude seat status",
             "description": "Check configured Claude seats and first-party login without a model call.",
             "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
             "annotations": annotations,
@@ -867,6 +909,9 @@ def handle_request(request: dict[str, Any]) -> dict[str, Any] | None:
             elif name == "review_plan":
                 args = _tool_arguments(arguments, {"packet"})
                 result = _tool_result(review_plan(args.get("packet")))
+            elif name == "create_design":
+                args = _tool_arguments(arguments, {"packet"})
+                result = _tool_result(create_design(args.get("packet")))
             elif name == "status":
                 _tool_arguments(arguments, set())
                 result = _tool_result(status())

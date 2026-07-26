@@ -36,7 +36,9 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("--planner-opus", SKILL)
         self.assertIn("Claude Code 2.1.219 or newer", SKILL)
         self.assertIn("No Opus helper identity is independently established", SKILL)
-        self.assertIn("more than one bundled Claude subscription seat", SKILL)
+        self.assertIn("more than one bundled Claude subscription planning seat", SKILL)
+        self.assertIn("--designer-opus", SKILL)
+        self.assertIn("create_design", SKILL)
 
     def test_public_controls_are_simple_and_setup_is_persistent(self) -> None:
         self.assertIn("setup executor: GPT-5.6 Luna Extra High", SKILL)
@@ -103,7 +105,8 @@ Executor — GPT-5.6 Sol high: Activated
         self.assertIn("--designer-model", SKILL)
         self.assertIn("--designer-effort", SKILL)
         self.assertNotIn("--designer-agent", SKILL)
-        self.assertIn("Persistent Designer accepts only a direct same-provider model", SKILL)
+        self.assertIn("Persistent Designer accepts a direct same-provider model", SKILL)
+        self.assertIn("sealed Claude Opus", SKILL)
         self.assertIn("task-local External Model role named `designer`", SKILL)
         self.assertIn("Designer may edit only explicitly delegated design artifacts", SKILL)
         self.assertIn("never revises the canonical plan", SKILL)

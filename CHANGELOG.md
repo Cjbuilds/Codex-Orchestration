@@ -1,6 +1,19 @@
 # Changelog
 
-## 0.9.3 — Unreleased
+## 0.10.0 — Unreleased
+
+- Add sealed Claude Opus 5 Designer routing with independent effort, a read-only
+  `create_design` MCP operation, and schema/policy version 6. Opus may share one
+  exact subscription identity with one Planner or Advisor seat; Fable remains
+  Planner/Advisor-only.
+
+## 0.9.4 — 2026-07-26
+
+- Accept Claude Code 2.1.220's exact `canonicalModel` and `provider` identity
+  fields in runtime `modelUsage`, while rejecting unknown string metadata,
+  unreviewed model identities, and non-first-party providers.
+
+## 0.9.3 — 2026-07-26
 
 - Raise the bounded Advisor approval loop from five to eight reviews while
   preserving immediate approval exit and fail-closed plan, ledger, and

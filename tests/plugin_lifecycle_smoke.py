@@ -32,7 +32,7 @@ PLUGIN_ID = "codex-orchestration@codex-orchestration"
 MARKETPLACE_NAME = "codex-orchestration"
 OLD_RELEASE = "a1d9c546665c3253cdcaa8fe5c0c060199a6126c"
 OLD_VERSION = "0.5.0"
-NEW_VERSION = "0.9.3"
+NEW_VERSION = "0.10.0"
 COMMAND_TIMEOUT_SECONDS = 60
 
 
@@ -134,7 +134,7 @@ def probe_mcp_subprocess(script: Path, *, cwd: Path, env: dict[str, str]) -> Non
     }
     assert_equal(
         tool_names,
-        {"create_plan", "revise_plan", "review_plan", "status"},
+        {"create_plan", "revise_plan", "review_plan", "create_design", "status"},
         "installed Fable MCP tool list",
     )
 

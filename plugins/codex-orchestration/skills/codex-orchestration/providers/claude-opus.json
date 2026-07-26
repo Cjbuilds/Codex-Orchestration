@@ -29,12 +29,14 @@
     "module": "fable_advisor_mcp",
     "allowed_seats": [
       "planner",
-      "advisor"
+      "advisor",
+      "designer"
     ],
     "allowed_operations": [
       "create_plan",
       "revise_plan",
-      "review_plan"
+      "review_plan",
+      "create_design"
     ],
     "trust_strategy": "first_party_auth_and_runtime_metadata"
   }
