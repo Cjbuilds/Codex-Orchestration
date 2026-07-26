@@ -49,7 +49,7 @@ The model selected for the Codex task remains in charge. It passes work between 
                     CODEX TESTS & DELIVERS
 ```
 
-Planner and Advisor can work through several revisions. Codex stops as soon as the Advisor returns `PLAN_APPROVED`, with a safety limit of five reviews. If approval is not reached, execution stops and Codex shows you the latest plan and unresolved issues.
+Planner and Advisor can work through several revisions. Codex stops as soon as the Advisor returns `PLAN_APPROVED`, with a safety limit of eight reviews. If approval is not reached, execution stops and Codex shows you the latest plan and unresolved issues.
 
 ## Why use it?
 
