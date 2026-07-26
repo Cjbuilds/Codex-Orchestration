@@ -51,6 +51,8 @@ def _run_capture(command: list[str]) -> str:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=False,
             timeout=TIMEOUT_SECONDS,
             shell=False,
