@@ -316,7 +316,7 @@ class NativeRoutingTests(unittest.TestCase):
                 )
                 raise SystemExit(0)
             if sys.argv[1:] == ["--version"]:
-                print("2.1.219 (Claude Code)")
+                print("2.1.257 (Claude Code)")
                 raise SystemExit(0)
             raise SystemExit(2)
             """,
@@ -635,7 +635,11 @@ class NativeRoutingTests(unittest.TestCase):
             "--advisor-model",
             "--designer-model",
         ):
-            for model in (NATIVE.FABLE_MODEL, NATIVE.OPUS_MODEL):
+            for model in (
+                NATIVE.LEGACY_FABLE_MODEL,
+                NATIVE.FABLE_MODEL,
+                NATIVE.OPUS_MODEL,
+            ):
                 arguments = [
                     sys.executable,
                     str(SCRIPT),
@@ -753,8 +757,8 @@ class NativeRoutingTests(unittest.TestCase):
         state = json.loads(
             (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
         )
-        self.assertEqual(state["schema"], 5)
-        self.assertEqual(state["policy_version"], 5)
+        self.assertEqual(state["schema"], 6)
+        self.assertEqual(state["policy_version"], 6)
         self.assertEqual(state["planner"]["effort"], "xhigh")
         self.assertEqual(state["designer"]["effort"], "medium")
 
@@ -763,7 +767,7 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertIn("Designer: gpt-5.6-luna@medium", status.stdout)
         self.assertEqual(status.returncode, 0)
 
-    def test_legacy_state_schemas_upgrade_to_four_without_losing_restore(self) -> None:
+    def test_legacy_state_schemas_upgrade_to_six_without_losing_restore(self) -> None:
         for legacy_schema in (1, 2, 3):
             with self.subTest(schema=legacy_schema):
                 setup_arguments = ["--executor-model", "gpt-5.6-luna"]
@@ -776,6 +780,8 @@ class NativeRoutingTests(unittest.TestCase):
                 original_previous = legacy["previous"]
                 legacy["schema"] = legacy_schema
                 legacy["policy_version"] = legacy_schema
+                if legacy_schema == 2:
+                    legacy["advisor"]["model"] = NATIVE.LEGACY_FABLE_MODEL
                 if legacy_schema < 3:
                     legacy.pop("planner", None)
                 legacy.pop("designer", None)
@@ -795,23 +801,86 @@ class NativeRoutingTests(unittest.TestCase):
                     json.dumps(config), encoding="utf-8"
                 )
 
-                self.run_script(
+                upgrade_arguments = (
                     "--executor-model",
                     "gpt-5.6-luna",
                     "--planner-model",
                     "gpt-5.6-sol",
                     "--designer-model",
                     "gpt-5.6-luna",
-                    "--apply",
                 )
+                if legacy_schema == 2:
+                    blocked = self.run_script(
+                        *upgrade_arguments,
+                        "--apply",
+                        check=False,
+                    )
+                    self.assertEqual(blocked.returncode, 2)
+                    self.assertIn(
+                        "configure_native_routing.py --disable --apply",
+                        blocked.stderr,
+                    )
+                    self.run_script("--disable", "--apply")
+                    self.assertFalse(state_path.exists())
+                    self.assertEqual(
+                        self.read_fake_config()["features"]["multi_agent_v2"],
+                        {"max_concurrent_threads_per_session": 5},
+                    )
+
+                self.run_script(*upgrade_arguments, "--apply")
                 upgraded = json.loads(state_path.read_text(encoding="utf-8"))
-                self.assertEqual(upgraded["schema"], 5)
-                self.assertEqual(upgraded["policy_version"], 5)
-                self.assertEqual(upgraded["previous"], original_previous)
+                self.assertEqual(upgraded["schema"], 6)
+                self.assertEqual(upgraded["policy_version"], 6)
+                expected_previous = original_previous
+                if legacy_schema == 2:
+                    expected_previous = {
+                        key: value
+                        for key, value in original_previous.items()
+                        if key != "mcp"
+                    }
+                self.assertEqual(upgraded["previous"], expected_previous)
                 self.assertEqual(upgraded["planner"]["model"], "gpt-5.6-sol")
                 self.assertEqual(upgraded["designer"]["model"], "gpt-5.6-luna")
                 if legacy_schema == 2:
-                    self.assertIn("mcp", upgraded["managed"])
+                    self.assertNotIn("mcp", upgraded["managed"])
+
+                self.run_script("--disable", "--apply")
+                self.assertEqual(
+                    self.read_fake_config()["features"]["multi_agent_v2"],
+                    {"max_concurrent_threads_per_session": 5},
+                )
+                self.assertFalse(state_path.exists())
+
+    def test_schemas_one_through_five_validate_and_disable_without_losing_restore(
+        self,
+    ) -> None:
+        for legacy_schema in (1, 2, 3, 4, 5):
+            with self.subTest(schema=legacy_schema):
+                setup_arguments = ["--executor-model", "gpt-5.6-luna"]
+                if legacy_schema >= 2:
+                    setup_arguments.append("--advisor-fable")
+                self.run_script(*setup_arguments, "--apply")
+
+                state_path = self.home / NATIVE.STATE_FILENAME
+                legacy = json.loads(state_path.read_text(encoding="utf-8"))
+                legacy["schema"] = legacy_schema
+                legacy["policy_version"] = legacy_schema
+                if legacy_schema < 3:
+                    legacy.pop("planner", None)
+                if legacy_schema < 4:
+                    legacy.pop("designer", None)
+                if legacy_schema == 1:
+                    legacy["advisor"] = None
+                    legacy["managed"].pop("mcp", None)
+                    legacy["previous"].pop("mcp", None)
+                else:
+                    legacy["advisor"]["model"] = NATIVE.LEGACY_FABLE_MODEL
+                state_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+                status = self.run_script("--status", "--require-effective")
+                self.assertEqual(status.returncode, 0)
+                if legacy_schema >= 2:
+                    self.assertIn("Claude Fable 5: ready", status.stdout)
 
                 self.run_script("--disable", "--apply")
                 self.assertEqual(
@@ -1164,7 +1233,7 @@ class NativeRoutingTests(unittest.TestCase):
         repaired = self.run_script("--repair", "--apply")
         self.assertIn("Native routing policy repaired", repaired.stdout)
         self.assertIn("fully quit and reopen Codex", repaired.stdout)
-        self.assertIn("does not change Claude Fable 5 authentication", repaired.stdout)
+        self.assertIn("does not change Claude Fable 5.1 authentication", repaired.stdout)
         after = self.read_fake_config()
         repaired_feature = after["features"]["multi_agent_v2"]
         self.assertEqual(
@@ -2019,7 +2088,7 @@ class NativeRoutingTests(unittest.TestCase):
             "gpt-5.6-terra",
             "--apply",
         )
-        self.assertIn("Planner: Claude Fable 5 max", setup.stdout)
+        self.assertIn("Planner: Claude Fable 5.1 max", setup.stdout)
         state = json.loads(
             (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
         )
@@ -2033,7 +2102,7 @@ class NativeRoutingTests(unittest.TestCase):
             sum(entry["enabled"] is True for entry in servers.values()), 1
         )
 
-        moved = self.run_script(
+        moved_arguments = (
             "--executor-model",
             "gpt-5.6-luna",
             "--planner-model",
@@ -2041,9 +2110,14 @@ class NativeRoutingTests(unittest.TestCase):
             "--advisor-fable",
             "--advisor-effort",
             "high",
-            "--apply",
         )
-        self.assertIn("Advisor: Claude Fable 5 high", moved.stdout)
+        moved = self.run_script(*moved_arguments, "--apply", check=False)
+        self.assertEqual(moved.returncode, 2)
+        self.assertIn("First run configure_native_routing.py --disable --apply", moved.stderr)
+
+        self.run_script("--disable", "--apply")
+        moved = self.run_script(*moved_arguments, "--apply")
+        self.assertIn("Advisor: Claude Fable 5.1 high", moved.stdout)
         moved_servers = self.read_fake_config()["plugins"][NATIVE.PLUGIN_ID][
             "mcp_servers"
         ]
@@ -2067,7 +2141,7 @@ class NativeRoutingTests(unittest.TestCase):
             "--apply",
         )
         self.assertIn("Planner: gpt-5.6-sol@xhigh", setup.stdout)
-        self.assertIn("Advisor: Claude Fable 5 medium", setup.stdout)
+        self.assertIn("Advisor: Claude Fable 5.1 medium", setup.stdout)
         state = json.loads(
             (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
         )
@@ -2102,7 +2176,7 @@ class NativeRoutingTests(unittest.TestCase):
             "max",
             "--apply",
         )
-        self.assertIn("Claude Fable 5 max", setup.stdout)
+        self.assertIn("Claude Fable 5.1 max", setup.stdout)
         config = self.read_fake_config()
         servers = config["plugins"][NATIVE.PLUGIN_ID]["mcp_servers"]
         self.assertTrue(servers["fable-advisor-python3"]["enabled"])
@@ -2112,23 +2186,23 @@ class NativeRoutingTests(unittest.TestCase):
             (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
         )
         self.assertEqual(state["advisor"]["kind"], "fable")
-        self.assertEqual(state["advisor"]["model"], "claude-fable-5")
+        self.assertEqual(state["advisor"]["model"], NATIVE.FABLE_MODEL)
         self.assertIn("mcp", state["previous"])
 
         status = self.run_script("--status")
-        self.assertIn("Claude Fable 5: ready", status.stdout)
+        self.assertIn("Claude Fable 5.1: ready", status.stdout)
         self.assertIn("no model call made", status.stdout)
 
-        update = self.run_script(
+        removal = self.run_script(
             "--executor-model",
             "gpt-5.6-terra",
             "--executor-effort",
             "high",
             "--apply",
+            check=False,
         )
-        self.assertIn("Advisor: none", update.stdout)
-        servers = self.read_fake_config()["plugins"][NATIVE.PLUGIN_ID]["mcp_servers"]
-        self.assertTrue(all(not entry["enabled"] for entry in servers.values()))
+        self.assertEqual(removal.returncode, 2)
+        self.assertIn("First run configure_native_routing.py --disable --apply", removal.stderr)
 
         self.run_script("--disable", "--apply")
         self.assertEqual(self.read_fake_config(), initial)
@@ -2142,7 +2216,7 @@ class NativeRoutingTests(unittest.TestCase):
             "--advisor-fable",
             "--apply",
         )
-        self.assertIn("Advisor: Claude Fable 5 high", setup.stdout)
+        self.assertIn("Advisor: Claude Fable 5.1 high", setup.stdout)
         state = json.loads(
             (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
         )
@@ -2158,7 +2232,7 @@ class NativeRoutingTests(unittest.TestCase):
             "ultra",
             "--apply",
         )
-        self.assertIn("Advisor: Claude Fable 5 max", update.stdout)
+        self.assertIn("Advisor: Claude Fable 5.1 max", update.stdout)
         self.assertIn("Advisor effort alias: ultra -> max", update.stdout)
         state = json.loads(
             (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
@@ -2200,7 +2274,7 @@ class NativeRoutingTests(unittest.TestCase):
         state = json.loads(
             (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
         )
-        self.assertEqual(state["schema"], 5)
+        self.assertEqual(state["schema"], 6)
         self.assertEqual(
             state["advisor"],
             {
@@ -2309,7 +2383,7 @@ class NativeRoutingTests(unittest.TestCase):
             "--planner-fable",
             "--apply",
         )
-        self.assertIn("Planner: Claude Fable 5 high", fable.stdout)
+        self.assertIn("Planner: Claude Fable 5.1 high", fable.stdout)
 
     def test_generic_opus_transitions_are_rejected_without_writes(self) -> None:
         state_path = self.home / NATIVE.STATE_FILENAME
@@ -2371,7 +2445,7 @@ class NativeRoutingTests(unittest.TestCase):
     def test_opus_version_and_effort_prerequisites_fail_closed(self) -> None:
         original = self.claude.read_text(encoding="utf-8")
         self.claude.write_text(
-            original.replace("2.1.219 (Claude Code)", "2.1.218 (Claude Code)"),
+            original.replace("2.1.257 (Claude Code)", "2.1.218 (Claude Code)"),
             encoding="utf-8",
         )
         too_old = self.run_script(
@@ -2382,6 +2456,22 @@ class NativeRoutingTests(unittest.TestCase):
         )
         self.assertEqual(too_old.returncode, 2)
         self.assertIn("requires Claude Code 2.1.219 or newer", too_old.stderr)
+        self.assertFalse((self.home / NATIVE.STATE_FILENAME).exists())
+
+    def test_fable_5_1_requires_claude_code_2_1_257_or_newer(self) -> None:
+        original = self.claude.read_text(encoding="utf-8")
+        self.claude.write_text(
+            original.replace("2.1.257 (Claude Code)", "2.1.256 (Claude Code)"),
+            encoding="utf-8",
+        )
+        too_old = self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--advisor-fable",
+            check=False,
+        )
+        self.assertEqual(too_old.returncode, 2)
+        self.assertIn("Claude Fable 5.1 requires Claude Code 2.1.257 or newer", too_old.stderr)
         self.assertFalse((self.home / NATIVE.STATE_FILENAME).exists())
 
     def test_opus_version_output_must_be_one_canonical_version_line(self) -> None:
@@ -2397,7 +2487,7 @@ class NativeRoutingTests(unittest.TestCase):
             with self.subTest(accepted=output):
                 self.claude.write_text(
                     original.replace(
-                        'print("2.1.219 (Claude Code)")',
+                        'print("2.1.257 (Claude Code)")',
                         f"print({output!r})",
                     ),
                     encoding="utf-8",
@@ -2421,7 +2511,7 @@ class NativeRoutingTests(unittest.TestCase):
             with self.subTest(rejected=output):
                 self.claude.write_text(
                     original.replace(
-                        'print("2.1.219 (Claude Code)")',
+                        'print("2.1.257 (Claude Code)")',
                         f"print({output!r})",
                     ),
                     encoding="utf-8",
@@ -2440,7 +2530,7 @@ class NativeRoutingTests(unittest.TestCase):
 
         self.claude.write_text(
             original.replace(
-                'print("2.1.219 (Claude Code)")',
+                'print("2.1.257 (Claude Code)")',
                 "print('2.1.218 (Claude Code)')",
             ),
             encoding="utf-8",
@@ -2550,7 +2640,7 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertIn("Claude Opus 5 effort must be one of", unsealed.stderr)
 
         self.claude.write_text(
-            original.replace("2.1.219 (Claude Code)", "not-a-version"),
+            original.replace("2.1.257 (Claude Code)", "not-a-version"),
             encoding="utf-8",
         )
         malformed = self.run_script(
@@ -2705,7 +2795,8 @@ class NativeRoutingTests(unittest.TestCase):
 
         self.assertEqual(status.returncode, 1)
         self.assertIn(
-            "must be logged in through a first-party Pro, Max, or Team account",
+            "requires a first-party Pro, Max, or Team login, an ANTHROPIC_API_KEY, "
+            "or a Console `/login managed key`",
             status.stdout,
         )
 

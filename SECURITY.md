@@ -83,17 +83,23 @@ restore state, authentication, credentials, chats, or sessions.
 The bundled Fable/Opus Planner-or-Advisor bridge gives authentication and model
 subprocesses only a minimal platform environment, preserving home discovery for the
 official CLI while excluding credential, config-redirection, provider/model/effort,
-endpoint/gateway, proxy/CA/mTLS, and telemetry override families. It disables tools
-and session persistence and requires structurally valid runtime usage metadata to
-contain the pinned primary plus only the exact helper allowlist for that model. The
+endpoint/gateway, proxy/CA/mTLS, and telemetry override families. Fable 5.1 may
+also pass only an explicitly selected `ANTHROPIC_API_KEY` to the official CLI after
+the CLI reports that auth mode; first-party Pro, Max, Team, and Console `/login managed key`
+modes remain accepted without inheriting ambient secrets. This is still sealed Claude
+Code CLI transport, never direct HTTP. It disables tools and session
+persistence and requires structurally valid runtime usage metadata to contain the
+pinned primary plus only the exact helper allowlist for that model. The
 managed workflow authorizes only root to call planning tools, but MCP does not
 provide caller identity; that caller boundary remains instruction-enforced rather
 than server-authenticated.
 
-Routing schema/policy version 5 adds the sealed Opus subscription route while
-retaining strict validation for schemas 1–4. Legacy schemas cannot smuggle newer
-fields, generic model routes cannot encode either reserved bundled Claude model, and
-only one bundled Claude Planner-or-Advisor seat may exist. Persistent Designer
+Routing schema/policy version 6 adds the sealed Fable 5.1 route while retaining
+strict validation for schemas 1–5. Schemas 1–5 retain `claude-fable-5` and its
+reviewed helper policy; schema 6 pins `claude-fable-5-1`, requires matching runtime
+`canonicalModel` and provider `firstParty`, and permits no helper. Legacy schemas
+cannot smuggle newer fields, generic model routes cannot encode any reserved bundled
+Claude model, and only one bundled Claude Planner-or-Advisor seat may exist. Persistent Designer
 accepts only a direct same-provider model, never a privileged bundled Claude MCP
 route or a project-shadowable unqualified agent name.
 Cross-provider/custom Designers remain task-local and require current-project

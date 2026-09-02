@@ -27,6 +27,7 @@ from typing import Any
 from routing_state import (
     FABLE_EFFORTS,
     FABLE_MODEL,
+    LEGACY_FABLE_MODEL,
     MANAGED_MARKER,
     OPUS_EFFORTS,
     OPUS_MODEL,
@@ -41,8 +42,8 @@ except ModuleNotFoundError as exc:  # pragma: no cover - Python < 3.11
     raise SystemExit("Python 3.11 or newer is required (missing tomllib).") from exc
 
 
-POLICY_VERSION = 5
-STATE_SCHEMA = 5
+POLICY_VERSION = 6
+STATE_SCHEMA = 6
 ADVISOR_REVIEW_LIMIT = 8
 STATE_FILENAME = ".codex-orchestration-routing.json"
 PROBE_VALUE = "CODEX_ORCHESTRATION_CAPABILITY_PROBE"
@@ -51,6 +52,7 @@ FABLE_DEFAULT_EFFORT = "high"
 FABLE_EFFORT_CHOICES = ("low", "medium", "high", "xhigh", "max")
 FABLE_EFFORT_ALIASES = {"ultra": "max"}
 OPUS_DEFAULT_EFFORT = "high"
+FABLE_MIN_CLAUDE_VERSION = (2, 1, 257)
 OPUS_MIN_CLAUDE_VERSION = (2, 1, 219)
 FABLE_SERVERS = {
     "fable-advisor-python3": ("python3", []),
@@ -120,7 +122,7 @@ def parse_args() -> argparse.Namespace:
     planner.add_argument(
         "--planner-fable",
         action="store_true",
-        help="Use the bundled Claude Fable 5 planner through Claude Code.",
+        help="Use the bundled Claude Fable 5.1 planner through Claude Code.",
     )
     planner.add_argument(
         "--planner-opus",
@@ -139,7 +141,7 @@ def parse_args() -> argparse.Namespace:
     advisor.add_argument(
         "--advisor-fable",
         action="store_true",
-        help="Use the bundled Claude Fable 5 advisor through Claude Code.",
+        help="Use the bundled Claude Fable 5.1 advisor through Claude Code.",
     )
     advisor.add_argument(
         "--advisor-opus",
@@ -278,7 +280,11 @@ def _validate_args(args: argparse.Namespace) -> None:
     ):
         if value is not None and not pattern.fullmatch(value):
             raise ConfigurationError(f"Invalid {label}: {value!r}.")
-        if "model" in label and value in {FABLE_MODEL, OPUS_MODEL}:
+        if "model" in label and value in {
+            LEGACY_FABLE_MODEL,
+            FABLE_MODEL,
+            OPUS_MODEL,
+        }:
             raise ConfigurationError(
                 f"{label.title()} {value!r} is a reserved Claude model ID; "
                 "select its bundled sealed route instead."
@@ -301,7 +307,7 @@ def normalize_fable_effort(value: str) -> str:
     if effective not in FABLE_EFFORTS:
         supported = ", ".join((*FABLE_EFFORT_CHOICES, *FABLE_EFFORT_ALIASES))
         raise ConfigurationError(
-            f"Claude Fable 5 effort must be one of: {supported}."
+            f"Claude Fable 5.1 effort must be one of: {supported}."
         )
     return effective
 
@@ -457,7 +463,7 @@ class AppServer:
                     "clientInfo": {
                         "name": "codex_orchestration_installer",
                         "title": "Codex Orchestration Installer",
-                        "version": "0.9.3",
+                        "version": "0.10.0",
                     },
                     "capabilities": {"experimentalApi": True},
                 },
@@ -933,12 +939,18 @@ def _parse_claude_version(output: str) -> tuple[int, int, int]:
         ) from exc
 
 
+def _claude_display_name(model: str) -> str | None:
+    if model == FABLE_MODEL:
+        return "Claude Fable 5.1"
+    if model == LEGACY_FABLE_MODEL:
+        return "Claude Fable 5"
+    if model == OPUS_MODEL:
+        return "Claude Opus 5"
+    return None
+
+
 def verify_claude_prerequisites(model: str, effort: str) -> dict[str, str]:
-    display_name = (
-        "Claude Fable 5" if model == FABLE_MODEL else "Claude Opus 5"
-        if model == OPUS_MODEL
-        else None
-    )
+    display_name = _claude_display_name(model)
     if display_name is None:
         raise ConfigurationError("The bundled Claude model is not sealed.")
     try:
@@ -952,7 +964,10 @@ def verify_claude_prerequisites(model: str, effort: str) -> dict[str, str]:
         raise ConfigurationError("The bundled Claude planning bridge is missing.") from exc
     try:
         claude = resolve_claude()
-        auth = check_claude_auth(claude)
+        auth = check_claude_auth(
+            claude,
+            allow_api_keys=model in {FABLE_MODEL, LEGACY_FABLE_MODEL},
+        )
         environment = sanitized_environment()
         version_result = (
             subprocess.run(
@@ -964,7 +979,7 @@ def verify_claude_prerequisites(model: str, effort: str) -> dict[str, str]:
                 timeout=PROBE_TIMEOUT_SECONDS,
                 check=False,
             )
-            if model == OPUS_MODEL
+            if model in {FABLE_MODEL, OPUS_MODEL}
             else None
         )
         help_result = subprocess.run(
@@ -985,15 +1000,22 @@ def verify_claude_prerequisites(model: str, effort: str) -> dict[str, str]:
                 f"Claude Code version check exited with {version_result.returncode}."
             )
         installed_version = _parse_claude_version(version_result.stdout)
+    minimum_version = (
+        FABLE_MIN_CLAUDE_VERSION
+        if model == FABLE_MODEL
+        else OPUS_MIN_CLAUDE_VERSION
+        if model == OPUS_MODEL
+        else None
+    )
     if (
-        model == OPUS_MODEL
+        minimum_version is not None
         and installed_version is not None
-        and installed_version < OPUS_MIN_CLAUDE_VERSION
+        and installed_version < minimum_version
     ):
-        required = ".".join(map(str, OPUS_MIN_CLAUDE_VERSION))
+        required = ".".join(map(str, minimum_version))
         observed = ".".join(map(str, installed_version))
         raise ConfigurationError(
-            f"Claude Opus 5 requires Claude Code {required} or newer; "
+            f"{display_name} requires Claude Code {required} or newer; "
             f"found {observed}."
         )
     required = (
@@ -1057,7 +1079,7 @@ def _route_summary(route: dict[str, Any]) -> str:
     if route["kind"] == "agent":
         return f"custom agent {route['agent']}"
     if route["kind"] == "fable":
-        return f"Claude Fable 5 {route['effort']}"
+        return f"{_claude_display_name(route['model'])} {route['effort']}"
     if route["kind"] == "claude_subscription":
         return f"Claude Opus 5 {route['effort']}"
     return f"{route['model']}@{route['effort']}"
@@ -1402,7 +1424,7 @@ def _guard_subscription_transition(
     planner: dict[str, Any] | None,
     advisor: dict[str, Any] | None,
 ) -> None:
-    """Require an explicit full disable before replacing or moving Opus."""
+    """Require a full disable before replacing or moving a Claude route."""
 
     if existing_state is None:
         return
@@ -1413,11 +1435,6 @@ def _guard_subscription_transition(
     if existing is None:
         return
     existing_seat, existing_route = existing
-    opus_involved = existing_route.get("model") == OPUS_MODEL or (
-        requested is not None and requested[1].get("model") == OPUS_MODEL
-    )
-    if not opus_involved:
-        return
     same_route = (
         requested is not None
         and requested[0] == existing_seat
@@ -1535,19 +1552,18 @@ def _status(
                 and route.get("kind") in {"fable", "claude_subscription"}
             ]
             for route in subscription_routes:
-                label = (
-                    "Claude Fable 5"
-                    if route["model"] == FABLE_MODEL
-                    else "Claude Opus 5"
-                )
+                label = _claude_display_name(route["model"])
                 try:
-                    verify_claude_prerequisites(route["model"], route["effort"])
+                    auth = verify_claude_prerequisites(
+                        route["model"], route["effort"]
+                    )
                 except ConfigurationError as exc:
                     subscription_available = False
                     print(f"{label}: unavailable — {exc}")
                 else:
                     print(
-                        f"{label}: ready — first-party login; no model call made"
+                        f"{label}: ready — first-party {auth['auth_method']}; "
+                        "no model call made"
                     )
             try:
                 verified = verify_agent_routes(
@@ -1999,11 +2015,7 @@ def _repair(
             if isinstance(route, dict)
             and route.get("kind") in {"fable", "claude_subscription"}
         )
-        label = (
-            "Claude Fable 5"
-            if configured_model == FABLE_MODEL
-            else "Claude Opus 5"
-        )
+        label = _claude_display_name(configured_model)
         print(
             f"This repair does not change {label} authentication or request "
             "re-authentication."
@@ -2402,10 +2414,11 @@ def main() -> int:
                 subscription_label = (
                     "Claude Opus 5"
                     if args.planner_opus or args.advisor_opus
-                    else "Claude Fable 5"
+                    else "Claude Fable 5.1"
                 )
                 print(
-                    f"{subscription_label} login: ready — first-party; "
+                    f"{subscription_label} authentication: ready — first-party "
+                    f"{subscription_auth['auth_method']}; "
                     "setup makes no model call"
                 )
             if verified_agents:

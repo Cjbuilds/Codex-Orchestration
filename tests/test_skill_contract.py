@@ -40,7 +40,7 @@ class SkillContractTests(unittest.TestCase):
 
     def test_public_controls_are_simple_and_setup_is_persistent(self) -> None:
         self.assertIn("setup executor: GPT-5.6 Luna Extra High", SKILL)
-        self.assertIn("setup planner: Claude Fable 5 High", SKILL)
+        self.assertIn("setup planner: Claude Fable 5.1 High", SKILL)
         invocation = "$codex-orchestration:codex-orchestration"
         self.assertIn(f"{invocation} status", SKILL)
         self.assertIn(f"{invocation} repair", SKILL)
@@ -83,7 +83,7 @@ class SkillContractTests(unittest.TestCase):
 
     def test_ready_role_selection_uses_concise_activation_confirmation(self) -> None:
         expected = """```text
-Planner — Fable 5 high: Activated
+Planner — Fable 5.1 high: Activated
 Designer — Kimi K3: Activated
 Executor — GPT-5.6 Sol high: Activated
 ```"""
@@ -95,7 +95,7 @@ Executor — GPT-5.6 Sol high: Activated
         self.assertIn("Use `Activated` only after that exact route is locally ready", SKILL)
         self.assertIn("lifecycle state and next action instead of `Activated`", SKILL)
         self.assertIn(
-            "activation confirmation preserves the supplied `Fable 5` label", SKILL
+            "activation confirmation preserves the supplied `Fable 5.1` label", SKILL
         )
 
     def test_designer_is_optional_bounded_and_first_class(self) -> None:
@@ -295,27 +295,27 @@ Executor — GPT-5.6 Sol high: Activated
         self.assertIn("does not silently create, pause, resume, or clear it", SKILL)
 
     def test_fable_is_a_bundled_root_only_planner_or_advisor(self) -> None:
-        self.assertIn("advisor: Claude Fable 5 High", SKILL)
-        self.assertIn("planner: Claude Fable 5 High", SKILL)
+        self.assertIn("advisor: Claude Fable 5.1 High", SKILL)
+        self.assertIn("planner: Claude Fable 5.1 High", SKILL)
         self.assertIn("Omission or `Auto` means `High`", SKILL)
         self.assertIn("`Ultra` is a user-facing alias", SKILL)
         self.assertIn("--advisor-fable --advisor-effort <normalized-effort>", SKILL)
         self.assertIn("--planner-fable --planner-effort <normalized-effort>", SKILL)
         self.assertIn("built-in cross-provider Planner or Advisor exception", SKILL)
         self.assertIn("All bundled variants are disabled by default", SKILL)
-        self.assertIn("first-party Pro, Max, or Team account", SKILL)
+        self.assertIn("first-party Pro, Max, or Team login, `ANTHROPIC_API_KEY`", SKILL)
         self.assertIn("never extracts a token", SKILL)
         self.assertIn(
-            "reviewed Fable primary identity (`claude-fable-5` or "
-            "`claude-opus-4-8`)",
+            "Schema 6 Fable 5.1 requires the exact `claude-fable-5-1` "
+            "`modelUsage` key",
             SKILL,
         )
-        self.assertIn("explicit exact helper allowlist", SKILL)
+        self.assertIn("Schemas 1–5 retain the legacy `claude-fable-5`", SKILL)
         self.assertIn("unknown additional or missing primary model", SKILL)
         self.assertIn("`create_plan`", SKILL)
         self.assertIn("`revise_plan`", SKILL)
         self.assertIn("`review_plan`", SKILL)
-        self.assertIn("use the exact name `Claude Fable 5`", SKILL)
+        self.assertIn("use the exact name `Claude Fable 5.1`", SKILL)
         self.assertIn("do not expose or restate Claude account-plan metadata", SKILL)
         self.assertIn("MCP requests do not carry caller identity", SKILL)
         self.assertIn("Never describe the caller boundary as engine-enforced", SKILL)
@@ -378,7 +378,7 @@ Executor — GPT-5.6 Sol high: Activated
         self.assertIn("eight-review approval bound", RELEASE)
         self.assertEqual(NATIVE_SCRIPT.count("ADVISOR_REVIEW_LIMIT ="), 1)
         # Product/model names and unrelated concurrency facts remain five-based.
-        self.assertIn("Claude Fable 5", README)
+        self.assertIn("Claude Fable 5.1", README)
         self.assertIn("Claude Opus 5", RELEASE)
         self.assertIn("five-hour", REFERENCE)
 

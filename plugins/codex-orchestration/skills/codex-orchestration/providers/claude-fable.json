@@ -1,8 +1,8 @@
 {
   "schema": 1,
   "id": "claude-fable",
-  "version": 1,
-  "name": "Claude Fable 5",
+  "version": 2,
+  "name": "Claude Fable 5.1",
   "lane": "subscription",
   "experimental": false,
   "qualified": true,
@@ -10,7 +10,7 @@
   "wire_api": null,
   "auth": "first_party_cli",
   "models": {
-    "claude-fable-5": {
+    "claude-fable-5-1": {
       "default_effort": "high",
       "supported_efforts": [
         "low",

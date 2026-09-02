@@ -1,6 +1,21 @@
 # Changelog
 
-## 0.9.3 — Unreleased
+## 0.10.0 — Unreleased
+
+- Upgrade the sealed current Fable route to Claude Fable 5.1
+  (`claude-fable-5-1`) and native routing schema/policy 6. New routes require
+  Claude Code 2.1.257 or newer and accept first-party Pro, Max, and Team login,
+  `ANTHROPIC_API_KEY`, or Console `/login managed key` authentication without
+  changing the sealed Claude Code CLI transport into direct HTTP.
+- Qualify Fable 5.1 only when runtime metadata reports the exact
+  `claude-fable-5-1` `modelUsage` key with matching `canonicalModel`,
+  `firstParty` provider, and no helper model.
+- Keep schemas 1–5 as strict legacy state: their Fable route remains
+  `claude-fable-5` with its previously reviewed primary/helper policy, and can
+  still be validated, upgraded, or disabled without rewriting the restore
+  snapshot.
+
+## 0.9.3 — 2026-09-02
 
 - Raise the bounded Advisor approval loop from five to eight reviews while
   preserving immediate approval exit and fail-closed plan, ledger, and

@@ -1,6 +1,6 @@
 # Codex Orchestration
 
-Bring models like Claude Fable 5 and Claude Opus 5 into Codex, give each model a role, and let Codex coordinate the work.
+Bring models like Claude Fable 5.1 and Claude Opus 5 into Codex, give each model a role, and let Codex coordinate the work.
 
 ## What is it?
 
@@ -23,7 +23,7 @@ The model selected for the Codex task remains in charge. It passes work between 
                              |
                              v
                PLANNER CREATES THE FIRST PLAN
-              Fable 5, another model, or Codex
+              Fable 5.1, another model, or Codex
                              |
                              v
                     ADVISOR REVIEWS IT
@@ -53,7 +53,7 @@ Planner and Advisor can work through several revisions. Codex stops as soon as t
 
 ## Why use it?
 
-- Bring Fable 5, Opus 5, or another compatible model into Codex.
+- Bring Fable 5.1, Opus 5, or another compatible model into Codex.
 - Use different models for planning, review, design, and implementation.
 - Get a stronger plan before code changes begin.
 - Run independent implementation work in parallel—up to 2x faster on suitable tasks.
@@ -77,22 +77,22 @@ Start an ordinary Codex prompt with the literal skill label
 not terminal commands. You can also browse installed skills with Codex's built-in
 `/skills` discovery.
 
-Use Fable 5 to plan, Sol to advise, and Luna to implement:
+Use Fable 5.1 to plan, Sol to advise, and Luna to implement:
 
 ```text
-$codex-orchestration:codex-orchestration setup planner: Claude Fable 5 High, advisor: GPT-5.6 Sol High, executor: GPT-5.6 Luna Extra High
+$codex-orchestration:codex-orchestration setup planner: Claude Fable 5.1 High, advisor: GPT-5.6 Sol High, executor: GPT-5.6 Luna Extra High
 ```
 
 Add a dedicated Designer when the work needs a design handoff:
 
 ```text
-$codex-orchestration:codex-orchestration setup planner: Claude Fable 5 High, advisor: GPT-5.6 Sol High, designer: GPT-5.6 Terra High, executor: GPT-5.6 Luna Extra High
+$codex-orchestration:codex-orchestration setup planner: Claude Fable 5.1 High, advisor: GPT-5.6 Sol High, designer: GPT-5.6 Terra High, executor: GPT-5.6 Luna Extra High
 ```
 
-Or let your current Codex model plan and use Fable 5 only as Advisor:
+Or let your current Codex model plan and use Fable 5.1 only as Advisor:
 
 ```text
-$codex-orchestration:codex-orchestration setup advisor: Claude Fable 5 High, executor: GPT-5.6 Luna Extra High
+$codex-orchestration:codex-orchestration setup advisor: Claude Fable 5.1 High, executor: GPT-5.6 Luna Extra High
 ```
 
 Or use Claude Opus 5 as the Advisor:
@@ -103,13 +103,13 @@ $codex-orchestration:codex-orchestration setup advisor: Claude Opus 5 XHigh, exe
 
 After setup, start another new task and use Codex normally. The saved workflow applies automatically.
 
-Fable defaults to **High**. You can choose **Low**, **Medium**, **High**, **XHigh**, or **Max**. **Ultra** is accepted as an alias for Max because Claude Code does not expose a separate Ultra effort.
+Fable 5.1 defaults to **High**. You can choose **Low**, **Medium**, **High**, **XHigh**, or **Max**. **Ultra** is accepted as an alias for Max because Claude Code does not expose a separate Ultra effort. Fable 5.1 requires Claude Code **2.1.257 or newer**.
 
 Opus 5 also defaults to **High** and supports the same five exact effort values,
 but not the Fable-only **Ultra** alias. Opus requires Claude Code **2.1.219 or
 newer**.
 
-Fable 5 and Opus 5 use the official Claude Code CLI and a compatible first-party Claude login. You do not need to add an Anthropic API key to Codex.
+Fable 5.1 and Opus 5 use the sealed official Claude Code CLI, not direct HTTP. Fable 5.1 accepts a first-party Pro, Max, or Team login, `ANTHROPIC_API_KEY`, or a Console `/login managed key`; you never add a provider definition or key to Codex. Only the selected API-key mode is passed to the CLI, and other ambient credential or transport overrides are not inherited.
 
 ## Choose your roles
 
@@ -129,7 +129,7 @@ When every requested route is ready in the current task, the plugin confirms onl
 the roles you supplied, in your order:
 
 ```text
-Planner — Fable 5 high: Activated
+Planner — Fable 5.1 high: Activated
 Designer — Kimi K3: Activated
 Executor — GPT-5.6 Sol high: Activated
 ```
@@ -152,9 +152,9 @@ status inspection only; it never authorizes configuration, credentials, or spend
 Examples:
 
 ```text
-$codex-orchestration:codex-orchestration setup planner: Claude Fable 5 High, advisor: GPT-5.6 Sol High, executor: GPT-5.6 Luna Extra High
+$codex-orchestration:codex-orchestration setup planner: Claude Fable 5.1 High, advisor: GPT-5.6 Sol High, executor: GPT-5.6 Luna Extra High
 
-$codex-orchestration:codex-orchestration setup planner: GPT-5.6 Sol Extra High, advisor: Claude Fable 5 High, executor: GPT-5.6 Luna Extra High
+$codex-orchestration:codex-orchestration setup planner: GPT-5.6 Sol Extra High, advisor: Claude Fable 5.1 High, executor: GPT-5.6 Luna Extra High
 
 $codex-orchestration:codex-orchestration setup designer: GPT-5.6 Terra High, executor: GPT-5.6 Luna Extra High
 
@@ -195,14 +195,16 @@ the explicitly billable isolated Gate 0. New providers or subscription CLIs stil
 require a reviewed bundled manifest and adapter; arbitrary URLs and arbitrary local
 CLIs are not auto-trusted.
 
-Fable 5 and Opus 5 are sealed subscription exceptions available only as Planner
-or Advisor through first-party Claude login. Only one bundled Claude subscription
+Fable 5.1 and Opus 5 are sealed subscription exceptions available only as Planner
+or Advisor through the official Claude Code CLI. Only one bundled Claude subscription
 seat may be configured at a time; neither model is a Designer, Executor, general
 custom role, or Desktop picker entry. See the
 [External Models reference](plugins/codex-orchestration/skills/codex-orchestration/references/external-models.md)
 for commands, lifecycle states, extension rules, and threat boundaries.
-Fable 5 is the bundled cross-provider exception retained for compatibility;
-Opus 5 is the second sealed bundled exception added in version 0.9.0.
+Fable 5.1 is the current bundled cross-provider exception. Schemas 1–5 retain the
+legacy `claude-fable-5` route and its reviewed primary/helper policy; schema 6
+uses `claude-fable-5-1`. Opus 5 is the second sealed bundled exception added in
+version 0.9.0.
 
 The bundled Claude bridge starts each authentication and model subprocess with
 only a minimal platform environment. It preserves `HOME` plus canonical
@@ -219,7 +221,7 @@ $codex-orchestration:codex-orchestration create project role: researcher
 ```
 
 Project roles live in `.codex/agents/`; personal roles live in
-`~/.codex/agents/`. An unbundled cross-provider model still requires an existing authenticated, compatible provider. Fable 5 and Opus 5 are the bundled cross-provider exceptions.
+`~/.codex/agents/`. An unbundled cross-provider model still requires an existing authenticated, compatible provider. Fable 5.1 and Opus 5 are the bundled cross-provider exceptions.
 
 ## Use it with Codex Goals
 
@@ -235,9 +237,9 @@ $codex-orchestration:codex-orchestration status
 $codex-orchestration:codex-orchestration status --require-effective
 $codex-orchestration:codex-orchestration repair
 $codex-orchestration:codex-orchestration --update
-$codex-orchestration:codex-orchestration setup planner: Claude Fable 5 High, advisor: GPT-5.6 Sol High, designer: GPT-5.6 Terra High, executor: GPT-5.6 Luna Extra High
+$codex-orchestration:codex-orchestration setup planner: Claude Fable 5.1 High, advisor: GPT-5.6 Sol High, designer: GPT-5.6 Terra High, executor: GPT-5.6 Luna Extra High
 $codex-orchestration:codex-orchestration setup advisor: Claude Opus 5 XHigh, executor: GPT-5.6 Luna Extra High
-$codex-orchestration:codex-orchestration Planner: Claude Fable 5 High, Designer: Kimi K3
+$codex-orchestration:codex-orchestration Planner: Claude Fable 5.1 High, Designer: Kimi K3
 $codex-orchestration:codex-orchestration disable
 ```
 
@@ -253,11 +255,11 @@ unavailable. The seat label never authorizes credential entry or a paid probe.
 
 `disable` restores the routing values that existed before setup. It does not delete user-owned custom roles.
 
-An Opus seat can be updated in place on the same Planner or Advisor seat,
-including its effort. Replacing Opus with Fable, replacing Fable with Opus,
-moving Opus between Planner and Advisor, or removing Opus through another setup
-requires the prompt `$codex-orchestration:codex-orchestration disable` first,
-followed by one fresh complete setup. This prevents silent subscription route
+A bundled Claude seat can update only its effort in place on the same Planner or
+Advisor seat. Replacing legacy Fable 5 with Fable 5.1, replacing Fable with Opus,
+moving a bundled Claude route between Planner and Advisor, or removing it through
+another setup requires the prompt `$codex-orchestration:codex-orchestration disable`
+first, followed by one fresh complete setup. This prevents silent subscription route
 replacement.
 
 `repair` is narrower than setup or disable. When status reports that plugin-managed

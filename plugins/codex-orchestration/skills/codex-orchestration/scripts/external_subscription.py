@@ -10,7 +10,7 @@ import fable_advisor_mcp
 
 
 FABLE_PROVIDER = "claude-fable"
-FABLE_MODEL = "claude-fable-5"
+FABLE_MODEL = "claude-fable-5-1"
 OPUS_PROVIDER = "claude-opus"
 OPUS_MODEL = "claude-opus-5"
 SEALED_MODELS = {
@@ -82,7 +82,11 @@ def status(
         "configured Claude effort differs from the requested effort",
     )
     executable = fable_advisor_mcp.resolve_claude()
-    auth = fable_advisor_mcp.check_claude_auth(executable)
+    fable_advisor_mcp.verify_fable_claude_version(executable, model)
+    auth = fable_advisor_mcp.check_claude_auth(
+        executable,
+        allow_api_keys=model == FABLE_MODEL,
+    )
     return {
         "provider": provider_id,
         "model": model,
