@@ -68,6 +68,7 @@ mutate_state_after_write = home / ".fake-mutate-state-after-write"
 ok_overridden = home / ".fake-ok-overridden"
 overridden_returned = home / ".fake-overridden-returned"
 fail_overridden_rollback = home / ".fake-fail-overridden-rollback"
+validator_capabilities = home / ".fake-validator-capabilities.json"
 
 def read_config():
     if store.exists():
@@ -176,7 +177,14 @@ for line in sys.stdin:
             ],
         }
     elif method == "model/list":
-        result = {"data": models, "nextCursor": None}
+        listed_models = json.loads(json.dumps(models))
+        if validator_capabilities.exists():
+            override = json.loads(validator_capabilities.read_text(encoding="utf-8"))
+            if override == "missing":
+                listed_models[0].pop("supportedReasoningEfforts", None)
+            else:
+                listed_models[0]["supportedReasoningEfforts"] = override
+        result = {"data": listed_models, "nextCursor": None}
     elif method == "config/batchWrite":
         params = message["params"]
         expected = params.get("expectedVersion")
@@ -420,6 +428,11 @@ class NativeRoutingTests(unittest.TestCase):
     def read_fake_config(self) -> dict[str, object]:
         return json.loads(
             (self.home / ".fake-user-config.json").read_text(encoding="utf-8")
+        )
+
+    def write_validator_capabilities(self, value: object) -> None:
+        (self.home / ".fake-validator-capabilities.json").write_text(
+            json.dumps(value), encoding="utf-8"
         )
 
     def write_personal_agent(self, name: str, *, managed: bool = False) -> Path:
@@ -678,6 +691,41 @@ class NativeRoutingTests(unittest.TestCase):
                 self.assertFalse((self.home / NATIVE.STATE_FILENAME).exists())
                 self.assertFalse((self.home / ".fake-user-config.json").exists())
 
+    def test_validator_setup_rejects_incomplete_or_malformed_capabilities(self) -> None:
+        cases = (
+            ("missing", "no usable supported reasoning efforts"),
+            ([], "no usable supported reasoning efforts"),
+            ({"reasoningEffort": "high"}, "no usable supported reasoning efforts"),
+            ([None], "malformed reasoning effort capabilities"),
+            ([{}], "malformed reasoning effort capabilities"),
+            ([{"reasoningEffort": ""}], "malformed reasoning effort capabilities"),
+            ([{"reasoningEffort": "auto"}], "malformed reasoning effort capabilities"),
+            (
+                [
+                    {"reasoningEffort": "high"},
+                    {"reasoningEffort": "high"},
+                ],
+                "malformed reasoning effort capabilities",
+            ),
+        )
+        for capabilities, message in cases:
+            with self.subTest(capabilities=capabilities):
+                self.write_validator_capabilities(capabilities)
+                result = self.run_script(
+                    "--executor-model",
+                    "gpt-5.6-luna",
+                    "--validator-model",
+                    "gpt-5.6-sol",
+                    "--validator-effort",
+                    "high",
+                    "--apply",
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(message, result.stderr)
+                self.assertFalse((self.home / NATIVE.STATE_FILENAME).exists())
+                self.assertFalse((self.home / ".fake-user-config.json").exists())
+
     def test_validator_checker_path_is_shell_quoted(self) -> None:
         source = Path("/tmp/plugin $value `command` 'quoted'/configure_native_routing.py")
         route = {"kind": "model", "model": "gpt-5.6-sol", "effort": "medium"}
@@ -776,6 +824,28 @@ class NativeRoutingTests(unittest.TestCase):
             "'catalog-model-that-disappeared' is not in this App Server model catalog",
             status.stdout,
         )
+
+    def test_status_rejects_incomplete_or_malformed_validator_capabilities(
+        self,
+    ) -> None:
+        self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--validator-model",
+            "gpt-5.6-sol",
+            "--apply",
+        )
+        for capabilities, message in (
+            ("missing", "no usable supported reasoning efforts"),
+            ([], "no usable supported reasoning efforts"),
+            ([{"description": "missing effort"}], "malformed reasoning effort"),
+        ):
+            with self.subTest(capabilities=capabilities):
+                self.write_validator_capabilities(capabilities)
+                status = self.run_script("--status", "--require-effective", check=False)
+                self.assertEqual(status.returncode, 1)
+                self.assertIn("Validator route: unavailable", status.stdout)
+                self.assertIn(message, status.stdout)
 
     def test_reserved_claude_model_ids_require_their_sealed_cli_routes(self) -> None:
         missing_codex = self.root / "must-not-start-app-server"

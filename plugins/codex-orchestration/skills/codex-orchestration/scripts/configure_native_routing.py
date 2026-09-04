@@ -909,6 +909,52 @@ def resolve_model_effort(
     return resolved
 
 
+def resolve_validator_effort(
+    model: str,
+    effort: str,
+    catalog: dict[str, dict[str, Any]],
+) -> str:
+    """Resolve a Validator only from a complete native effort capability list."""
+
+    item = catalog.get(model)
+    if item is None:
+        raise ConfigurationError(
+            f"Validator model {model!r} is not in this App Server model catalog."
+        )
+    options = item.get("supportedReasoningEfforts")
+    if type(options) is not list or not options:
+        raise ConfigurationError(
+            f"Validator model {model!r} has no usable supported reasoning efforts."
+        )
+    supported: set[str] = set()
+    for option in options:
+        if type(option) is not dict:
+            raise ConfigurationError(
+                f"Validator model {model!r} has malformed reasoning effort capabilities."
+            )
+        value = option.get("reasoningEffort")
+        if (
+            type(value) is not str
+            or EFFORT_RE.fullmatch(value) is None
+            or value == "auto"
+            or value in supported
+        ):
+            raise ConfigurationError(
+                f"Validator model {model!r} has malformed reasoning effort capabilities."
+            )
+        supported.add(value)
+    resolved = item.get("defaultReasoningEffort") if effort == "auto" else effort
+    if type(resolved) is not str or not resolved:
+        raise ConfigurationError(f"Could not resolve Validator effort for {model!r}.")
+    if resolved not in supported:
+        values = ", ".join(sorted(supported))
+        raise ConfigurationError(
+            f"Validator effort {resolved!r} is not supported by {model!r}; "
+            f"choose {values}."
+        )
+    return resolved
+
+
 def select_fable_server() -> str:
     """Select the historical launcher ID shared by bundled Claude routes."""
 
@@ -1596,12 +1642,10 @@ def _status(
             if validator is not None:
                 try:
                     validator_catalog = load_models(app)
-                    resolve_model_effort(
-                        "Validator",
+                    resolve_validator_effort(
                         validator["model"],
                         validator["effort"],
                         validator_catalog,
-                        False,
                     )
                 except (ConfigurationError, KeyError, TypeError) as exc:
                     validator_available = False
@@ -2434,12 +2478,10 @@ def main() -> int:
                     "effort": designer_effort,
                 }
             if args.validator_model:
-                validator_effort = resolve_model_effort(
-                    "Validator",
+                validator_effort = resolve_validator_effort(
                     args.validator_model,
                     args.validator_effort,
                     catalog,
-                    False,
                 )
                 validator = {
                     "kind": "model",

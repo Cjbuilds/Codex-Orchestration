@@ -12,3 +12,4 @@
 - Preserve the original restore snapshot during seat changes. Native status/catalog readiness is separate from a live model call; rerun from the target host and workspace.
 - Documents/iCloud checkouts can block Git on dataless file hydration. Use a fresh non-iCloud clone for execution and preserve the old checkout.
 - The sealed Claude planner permits 600 seconds; callers need a longer timeout. A shorter outer timeout can interrupt a healthy Extra High planning call.
+- Validator setup and status must reject missing, empty, or malformed effort capability lists; a model name alone does not prove the requested effort is supported.

@@ -306,7 +306,7 @@ Executor — GPT-5.6 Sol high: Activated
         self.assertIn("first-party Pro, Max, or Team login, `ANTHROPIC_API_KEY`", SKILL)
         self.assertIn("never extracts a token", SKILL)
         self.assertIn(
-            "Schema 6 Fable 5.1 requires the exact `claude-fable-5-1` "
+            "Schemas 6–7 Fable 5.1 require the exact `claude-fable-5-1` "
             "`modelUsage` key",
             SKILL,
         )
