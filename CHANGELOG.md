@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.11.0 — 2026-09-05
+
+- Add an optional direct-model Validator seat, including GPT-6 Astra Extra High,
+  with native routing schema/policy 7. Existing schemas 1–6 remain readable and
+  their restore snapshots retain the existing repair and disable behavior.
+- Require fresh validation of every substantive output batch and the integrated
+  outcome when Validator is configured, including root-authored work. Revisions,
+  missing evidence, unavailable routes, and malformed receipts block acceptance.
+- Add a pure JSON receipt checker for artifact revisions, criteria, evidence
+  coverage, and consistent decisions. Reviews stay root-directed and read-only
+  by instruction, with a fixed three-review bound and no recursive review loop.
+
 ## 0.10.0 — Unreleased
 
 - Upgrade the sealed current Fable route to Claude Fable 5.1

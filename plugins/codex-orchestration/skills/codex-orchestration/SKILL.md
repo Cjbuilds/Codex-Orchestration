@@ -1,6 +1,6 @@
 ---
 name: codex-orchestration
-description: Use for natural-language questions or requests about whether Kimi K3 or another audited External Model is available or callable as Designer or another role, and for assigning models to Planner, Advisor, Designer, Executor, researcher, reviewer, writer, or supervisor roles. Also use when the user invokes Codex Orchestration to update the plugin, create custom roles, define a workflow, or set up, inspect, repair, change, disable, or temporarily override model routing. Keep the selected task model as root and preserve Codex's Goal, permissions, integration, and verification behavior.
+description: Use for natural-language questions or requests about whether Kimi K3 or another audited External Model is available or callable as Designer or another role, and for assigning models to Planner, Advisor, Designer, Executor, Validator, researcher, reviewer, writer, or supervisor roles. Also use when the user invokes Codex Orchestration to update the plugin, create custom roles, define a workflow, or set up, inspect, repair, change, disable, or temporarily override model routing. Keep the selected task model as root and preserve Codex's Goal, permissions, integration, and verification behavior.
 ---
 
 # Codex Orchestration
@@ -18,6 +18,7 @@ slash commands. Codex's built-in `/skills` discovery may be used to browse and
 select the installed skill. Support these simple forms:
 
 ```text
+$codex-orchestration:codex-orchestration setup planner: Claude Fable 5.1 Extra High, advisor: GPT-6 Astra Extra High, executor: GPT-5.6 Sol Medium, validator: GPT-6 Astra Extra High
 $codex-orchestration:codex-orchestration setup executor: GPT-5.6 Luna Extra High
 $codex-orchestration:codex-orchestration setup executor: GPT-5.6 Luna Extra High, advisor: Claude Fable 5.1 High
 $codex-orchestration:codex-orchestration setup planner: Claude Fable 5.1 High, advisor: GPT-5.6 Sol High, executor: GPT-5.6 Luna Extra High
@@ -69,9 +70,9 @@ lifecycle and a provider-pinned custom agent.
 
 `remove custom roles` cleans only verified plugin-managed advisor/executor files. Arbitrary native roles are user-owned. An invocation with native seats and work but no control verb is a current-task override and must not rewrite config. Explicit External Model seat labels are the exception: they may perform only the clean preparation, connection, and readiness writes authorized in the External Model lifecycle below.
 
-Explicit seat labels are authoritative. `planner:` configures only Planner, `advisor:` configures only Advisor, `designer:` configures only Designer, and `executor:` configures only Executor. Never infer or change a seat from a model's historical use, default role, cached description, or provider; in particular, never reinterpret a supplied `planner:` model as an Advisor or a supplied `designer:` model as an Executor. Saved defaults may fill only omitted seats and never override a seat supplied in the current invocation.
+Explicit seat labels are authoritative. `planner:` configures only Planner, `advisor:` configures only Advisor, `designer:` configures only Designer, and `executor:` configures only Executor, and `validator:` configures only Validator. Never infer or change a seat from a model's historical use, default role, cached description, or provider; in particular, never reinterpret a supplied `planner:` model as an Advisor or a supplied `designer:` model as an Executor. Saved defaults may fill only omitted seats and never override a seat supplied in the current invocation.
 
-The executor is required for setup or a task-local override. It is not required for a custom-role creation request. Planner, advisor, and designer are optional: omitted planner means the current root model plans, omitted advisor means `advisor: none`, and omitted designer means `designer: none`. Do not ask separate planner or advisor questions, or a separate designer question, unless the user asks for help choosing them.
+The executor is required for setup or a task-local override. It is not required for a custom-role creation request. Planner, advisor, designer, and validator are optional: omitted planner means the current root model plans, omitted advisor means `advisor: none`, and omitted designer means `designer: none`, and omitted validator means `validator: none`. Do not ask separate planner or advisor questions, or a separate designer question, unless the user asks for help choosing them.
 
 For both persistent setup and task-local overrides, reject an identical Planner and Advisor route: the same direct model ID, the same custom-agent name, or more than one bundled Claude subscription seat across Fable 5.1 and Opus 5. Independent critique is required.
 
@@ -312,7 +313,7 @@ Model provider configurator and do not generalize their adapter to arbitrary CLI
 
 ## Create arbitrary custom roles
 
-Use native Codex custom-agent files for roles beyond the built-in planner, advisor, designer, and executor seats. Examples include researcher, reviewer, writer, supervisor, security auditor, browser debugger, or domain expert.
+Use native Codex custom-agent files for roles beyond the built-in planner, advisor, designer, executor, and validator seats. Examples include researcher, reviewer, writer, supervisor, security auditor, browser debugger, or domain expert.
 
 Use project scope when the user says `project`, `repo`, `workspace`, or `current project`. Write to `<trusted-project>/.codex/agents/<role-name>.toml`. Use personal scope only when explicitly requested and write to `~/.codex/agents/<role-name>.toml`.
 
@@ -341,7 +342,7 @@ If the user combines a workflow with a Codex Goal, leave Goal lifecycle and limi
 Use this path for a current same-provider setup such as Sol root to Luna or Terra children. Claude Fable 5.1 and Claude Opus 5 are the built-in cross-provider Planner or Advisor exceptions because they run through the bundled read-only MCP bridge and the user's authenticated Claude Code CLI.
 
 1. Identify the Codex binary used by the active host. Do not assume the shell `codex` is the Desktop binary.
-2. Resolve the exact executor and optional Planner, Advisor, and Designer IDs and efforts from that host.
+2. Resolve the exact executor and optional Planner, Advisor, Designer, and Validator IDs and efforts from that host.
 3. Run the bundled native configurator from this skill's real directory with Python 3.11 or newer. Use `python3` on typical macOS/Linux hosts; on Windows select an available `py -3.11` or `python` launcher after checking its version. Never use a repository-relative copy from the user's workspace.
 4. Inspect the dry-run output. A literal `setup` request authorizes applying a clean, non-replacement personal policy after that preview.
 5. Start a new task after apply. The user chooses the orchestrator in the normal model picker and no longer needs to invoke this skill for ordinary work.
@@ -383,7 +384,7 @@ The configurator capability-tests the complete four-field preset on the active t
 
 For the current validated v2 direct route, set `tool_namespace = "agents"`. Live testing on Desktop `0.144.0-alpha.4` showed that the default reserved `collaboration.spawn_agent` schema rejected expanded model/effort metadata, while `agents` accepted the same request and spawned Luna at `xhigh`. Treat this as a required control-surface setting for that tested path, not as the executor selection. `usage_hint_text` carries the actual Planner, Advisor, Designer, and Executor routes.
 
-Do not add `enabled = true` for a Sol or Terra root. Their current model metadata selects v2. The configurator intentionally manages these routing fields:
+Do not add `enabled = true` for a Astra, Sol, or Terra root. Their current model metadata selects v2. The configurator intentionally manages these routing fields:
 
 - `features.multi_agent_v2.hide_spawn_agent_metadata`;
 - `features.multi_agent_v2.tool_namespace`;
@@ -410,7 +411,7 @@ python3 <skill-dir>/scripts/configure_native_routing.py \
   --status --require-effective
 ```
 
-Run status from the target project. The first form is descriptive. Use `--require-effective` for automation and release gates; it returns nonzero for incompatible clients, conflicts, overrides, incomplete controls, an unavailable bundled Claude or custom-agent route, or orphaned v0.4+ personal roles. Report the current task model as the orchestrator, Planner (`root` when omitted), configured Advisor, Designer, and Executor, whether the personal policy is installed and effective in that workspace, whether effective spawn controls are visible, whether the effective tool namespace is `agents`, the target config path, and checked-client compatibility. State that neither status form proves a live route or infers v2 activation for the model selected in a task; current Sol or Terra is the intended root.
+Run status from the target project. The first form is descriptive. Use `--require-effective` for automation and release gates; it returns nonzero for incompatible clients, conflicts, overrides, incomplete controls, an unavailable bundled Claude, custom-agent, or configured Validator catalog route, or orphaned v0.4+ personal roles. Report the current task model as the orchestrator, Planner (`root` when omitted), configured Advisor, Designer, Executor, and Validator, whether the personal policy is installed and effective in that workspace, whether effective spawn controls are visible, whether the effective tool namespace is `agents`, the target config path, and checked-client compatibility. State that neither status form proves a live route or infers v2 activation for the model selected in a task; a current Astra, Sol, or Terra root can activate v2.
 
 When status reports `managed fields conflict with local restore state`, do not run
 setup or disable over the conflict and do not assume authentication failed. A literal
@@ -587,7 +588,7 @@ fork_turns = "none"
 
 A small positive partial fork is technically valid in Codex, but this skill deliberately requires `none`: it minimizes duplicated context and makes the root send a deliberate self-contained packet. Never use the default `all` with a different route. Full-history forks inherit the root model and Codex rejects the override.
 
-For a direct Planner, Advisor, Designer, or Executor route, pass the exact configured model and concrete effort. For a custom route, pass the exact namespaced `agent_type`. Do not force a service tier; supported children may inherit Fast/priority from the parent, so tell users who prioritize allowance savings not to run the root in Fast mode.
+For a direct Planner, Advisor, Designer, Executor, or Validator route, pass the exact configured model and concrete effort. For a custom route, pass the exact namespaced `agent_type`. Do not force a service tier; supported children may inherit Fast/priority from the parent, so tell users who prioritize allowance savings not to run the root in Fast mode.
 
 Direct model overrides keep the root's provider. Before a direct spawn, establish that the target model is on the same provider. If it differs or cannot be established, mark the route unavailable and require a custom agent that pins `model_provider`.
 
@@ -655,6 +656,40 @@ the approved plan, and decides what implementation packet Executor receives. A
 Designer may use the same model as another seat because independent critique is not
 its purpose; the Planner/Advisor route-separation rule remains unchanged.
 
+## Validator output review
+
+Validator is an optional direct same-provider seat. Resolve its exact model and
+supported effort from the executing host, including `gpt-6-astra` at `xhigh` when
+available. Use `--validator-model` and `--validator-effort`; omitted effort resolves
+`auto` to the concrete catalog default. Effort without a model is invalid. Omitted
+Validator persists `null` and keeps the existing workflow. Custom-agent and
+bundled Claude routes are not supported for persistent Validator.
+
+When configured, Validator is required for every substantive generated output,
+including root-only work, and for the complete integrated outcome and code quality.
+Read [output-validation.md](references/output-validation.md) before its first use.
+Batch coherent deliverables before accepting or relying on them downstream;
+include code, documents, research, analysis, visuals, transformed transcripts, and
+user-facing plans. Internal plan approval stays with Advisor. Control chatter,
+raw evidence logs, and review reports do not themselves need review.
+
+Use a fresh exact Validator route with `fork_turns="none"`. It is read-only by
+instruction, reports only to root, and never edits, runs tests, spawns children,
+or directs another seat. Root supplies test evidence and owns all fixes. Advisor
+and Validator may use the same model in separate fresh sessions. Do not let a
+producer session validate its own work.
+
+Require the JSON receipt and run `scripts/validate_output.py --packet <file>
+--receipt <file>` from this installed skill. Root also verifies the real invocation,
+current artifact revisions, evidence quality, and actionable findings. Only a
+complete `VALIDATION_APPROVED` receipt for the current batch permits acceptance.
+Malformed, stale, unavailable, or evidence-incomplete review blocks acceptance.
+Fixes require a fresh review; at most three reviews per logical batch or final
+outcome are allowed before reporting unresolved work. Never silently substitute a
+model, disable Validator, or invent approval. Explicit user overrides, including
+no-subagents, prevail with a disclosed unvalidated result. The plugin does not
+mechanically enforce the review loop or a child sandbox.
+
 ## Executor handoff
 
 Give each executor one bounded packet with:
@@ -703,6 +738,8 @@ Never call that 65% fewer raw tokens, a guaranteed five-hour or weekly-limit sav
 - `scripts/configure_native_routing.py`: one-time native setup, status, seat changes, and disable.
 - `scripts/fable_advisor_mcp.py`: fail-closed Fable 5.1 and Opus 5 planning and review bridge; the filename is retained for compatibility.
 - `scripts/configure_orchestration.py`: namespaced custom agents, provider pins, safe removal, and legacy migration.
+- `scripts/validate_output.py`: pure validation-receipt checks; exit 0 approved, 1 revise, 2 blocked.
+- [output-validation.md](references/output-validation.md): output coverage, packet and receipt format, revision binding, and review boundaries.
 - `scripts/inspect_models.py`: fallible host-catalog diagnostics.
 - `scripts/external_configurator.py`: preview-first External Model provider, Gate 0, role, status, recovery, and removal lifecycle.
 - `scripts/external_auth_helper.py`: stable OS credential-store reader for documented command-backed provider auth.

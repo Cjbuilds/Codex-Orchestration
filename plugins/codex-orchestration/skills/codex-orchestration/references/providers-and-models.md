@@ -5,7 +5,7 @@ Use this reference for setup, client compatibility, custom providers, or a route
 ## The shortest correct model
 
 1. The model selected for the Codex task is the root orchestrator.
-2. A current Sol or Terra root uses multi-agent v2.
+2. A current Astra, Sol, or Terra root uses multi-agent v2.
 3. The saved policy tells the root which exact route to request for an optional Planner, optional Advisor, and delegated Executors.
 4. Codex still decides whether a spawn helps.
 5. Every different-model, different-effort, or custom-agent child uses `fork_turns = "none"` and a self-contained packet.
@@ -19,6 +19,7 @@ These facts were source-checked and runtime-tested on July 10, 2026. Always capa
 
 | Capability | Current behavior | Consequence |
 | --- | --- | --- |
+| Astra model metadata | `multi_agent_version = v2` on the September 5, 2026 host catalog | An Astra root supports the native policy; verify the executing host. |
 | Sol model metadata | `multi_agent_version = v2` | A Sol root uses v2 without forcing the feature flag. |
 | Terra model metadata | `multi_agent_version = v2` | A Terra root also uses the native policy. |
 | Luna model metadata | `multi_agent_version = v1` | Luna is suitable as a v2 child, but a Luna root does not activate this v2 policy. |
@@ -261,7 +262,7 @@ check itself reports authentication unavailable.
 
 The saved policy authorizes the root to call these planning tools and prohibits children from doing so. Current MCP requests provide no caller identity to the server, so that specific caller boundary is instruction-enforced, not server-authenticated. The bridge mechanically uses the same full saved-state validator as native status/repair/disable, restricts the operation surface, and runs the selected Claude model without tools or persistence.
 
-Saved state compatibility is explicit: schema 1 must carry policy version 1 and predates Fable and Planner; schema 2 must carry policy version 2 and may authorize only the historical Fable Advisor shape; schema 3 must carry policy version 3 and adds Planner; schema 4 must carry policy version 4 and adds the optional direct-model Designer route; schema 5 must carry policy version 5 and adds the Opus-only `claude_subscription` planning route while keeping `claude-fable-5`; schema 6 must carry policy version 6 and pins current Fable 5.1 to `claude-fable-5-1`. Schemas 1–5 remain valid for status, upgrade, and disable with their legacy Fable primary/helper policy. Schema and policy values must be actual JSON integers, not booleans or floats. Legacy state cannot contain fields introduced later; nested snapshots, scalar conversion, MCP launchers, and routes must match an emitted contract; and managed policy strings must carry the plugin marker before status, seat change, disable, or the bridge trusts them. Designer cannot use a bundled Claude route or a persistent unqualified agent name. Planner/Advisor may contain at most one bundled Claude subscription seat. Unknown extensions intentionally fail closed.
+Saved state compatibility is explicit: schema 1 must carry policy version 1 and predates Fable and Planner; schema 2 must carry policy version 2 and may authorize only the historical Fable Advisor shape; schema 3 must carry policy version 3 and adds Planner; schema 4 must carry policy version 4 and adds the optional direct-model Designer route; schema 5 must carry policy version 5 and adds the Opus-only `claude_subscription` planning route while keeping `claude-fable-5`; schema 6 must carry policy version 6 and pins current Fable 5.1 to `claude-fable-5-1`; schema 7 must carry policy version 7 and adds `validator: null` or a direct model route. Schema 6 remains valid unchanged, including its Fable 5.1 identity. Schemas 1–5 remain valid for status, upgrade, and disable with their legacy Fable primary/helper policy. Schema and policy values must be actual JSON integers, not booleans or floats. Legacy state cannot contain fields introduced later; nested snapshots, scalar conversion, MCP launchers, and routes must match an emitted contract; and managed policy strings must carry the plugin marker before status, seat change, disable, or the bridge trusts them. Designer cannot use a bundled Claude route or a persistent unqualified agent name. Planner/Advisor may contain at most one bundled Claude subscription seat. Unknown extensions intentionally fail closed.
 
 Fable 5.1 setup defaults to `high`. It accepts the Claude Code effort values `low`, `medium`, `high`, `xhigh`, and `max`; the user-facing label `ultra` normalizes to the effective Claude Code value `max` because the CLI has no separate Ultra setting. It requires Claude Code 2.1.257 or newer. Setup checks the installed CLI's advertised choices before persisting the route. The bridge reads only the normalized saved value, so tool callers cannot raise the effort at review time. Existing saved `max` routes remain compatible.
 
@@ -359,3 +360,26 @@ Never promise 65% fewer raw tokens, a fixed weekly saving, a universal monetary 
 - [OpenAI: Codex pricing and usage limits](https://learn.chatgpt.com/docs/pricing)
 - [Anthropic: Building effective agents](https://www.anthropic.com/engineering/building-effective-agents)
 - [Anthropic: Multi-agent research system](https://www.anthropic.com/engineering/multi-agent-research-system)
+
+## Validator compatibility
+
+The optional Validator resolves exact model and effort through the host catalog.
+Astra uses `gpt-6-astra`; Extra High is `xhigh`. Its direct route retains the root
+provider, so the root must verify provider compatibility before dispatch. Setup
+cannot predict a future task's selected provider. Fable remains a separate sealed
+Planner/Advisor bridge. See [OpenAI model documentation](https://developers.openai.com/api/docs/models/gpt-6-astra)
+for Astra capabilities; host access and accepted routing remain separate checks.
+
+Schema 7 adds only the nullable direct `validator` route. Older schemas reject
+that future key. Updating preserves the original restore snapshot; repair still
+restores only saved managed hints, and disable still restores pre-setup fields.
+There is no new history store or scheduler. A configured Validator gets a
+read-only-by-instruction fresh session and cannot reuse a producer session.
+Its receipt checker verifies structure and evidence coverage, not authorship,
+semantic truth, current file contents, or runtime model identity.
+
+`status --require-effective` additionally checks a configured Validator against
+the current host catalog; a missing model or unsupported effort is unavailable.
+Policy effectiveness and catalog presence never prove a live validation call.
+Restart and use a new task after installation/setup so the new policy, bridge,
+and state schema load together. See [output-validation.md](output-validation.md).

@@ -255,7 +255,7 @@ class PackagingTests(unittest.TestCase):
 
         self.assertEqual(manifest["name"], "codex-orchestration")
         self.assertEqual(manifest["skills"], "./skills/")
-        self.assertEqual(manifest["version"], "0.10.0")
+        self.assertEqual(manifest["version"], "0.11.0")
         self.assertEqual(manifest["mcpServers"], "./.mcp.json")
         self.assertRegex(
             manifest["version"],
@@ -275,10 +275,12 @@ class PackagingTests(unittest.TestCase):
         self.assertTrue(native.is_file())
         self.assertTrue(custom.is_file())
         self.assertTrue(routing_state.is_file())
+        self.assertTrue((SKILL_ROOT / "scripts" / "validate_output.py").is_file())
+        self.assertTrue((SKILL_ROOT / "references" / "output-validation.md").is_file())
         self.assertFalse((SKILL_ROOT / "scripts" / "update_plugin.py").exists())
         self.assertIn("config/batchWrite", native.read_text(encoding="utf-8"))
         self.assertIn('"--repair"', native.read_text(encoding="utf-8"))
-        self.assertIn('"version": "0.10.0"', native.read_text(encoding="utf-8"))
+        self.assertIn('"version": "0.11.0"', native.read_text(encoding="utf-8"))
         self.assertIn("validate_routing_state", routing_state.read_text(encoding="utf-8"))
         self.assertIn("Standalone custom agent", custom.read_text(encoding="utf-8"))
 
@@ -351,6 +353,8 @@ class PackagingTests(unittest.TestCase):
         invocation = "$codex-orchestration:codex-orchestration"
         raw_slash = "/codex-orchestration"
         allowed_readme_fragments = (
+            "[receipt checker](plugins/codex-orchestration/skills/"
+            "codex-orchestration/references/output-validation.md)",
             "[External Models reference](plugins/codex-orchestration/skills/"
             "codex-orchestration/references/external-models.md)",
             "[providers and models](plugins/codex-orchestration/skills/"
@@ -456,7 +460,7 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("@openai/codex@0.144.1", workflow)
         smoke_text = smoke.read_text(encoding="utf-8")
         self.assertIn('OLD_VERSION = "0.5.0"', smoke_text)
-        self.assertIn('NEW_VERSION = "0.10.0"', smoke_text)
+        self.assertIn('NEW_VERSION = "0.11.0"', smoke_text)
         self.assertIn("old Advisor-only cache unexpectedly supports Planner", smoke_text)
         self.assertIn("Upgraded installed skill is missing Planner contract", smoke_text)
         self.assertIn("reused the Advisor-only 0.5.0 cache directory", smoke_text)
@@ -497,7 +501,9 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("PLANNER CREATES THE FIRST PLAN", readme)
         self.assertIn("ADVISOR REVIEWS IT", readme)
         self.assertIn("EXECUTORS IMPLEMENT IT", readme)
-        self.assertIn("CODEX TESTS & DELIVERS", readme)
+        self.assertIn("CODEX RUNS CHECKS", readme)
+        self.assertIn("VALIDATOR CHECKS OUTCOME", readme)
+        self.assertIn("CODEX DELIVERS", readme)
         self.assertNotIn("SOL IS THE ORCHESTRATOR", readme)
 
     def test_readme_leads_with_the_product_before_installation(self) -> None:
@@ -569,7 +575,7 @@ class PackagingTests(unittest.TestCase):
         release = (REPO_ROOT / "RELEASE.md").read_text(encoding="utf-8")
         security = (REPO_ROOT / "SECURITY.md").read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["version"], "0.10.0")
+        self.assertEqual(manifest["version"], "0.11.0")
         for document in (skill, reference, release, security):
             self.assertIn("claude-fable-5-1", document)
             self.assertIn("ANTHROPIC_API_KEY", document)

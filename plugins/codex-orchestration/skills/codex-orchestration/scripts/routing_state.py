@@ -26,7 +26,7 @@ FABLE_SERVERS = frozenset(
     }
 )
 
-_SCHEMA_POLICY_PAIRS = {1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6}
+_SCHEMA_POLICY_PAIRS = {1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7}
 _MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+/@-]{0,199}$")
 _AGENT_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 _EFFORT_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
@@ -232,7 +232,7 @@ def _validate_scalar_conversion(state: dict[str, Any], managed: dict[str, Any]) 
 
 
 def validate_routing_state(value: Any) -> dict[str, Any]:
-    """Validate and return one exact, complete persisted schema 1 through 6.
+    """Validate and return one exact, complete persisted schema 1 through 7.
 
     Unknown keys and future extensions are rejected intentionally. Callers must
     perform their own secure file read and any caller-specific path/seat checks.
@@ -256,6 +256,8 @@ def validate_routing_state(value: Any) -> dict[str, Any]:
         expected_top.add("planner")
     if schema >= 4:
         expected_top.add("designer")
+    if schema >= 7:
+        expected_top.add("validator")
     _require(set(value) == expected_top, "top-level state shape is unsupported")
     _require(value["managed_by"] == "codex-orchestration", "state owner is invalid")
     _require(
@@ -269,6 +271,7 @@ def validate_routing_state(value: Any) -> dict[str, Any]:
     planner = value.get("planner")
     advisor = value["advisor"]
     designer = value.get("designer")
+    validator = value.get("validator")
     if planner is not None:
         _validate_route(planner, seat="planner", schema=schema)
     if advisor is not None:
@@ -278,6 +281,12 @@ def validate_routing_state(value: Any) -> dict[str, Any]:
         _require(
             designer_kind == "model",
             "persistent Designer must use a direct model route",
+        )
+    if validator is not None:
+        validator_kind = _validate_route(validator, seat="validator", schema=schema)
+        _require(
+            validator_kind == "model",
+            "persistent Validator must use a direct model route",
         )
     _validate_route_separation(planner, advisor)
 

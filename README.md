@@ -4,12 +4,13 @@ Bring models like Claude Fable 5.1 and Claude Opus 5 into Codex, give each model
 
 ## What is it?
 
-Codex Orchestration adds four simple roles to a Codex task:
+Codex Orchestration adds five simple roles to a Codex task:
 
 - **Planner** creates the plan and improves it after feedback. It is optional; when omitted, your current Codex model plans.
 - **Advisor** reviews the plan, finds important gaps, and approves it when it is ready. It is optional.
 - **Designer** turns approved requirements into a bounded visual, UX, interaction, information-architecture, or design-system handoff. It is optional.
 - **Executor** implements the approved plan. It is required for setup.
+- **Validator** reviews generated deliverables and the completed outcome, including code quality. It is optional; when configured, its approval is required before accepting each output batch.
 
 The model selected for the Codex task remains in charge. It passes work between the roles, checks every result, and gives you the final answer.
 
@@ -46,7 +47,14 @@ The model selected for the Codex task remains in charge. It passes work between 
                   EXECUTORS IMPLEMENT IT
                              |
                              v
-                    CODEX TESTS & DELIVERS
+                     CODEX RUNS CHECKS
+                             |
+                             v
+                   VALIDATOR CHECKS OUTCOME
+                     when configured
+                             |
+                             v
+                       CODEX DELIVERS
 ```
 
 Planner and Advisor can work through several revisions. Codex stops as soon as the Advisor returns `PLAN_APPROVED`, with a safety limit of eight reviews. If approval is not reached, execution stops and Codex shows you the latest plan and unresolved issues.
@@ -71,6 +79,25 @@ codex plugin add codex-orchestration@codex-orchestration
 Start a new Codex task after installation. Setup requires Python 3.11 or newer.
 
 ## Quick start
+
+Use Fable to plan, Astra to review plans and validate output in separate fresh
+sessions, and Sol to implement:
+
+```text
+$codex-orchestration:codex-orchestration setup planner: Claude Fable 5.1 Extra High, advisor: GPT-6 Astra Extra High, executor: GPT-5.6 Sol Medium, validator: GPT-6 Astra Extra High
+```
+
+A configured Validator reviews substantive output from the root, Executors, and
+Designer before downstream use, plus the final integrated outcome. This includes
+code, analysis, reports, visuals, and user-facing plans. Progress, evidence logs,
+and review reports do not trigger recursive validation. Rejected work is fixed
+and reviewed again, with at most three reviews per logical batch. Unavailable or
+incomplete validation blocks acceptance; an explicit no-subagents instruction
+overrides the review with a disclosed unvalidated result.
+
+The plugin supplies routing instructions and a
+[receipt checker](plugins/codex-orchestration/skills/codex-orchestration/references/output-validation.md);
+it does not install a second scheduler or mechanically restrict a child sandbox.
 
 Start an ordinary Codex prompt with the literal skill label
 `$codex-orchestration:codex-orchestration`. These examples are prompts for Codex,
@@ -114,16 +141,17 @@ Fable 5.1 and Opus 5 use the sealed official Claude Code CLI, not direct HTTP. F
 ## Choose your roles
 
 ```text
-$codex-orchestration:codex-orchestration setup planner: <model and effort>, advisor: <model and effort>, designer: <model and effort>, executor: <model and effort>
+$codex-orchestration:codex-orchestration setup planner: <model and effort>, advisor: <model and effort>, designer: <model and effort>, executor: <model and effort>, validator: <model and effort>
 ```
 
 - Omit `planner` to use the current Codex model as Planner.
 - Omit `advisor` when you do not want plan review.
 - Omit `designer` when you do not need a separate design handoff.
+- Omit `validator` to retain the existing workflow without output validation.
 - `executor` is required.
 - Planner and Advisor must use different configured model routes so the review is independent.
 
-Role labels are literal. A model after `planner:` plans; a model after `advisor:` reviews; a model after `designer:` designs; a model after `executor:` implements. Codex must never move a model to a different role because that model was used differently in an older plugin version. If you omit Designer, the workflow has no Designer. If you specify Planner and Executor but omit Advisor, the workflow has no Advisor.
+Role labels are literal. A model after `planner:` plans; a model after `advisor:` reviews; a model after `designer:` designs; a model after `executor:` implements; a model after `validator:` validates output. Advisor and Validator may share a model but use separate fresh sessions. Codex must never move a model to a different role because that model was used differently in an older plugin version. If you omit Designer, the workflow has no Designer. If you specify Planner and Executor but omit Advisor, the workflow has no Advisor.
 
 When every requested route is ready in the current task, the plugin confirms only
 the roles you supplied, in your order:

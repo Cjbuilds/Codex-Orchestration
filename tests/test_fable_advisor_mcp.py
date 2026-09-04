@@ -109,6 +109,8 @@ class FableAdvisorMcpTests(unittest.TestCase):
             payload["planner"] = None
         if schema >= 4 and "designer" not in payload:
             payload["designer"] = None
+        if schema >= 7 and "validator" not in payload:
+            payload["validator"] = None
         (self.home / FABLE.STATE_FILENAME).write_text(
             json.dumps(payload), encoding="utf-8"
         )
@@ -1027,6 +1029,18 @@ class FableAdvisorMcpTests(unittest.TestCase):
         self.assertEqual(
             FABLE.load_fable_route(self.home)["model"], FABLE.LEGACY_FABLE_MODEL
         )
+        self.write_state(
+            schema=7,
+            planner=self.route("xhigh"),
+            validator={
+                "kind": "model",
+                "model": "gpt-6-astra",
+                "effort": "xhigh",
+            },
+        )
+        schema_seven_route = FABLE.load_fable_route(self.home, seat="planner")
+        self.assertEqual(schema_seven_route["model"], FABLE.FABLE_MODEL)
+        self.assertEqual(schema_seven_route["effort"], "xhigh")
 
     def test_opus_route_pins_primary_and_rejects_every_unverified_helper(self) -> None:
         self.write_state(schema=5, advisor=self.opus_route("xhigh"))

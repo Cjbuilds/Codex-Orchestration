@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import io
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -31,7 +33,7 @@ NATIVE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(NATIVE)
 
 
-FAKE_CODEX = r'''#!/usr/bin/env python3
+FAKE_CODEX = r"""#!/usr/bin/env python3
 import json
 import os
 from pathlib import Path
@@ -253,7 +255,7 @@ for line in sys.stdin:
         }), flush=True)
         continue
     print(json.dumps({"id": request_id, "result": result}), flush=True)
-'''
+"""
 
 
 def _write_test_cli(
@@ -272,10 +274,7 @@ def _write_test_cli(
 
     launcher = directory / f"{name}.cmd"
     launcher.write_text(
-        (
-            "@echo off\r\n"
-            f'"{sys.executable}" "%~dp0{source_path.name}" %*\r\n'
-        ),
+        (f'@echo off\r\n"{sys.executable}" "%~dp0{source_path.name}" %*\r\n'),
         encoding="utf-8",
         newline="",
     )
@@ -413,7 +412,9 @@ class NativeRoutingTests(unittest.TestCase):
             env=env,
         )
         if check and result.returncode != 0:
-            self.fail(f"command failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}")
+            self.fail(
+                f"command failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+            )
         return result
 
     def read_fake_config(self) -> dict[str, object]:
@@ -426,15 +427,15 @@ class NativeRoutingTests(unittest.TestCase):
         agents.mkdir(exist_ok=True)
         path = agents / f"{name.replace('_', '-')}.toml"
         content = "\n".join(
-                (
-                    f'name = "{name}"',
-                    'description = "Test custom route"',
-                    'model = "gpt-5.6-luna"',
-                    'model_reasoning_effort = "high"',
-                    'developer_instructions = "Stay bounded and report to the root."',
-                    "",
-                )
+            (
+                f'name = "{name}"',
+                'description = "Test custom route"',
+                'model = "gpt-5.6-luna"',
+                'model_reasoning_effort = "high"',
+                'developer_instructions = "Stay bounded and report to the root."',
+                "",
             )
+        )
         if managed:
             content = f"{NATIVE.CUSTOM_AGENT_MANAGED_MARKER}\n{content}"
         path.write_text(content, encoding="utf-8")
@@ -446,6 +447,15 @@ class NativeRoutingTests(unittest.TestCase):
         advisor = {"kind": "model", "model": "gpt-5.6-terra", "effort": "high"}
         designer = {"kind": "model", "model": "gpt-5.6-luna", "effort": "high"}
         mode, usage = NATIVE.build_policy(executor, planner, advisor, designer)
+
+        self.assertEqual(
+            hashlib.sha256(mode.encode()).hexdigest(),
+            "101027aaa63211a651c92623944a0e6715843ccee3c70d86960188a1f186b156",
+        )
+        self.assertEqual(
+            hashlib.sha256(usage.encode()).hexdigest(),
+            "0a641f4abad1c074b955caabdafe0517b1623147fa5d399c04c0d7826bb7a9b0",
+        )
 
         self.assertIn("root task model, you are the orchestrator", mode)
         self.assertIn("Codex still decides whether a plan or subagent helps", mode)
@@ -544,9 +554,7 @@ class NativeRoutingTests(unittest.TestCase):
             "effort": "high",
             "server": "fable-advisor-python3",
         }
-        _, fable_planner_usage = NATIVE.build_policy(
-            executor, fable_planner, advisor
-        )
+        _, fable_planner_usage = NATIVE.build_policy(executor, fable_planner, advisor)
         self.assertLess(
             fable_planner_usage.index("create_plan"),
             fable_planner_usage.index("revise_plan"),
@@ -554,9 +562,7 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertIn("review packet", fable_planner_usage)
 
         fable_advisor = dict(fable_planner)
-        _, fable_advisor_usage = NATIVE.build_policy(
-            executor, planner, fable_advisor
-        )
+        _, fable_advisor_usage = NATIVE.build_policy(executor, planner, fable_advisor)
         self.assertIn("review_plan", fable_advisor_usage)
         self.assertIn('fork_turns = "none"', fable_advisor_usage)
 
@@ -627,6 +633,150 @@ class NativeRoutingTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 2)
                 self.assertIn("does not accept seat settings", result.stderr)
 
+    def test_validator_argument_validation_fails_before_any_write(self) -> None:
+        effort_only = self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--validator-effort",
+            "high",
+            check=False,
+        )
+        self.assertEqual(effort_only.returncode, 2)
+        self.assertIn(
+            "--validator-effort requires --validator-model", effort_only.stderr
+        )
+
+        for action in ("--status", "--disable", "--repair"):
+            with self.subTest(action=action):
+                result = self.run_script(
+                    action,
+                    "--validator-model",
+                    "gpt-5.6-sol",
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("does not accept seat settings", result.stderr)
+
+        for model, effort, message in (
+            ("missing-model", "high", "not in this App Server model catalog"),
+            ("gpt-5.6-luna", "ultra", "is not supported"),
+        ):
+            with self.subTest(model=model, effort=effort):
+                result = self.run_script(
+                    "--executor-model",
+                    "gpt-5.6-luna",
+                    "--validator-model",
+                    model,
+                    "--validator-effort",
+                    effort,
+                    "--confirm-unlisted-models",
+                    "--apply",
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(message, result.stderr)
+                self.assertFalse((self.home / NATIVE.STATE_FILENAME).exists())
+                self.assertFalse((self.home / ".fake-user-config.json").exists())
+
+    def test_validator_checker_path_is_shell_quoted(self) -> None:
+        source = Path("/tmp/plugin $value `command` 'quoted'/configure_native_routing.py")
+        route = {"kind": "model", "model": "gpt-5.6-sol", "effort": "medium"}
+        with mock.patch.object(NATIVE, "__file__", str(source)):
+            mode, _ = NATIVE.build_policy(route, None, None, validator=route)
+        command = mode.split("The root must run `", 1)[1].split(" --packet FILE", 1)[0]
+        self.assertEqual(
+            shlex.split(command),
+            ["python3", str(source.with_name("validate_output.py").resolve())],
+        )
+
+    def test_validator_setup_auto_status_policy_and_disable(self) -> None:
+        setup = self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--advisor-model",
+            "gpt-5.6-sol",
+            "--advisor-effort",
+            "xhigh",
+            "--validator-model",
+            "gpt-5.6-sol",
+            "--validator-effort",
+            "auto",
+            "--apply",
+        )
+        self.assertIn("Validator: gpt-5.6-sol@xhigh", setup.stdout)
+        state = json.loads(
+            (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
+        )
+        self.assertEqual(state["schema"], 7)
+        self.assertEqual(
+            state["validator"],
+            {"kind": "model", "model": "gpt-5.6-sol", "effort": "xhigh"},
+        )
+        self.assertEqual(state["advisor"]["model"], state["validator"]["model"])
+
+        mode = state["managed"]["mode"]
+        usage = state["managed"]["usage"]
+        for expected in (
+            "every substantive generated output",
+            "This applies even to simple or root-only work",
+            "coherent logical batches before downstream reliance",
+            "final integrated outcome",
+            "Control chatter, raw evidence logs",
+            "Internal orchestration plans remain under the Advisor",
+            "fresh no-history Validator invocation",
+            "never reuses a producer session",
+            "must not edit files, run tests, use network access, spawn agents",
+            "Read-only behavior is instruction-enforced, with no sandbox guarantee",
+            "reports only to the root and does not contact Planner",
+            "self-reported session metadata are never accepted",
+            "with exactly `batch_id`, `artifacts`, and `criteria`",
+            "with exactly `decision`, `batch_id`, `artifacts`, `checks`, and `findings`",
+            "at most three independent review attempts",
+            "Exit 0 means a structurally valid approval",
+            "exit 1 means a structurally valid revision request",
+            "exit 2 means blocked",
+            "evidence quality",
+            "mark the outputs unvalidated",
+            "Advisor and Validator may use the same model only as independent sessions",
+        ):
+            self.assertIn(expected, mode)
+        checker = shlex.quote(str(SCRIPT.with_name("validate_output.py")))
+        self.assertIn(f"python3 {checker} --packet FILE --receipt FILE", mode)
+        self.assertIn('model = "gpt-5.6-sol"', usage)
+        self.assertIn('reasoning_effort = "xhigh"', usage)
+        self.assertIn('fork_turns = "none"', usage)
+
+        status = self.run_script("--status", "--require-effective")
+        self.assertIn("Validator: gpt-5.6-sol@xhigh", status.stdout)
+        self.assertIn(
+            "Validator route: available in current model catalog", status.stdout
+        )
+        self.assertEqual(status.returncode, 0)
+
+        self.run_script("--disable", "--apply")
+        self.assertFalse((self.home / NATIVE.STATE_FILENAME).exists())
+
+    def test_status_rechecks_saved_validator_against_current_catalog(self) -> None:
+        self.run_script(
+            "--executor-model",
+            "gpt-5.6-luna",
+            "--validator-model",
+            "gpt-5.6-sol",
+            "--apply",
+        )
+        state_path = self.home / NATIVE.STATE_FILENAME
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["validator"]["model"] = "catalog-model-that-disappeared"
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+
+        status = self.run_script("--status", "--require-effective", check=False)
+        self.assertEqual(status.returncode, 1)
+        self.assertIn(
+            "Validator route: unavailable — Validator model "
+            "'catalog-model-that-disappeared' is not in this App Server model catalog",
+            status.stdout,
+        )
+
     def test_reserved_claude_model_ids_require_their_sealed_cli_routes(self) -> None:
         missing_codex = self.root / "must-not-start-app-server"
         for option in (
@@ -634,6 +784,7 @@ class NativeRoutingTests(unittest.TestCase):
             "--planner-model",
             "--advisor-model",
             "--designer-model",
+            "--validator-model",
         ):
             for model in (
                 NATIVE.LEGACY_FABLE_MODEL,
@@ -661,12 +812,8 @@ class NativeRoutingTests(unittest.TestCase):
                     self.assertEqual(rejected.returncode, 2)
                     self.assertIn("reserved Claude model", rejected.stderr)
                     self.assertNotIn("Codex binary does not exist", rejected.stderr)
-                    self.assertFalse(
-                        (self.home / ".fake-user-config.json").exists()
-                    )
-                    self.assertFalse(
-                        (self.home / NATIVE.STATE_FILENAME).exists()
-                    )
+                    self.assertFalse((self.home / ".fake-user-config.json").exists())
+                    self.assertFalse((self.home / NATIVE.STATE_FILENAME).exists())
 
         self.write_personal_agent("claude_opus_5")
         agent = self.run_script("--executor-agent", "claude_opus_5")
@@ -686,9 +833,7 @@ class NativeRoutingTests(unittest.TestCase):
             "features.multi_agent_v2.hide_spawn_agent_metadata=false",
             argv,
         )
-        self.assertTrue(
-            any("multi_agent_mode_hint_text" in value for value in argv)
-        )
+        self.assertTrue(any("multi_agent_mode_hint_text" in value for value in argv))
         self.assertTrue(any("usage_hint_text" in value for value in argv))
 
     def test_setup_status_and_disable_round_trip(self) -> None:
@@ -723,6 +868,7 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertIn("Executor: gpt-5.6-luna@xhigh", status.stdout)
         self.assertIn("Designer: none", status.stdout)
         self.assertIn("Advisor: none", status.stdout)
+        self.assertIn("Validator: none", status.stdout)
         self.assertIn("V2 tool namespace: agents", status.stdout)
         self.assertIn("Routing validation: not performed", status.stdout)
 
@@ -757,8 +903,8 @@ class NativeRoutingTests(unittest.TestCase):
         state = json.loads(
             (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
         )
-        self.assertEqual(state["schema"], 6)
-        self.assertEqual(state["policy_version"], 6)
+        self.assertEqual(state["schema"], 7)
+        self.assertEqual(state["policy_version"], 7)
         self.assertEqual(state["planner"]["effort"], "xhigh")
         self.assertEqual(state["designer"]["effort"], "medium")
 
@@ -785,6 +931,7 @@ class NativeRoutingTests(unittest.TestCase):
                 if legacy_schema < 3:
                     legacy.pop("planner", None)
                 legacy.pop("designer", None)
+                legacy.pop("validator", None)
                 legacy["managed"]["mode"] = (
                     f"{NATIVE.MANAGED_MARKER}\nlegacy schema {legacy_schema} mode"
                 )
@@ -829,8 +976,8 @@ class NativeRoutingTests(unittest.TestCase):
 
                 self.run_script(*upgrade_arguments, "--apply")
                 upgraded = json.loads(state_path.read_text(encoding="utf-8"))
-                self.assertEqual(upgraded["schema"], 6)
-                self.assertEqual(upgraded["policy_version"], 6)
+                self.assertEqual(upgraded["schema"], 7)
+                self.assertEqual(upgraded["policy_version"], 7)
                 expected_previous = original_previous
                 if legacy_schema == 2:
                     expected_previous = {
@@ -851,10 +998,10 @@ class NativeRoutingTests(unittest.TestCase):
                 )
                 self.assertFalse(state_path.exists())
 
-    def test_schemas_one_through_five_validate_and_disable_without_losing_restore(
+    def test_schemas_one_through_six_validate_and_disable_without_losing_restore(
         self,
     ) -> None:
-        for legacy_schema in (1, 2, 3, 4, 5):
+        for legacy_schema in (1, 2, 3, 4, 5, 6):
             with self.subTest(schema=legacy_schema):
                 setup_arguments = ["--executor-model", "gpt-5.6-luna"]
                 if legacy_schema >= 2:
@@ -869,18 +1016,24 @@ class NativeRoutingTests(unittest.TestCase):
                     legacy.pop("planner", None)
                 if legacy_schema < 4:
                     legacy.pop("designer", None)
+                legacy.pop("validator", None)
                 if legacy_schema == 1:
                     legacy["advisor"] = None
                     legacy["managed"].pop("mcp", None)
                     legacy["previous"].pop("mcp", None)
-                else:
+                elif legacy_schema < 6:
                     legacy["advisor"]["model"] = NATIVE.LEGACY_FABLE_MODEL
                 state_path.write_text(json.dumps(legacy), encoding="utf-8")
 
                 status = self.run_script("--status", "--require-effective")
                 self.assertEqual(status.returncode, 0)
                 if legacy_schema >= 2:
-                    self.assertIn("Claude Fable 5: ready", status.stdout)
+                    label = (
+                        "Claude Fable 5.1: ready"
+                        if legacy_schema == 6
+                        else "Claude Fable 5: ready"
+                    )
+                    self.assertIn(label, status.stdout)
 
                 self.run_script("--disable", "--apply")
                 self.assertEqual(
@@ -903,6 +1056,7 @@ class NativeRoutingTests(unittest.TestCase):
                     state.pop("planner")
                 if schema < 4:
                     state.pop("designer")
+                state.pop("validator")
                 state_path.write_text(json.dumps(state), encoding="utf-8")
 
                 status = self.run_script("--status", check=False)
@@ -920,6 +1074,7 @@ class NativeRoutingTests(unittest.TestCase):
                 state = json.loads(json.dumps(current))
                 state["schema"] = schema
                 state["policy_version"] = schema
+                state.pop("validator")
                 state["planner"] = None
                 state_path.write_text(json.dumps(state), encoding="utf-8")
 
@@ -939,6 +1094,7 @@ class NativeRoutingTests(unittest.TestCase):
                 state["policy_version"] = schema
                 if schema < 3:
                     state.pop("planner")
+                state.pop("validator")
                 state["designer"] = None
                 state_path.write_text(json.dumps(state), encoding="utf-8")
 
@@ -953,6 +1109,7 @@ class NativeRoutingTests(unittest.TestCase):
         current["schema"] = 1
         current["policy_version"] = 1
         current.pop("planner")
+        current.pop("validator")
         mutations = {
             "fable advisor": lambda state: state.__setitem__(
                 "advisor",
@@ -1032,7 +1189,9 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertEqual(status.returncode, 2)
         self.assertIn("Saved routing state is invalid", status.stderr)
 
-    def test_existing_user_policy_requires_explicit_replace_and_is_restored(self) -> None:
+    def test_existing_user_policy_requires_explicit_replace_and_is_restored(
+        self,
+    ) -> None:
         initial = {
             "features": {
                 "multi_agent_v2": {
@@ -1176,9 +1335,7 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertIn("managed fields conflict", status.stdout)
         self.assertIn("run --repair as a dry run", status.stdout)
         self.assertIn("Seats: suppressed", status.stdout)
-        required = self.run_script(
-            "--status", "--require-effective", check=False
-        )
+        required = self.run_script("--status", "--require-effective", check=False)
         self.assertEqual(required.returncode, 1)
         update = self.run_script(
             "--executor-model",
@@ -1204,6 +1361,10 @@ class NativeRoutingTests(unittest.TestCase):
             "--executor-effort",
             "medium",
             "--advisor-fable",
+            "--validator-model",
+            "gpt-5.6-sol",
+            "--validator-effort",
+            "medium",
             "--apply",
         )
         state_path = self.home / NATIVE.STATE_FILENAME
@@ -1233,7 +1394,13 @@ class NativeRoutingTests(unittest.TestCase):
         repaired = self.run_script("--repair", "--apply")
         self.assertIn("Native routing policy repaired", repaired.stdout)
         self.assertIn("fully quit and reopen Codex", repaired.stdout)
-        self.assertIn("does not change Claude Fable 5.1 authentication", repaired.stdout)
+        self.assertIn(
+            "does not change Claude Fable 5.1 authentication", repaired.stdout
+        )
+        self.assertEqual(
+            json.loads(state_path.read_text(encoding="utf-8"))["validator"],
+            {"kind": "model", "model": "gpt-5.6-sol", "effort": "medium"},
+        )
         after = self.read_fake_config()
         repaired_feature = after["features"]["multi_agent_v2"]
         self.assertEqual(
@@ -1264,9 +1431,7 @@ class NativeRoutingTests(unittest.TestCase):
         feature["multi_agent_mode_hint_text"] = (
             f"{NATIVE.MANAGED_MARKER}\ndifferent mode"
         )
-        feature["usage_hint_text"] = (
-            f"{NATIVE.MANAGED_MARKER}\ndifferent usage"
-        )
+        feature["usage_hint_text"] = f"{NATIVE.MANAGED_MARKER}\ndifferent usage"
         feature["tool_namespace"] = "collaboration"
         (self.home / ".fake-user-config.json").write_text(
             json.dumps(config), encoding="utf-8"
@@ -1299,9 +1464,7 @@ class NativeRoutingTests(unittest.TestCase):
         feature["multi_agent_mode_hint_text"] = (
             f"{NATIVE.MANAGED_MARKER}\ndifferent mode"
         )
-        feature["usage_hint_text"] = (
-            f"{NATIVE.MANAGED_MARKER}\ndifferent usage"
-        )
+        feature["usage_hint_text"] = f"{NATIVE.MANAGED_MARKER}\ndifferent usage"
         (self.home / ".fake-user-config.json").write_text(
             json.dumps(config), encoding="utf-8"
         )
@@ -1349,13 +1512,9 @@ class NativeRoutingTests(unittest.TestCase):
         feature["multi_agent_mode_hint_text"] = (
             f"{NATIVE.MANAGED_MARKER}\ndifferent mode"
         )
-        feature["usage_hint_text"] = (
-            f"{NATIVE.MANAGED_MARKER}\ndifferent usage"
-        )
+        feature["usage_hint_text"] = f"{NATIVE.MANAGED_MARKER}\ndifferent usage"
         serialized = json.dumps(config)
-        (self.home / ".fake-user-config.json").write_text(
-            serialized, encoding="utf-8"
-        )
+        (self.home / ".fake-user-config.json").write_text(serialized, encoding="utf-8")
         (self.home / ".fake-effective-config.json").write_text(
             serialized, encoding="utf-8"
         )
@@ -1379,12 +1538,10 @@ class NativeRoutingTests(unittest.TestCase):
         feature["multi_agent_mode_hint_text"] = (
             f"{NATIVE.MANAGED_MARKER}\ndifferent mode"
         )
-        feature["usage_hint_text"] = (
-            f"{NATIVE.MANAGED_MARKER}\ndifferent usage"
-        )
-        config["plugins"][NATIVE.PLUGIN_ID]["mcp_servers"][
-            "fable-advisor-python3"
-        ]["enabled"] = False
+        feature["usage_hint_text"] = f"{NATIVE.MANAGED_MARKER}\ndifferent usage"
+        config["plugins"][NATIVE.PLUGIN_ID]["mcp_servers"]["fable-advisor-python3"][
+            "enabled"
+        ] = False
         (self.home / ".fake-user-config.json").write_text(
             json.dumps(config), encoding="utf-8"
         )
@@ -1404,12 +1561,10 @@ class NativeRoutingTests(unittest.TestCase):
         )
         config = self.read_fake_config()
         feature = config["features"]["multi_agent_v2"]
-        feature["usage_hint_text"] = (
-            f"{NATIVE.MANAGED_MARKER}\ndifferent usage"
-        )
-        config["plugins"][NATIVE.PLUGIN_ID]["mcp_servers"][
-            "fable-advisor-python3"
-        ]["enabled"] = 1
+        feature["usage_hint_text"] = f"{NATIVE.MANAGED_MARKER}\ndifferent usage"
+        config["plugins"][NATIVE.PLUGIN_ID]["mcp_servers"]["fable-advisor-python3"][
+            "enabled"
+        ] = 1
         (self.home / ".fake-user-config.json").write_text(
             json.dumps(config), encoding="utf-8"
         )
@@ -1431,9 +1586,7 @@ class NativeRoutingTests(unittest.TestCase):
         feature["multi_agent_mode_hint_text"] = (
             f"{NATIVE.MANAGED_MARKER}\ndifferent mode"
         )
-        feature["usage_hint_text"] = (
-            f"{NATIVE.MANAGED_MARKER}\ndifferent usage"
-        )
+        feature["usage_hint_text"] = f"{NATIVE.MANAGED_MARKER}\ndifferent usage"
         (self.home / ".fake-user-config.json").write_text(
             json.dumps(config), encoding="utf-8"
         )
@@ -1444,9 +1597,7 @@ class NativeRoutingTests(unittest.TestCase):
         state = json.loads(
             (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
         )
-        self.assertEqual(
-            state["previous"]["usage"]["value"], "CONCURRENT STATE EDIT"
-        )
+        self.assertEqual(state["previous"]["usage"]["value"], "CONCURRENT STATE EDIT")
 
     def test_repair_handles_one_hint_in_a_scalar_conversion_only(self) -> None:
         initial = {"features": {"multi_agent_v2": True}, "keep": "yes"}
@@ -1464,9 +1615,7 @@ class NativeRoutingTests(unittest.TestCase):
         state_bytes = state_path.read_bytes()
         config = self.read_fake_config()
         feature = config["features"]["multi_agent_v2"]
-        feature["usage_hint_text"] = (
-            f"{NATIVE.MANAGED_MARKER}\ndifferent usage"
-        )
+        feature["usage_hint_text"] = f"{NATIVE.MANAGED_MARKER}\ndifferent usage"
         (self.home / ".fake-user-config.json").write_text(
             json.dumps(config), encoding="utf-8"
         )
@@ -1477,9 +1626,7 @@ class NativeRoutingTests(unittest.TestCase):
 
         config = self.read_fake_config()
         feature = config["features"]["multi_agent_v2"]
-        feature["usage_hint_text"] = (
-            f"{NATIVE.MANAGED_MARKER}\ndifferent usage again"
-        )
+        feature["usage_hint_text"] = f"{NATIVE.MANAGED_MARKER}\ndifferent usage again"
         feature["unrelated_new_field"] = True
         (self.home / ".fake-user-config.json").write_text(
             json.dumps(config), encoding="utf-8"
@@ -1598,9 +1745,7 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertIn("Native routing disabled", disabled.stdout)
 
     def test_require_effective_rejects_inactive_and_incompatible_status(self) -> None:
-        inactive = self.run_script(
-            "--status", "--require-effective", check=False
-        )
+        inactive = self.run_script("--status", "--require-effective", check=False)
         self.assertEqual(inactive.returncode, 1)
         self.assertIn("Native policy: inactive", inactive.stdout)
 
@@ -1646,9 +1791,7 @@ class NativeRoutingTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        status = self.run_script(
-            "--status", "--require-effective", check=False
-        )
+        status = self.run_script("--status", "--require-effective", check=False)
         self.assertEqual(status.returncode, 1)
         self.assertIn("Orphaned managed custom agents", status.stdout)
         self.assertIn(orphan_name, status.stdout)
@@ -1685,9 +1828,7 @@ class NativeRoutingTests(unittest.TestCase):
         )
         state_path = self.home / NATIVE.STATE_FILENAME
         state = json.loads(state_path.read_text(encoding="utf-8"))
-        state["managed"]["usage"] = (
-            f"{NATIVE.MANAGED_MARKER}\nDIFFERENT MANAGED VALUE"
-        )
+        state["managed"]["usage"] = f"{NATIVE.MANAGED_MARKER}\nDIFFERENT MANAGED VALUE"
         state_path.write_text(json.dumps(state), encoding="utf-8")
         status = self.run_script("--status")
         self.assertIn("managed fields conflict", status.stdout)
@@ -1820,9 +1961,7 @@ class NativeRoutingTests(unittest.TestCase):
 
     def test_ok_overridden_restores_every_owned_field(self) -> None:
         initial = {
-            "features": {
-                "multi_agent_v2": {"max_concurrent_threads_per_session": 5}
-            },
+            "features": {"multi_agent_v2": {"max_concurrent_threads_per_session": 5}},
             "unrelated": {"keep": True},
         }
         (self.home / ".fake-ok-overridden").touch()
@@ -1940,9 +2079,7 @@ class NativeRoutingTests(unittest.TestCase):
             "gpt-5.6-luna",
             "--apply",
         )
-        orphaned = self.run_script(
-            "--status", "--require-effective", check=False
-        )
+        orphaned = self.run_script("--status", "--require-effective", check=False)
         self.assertEqual(orphaned.returncode, 1)
         self.assertIn(name, orphaned.stdout)
 
@@ -1987,7 +2124,9 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertIn("Planner personal agent", shadowed.stderr)
         self.assertIn("shadowed by a project role", shadowed.stderr)
 
-    def test_identical_planner_advisor_routes_rejected_on_clean_setup_and_update(self) -> None:
+    def test_identical_planner_advisor_routes_rejected_on_clean_setup_and_update(
+        self,
+    ) -> None:
         same_model = self.run_script(
             "--executor-model",
             "gpt-5.6-luna",
@@ -2062,7 +2201,9 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertIn("at most one bundled Claude subscription seat", result.stderr)
         self.assertFalse((self.home / NATIVE.STATE_FILENAME).exists())
 
-    def test_fable_planner_with_gpt_advisor_uses_one_launcher_and_restores(self) -> None:
+    def test_fable_planner_with_gpt_advisor_uses_one_launcher_and_restores(
+        self,
+    ) -> None:
         initial = {
             "features": {"multi_agent_v2": {}},
             "plugins": {
@@ -2098,9 +2239,7 @@ class NativeRoutingTests(unittest.TestCase):
         self.assertEqual(sum(value is True for value in managed_mcp.values()), 1)
         self.assertTrue(managed_mcp["fable-advisor-python3"])
         servers = self.read_fake_config()["plugins"][NATIVE.PLUGIN_ID]["mcp_servers"]
-        self.assertEqual(
-            sum(entry["enabled"] is True for entry in servers.values()), 1
-        )
+        self.assertEqual(sum(entry["enabled"] is True for entry in servers.values()), 1)
 
         moved_arguments = (
             "--executor-model",
@@ -2113,7 +2252,9 @@ class NativeRoutingTests(unittest.TestCase):
         )
         moved = self.run_script(*moved_arguments, "--apply", check=False)
         self.assertEqual(moved.returncode, 2)
-        self.assertIn("First run configure_native_routing.py --disable --apply", moved.stderr)
+        self.assertIn(
+            "First run configure_native_routing.py --disable --apply", moved.stderr
+        )
 
         self.run_script("--disable", "--apply")
         moved = self.run_script(*moved_arguments, "--apply")
@@ -2150,9 +2291,7 @@ class NativeRoutingTests(unittest.TestCase):
 
     def test_fable_setup_status_update_and_disable_restore_mcp_policy(self) -> None:
         initial = {
-            "features": {
-                "multi_agent_v2": {"max_concurrent_threads_per_session": 5}
-            },
+            "features": {"multi_agent_v2": {"max_concurrent_threads_per_session": 5}},
             "plugins": {
                 NATIVE.PLUGIN_ID: {
                     "mcp_servers": {
@@ -2202,7 +2341,9 @@ class NativeRoutingTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(removal.returncode, 2)
-        self.assertIn("First run configure_native_routing.py --disable --apply", removal.stderr)
+        self.assertIn(
+            "First run configure_native_routing.py --disable --apply", removal.stderr
+        )
 
         self.run_script("--disable", "--apply")
         self.assertEqual(self.read_fake_config(), initial)
@@ -2251,9 +2392,7 @@ class NativeRoutingTests(unittest.TestCase):
         }
         for requested, effective in expected.items():
             with self.subTest(requested=requested):
-                self.assertEqual(
-                    NATIVE.normalize_fable_effort(requested), effective
-                )
+                self.assertEqual(NATIVE.normalize_fable_effort(requested), effective)
 
         with self.assertRaisesRegex(
             NATIVE.ConfigurationError, "low.*medium.*high.*xhigh.*max.*ultra"
@@ -2274,7 +2413,7 @@ class NativeRoutingTests(unittest.TestCase):
         state = json.loads(
             (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8")
         )
-        self.assertEqual(state["schema"], 6)
+        self.assertEqual(state["schema"], 7)
         self.assertEqual(
             state["advisor"],
             {
@@ -2332,9 +2471,7 @@ class NativeRoutingTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(rejected.returncode, 2)
-        self.assertIn(
-            "configure_native_routing.py --disable --apply", rejected.stderr
-        )
+        self.assertIn("configure_native_routing.py --disable --apply", rejected.stderr)
         self.assertEqual(self.read_fake_config(), before_config)
         self.assertEqual(
             (self.home / NATIVE.STATE_FILENAME).read_text(encoding="utf-8"),
@@ -2355,9 +2492,9 @@ class NativeRoutingTests(unittest.TestCase):
         ):
             with self.subTest(requested=requested):
                 before_config = self.read_fake_config()
-                before_state = (
-                    self.home / NATIVE.STATE_FILENAME
-                ).read_text(encoding="utf-8")
+                before_state = (self.home / NATIVE.STATE_FILENAME).read_text(
+                    encoding="utf-8"
+                )
                 rejected = self.run_script(
                     "--executor-model",
                     "gpt-5.6-luna",
@@ -2471,7 +2608,9 @@ class NativeRoutingTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(too_old.returncode, 2)
-        self.assertIn("Claude Fable 5.1 requires Claude Code 2.1.257 or newer", too_old.stderr)
+        self.assertIn(
+            "Claude Fable 5.1 requires Claude Code 2.1.257 or newer", too_old.stderr
+        )
         self.assertFalse((self.home / NATIVE.STATE_FILENAME).exists())
 
     def test_opus_version_output_must_be_one_canonical_version_line(self) -> None:
@@ -2524,9 +2663,7 @@ class NativeRoutingTests(unittest.TestCase):
                 )
                 self.assertEqual(rejected.returncode, 2)
                 self.assertIn("unparseable version", rejected.stderr)
-                self.assertFalse(
-                    (self.home / NATIVE.STATE_FILENAME).exists()
-                )
+                self.assertFalse((self.home / NATIVE.STATE_FILENAME).exists())
 
         self.claude.write_text(
             original.replace(
@@ -2686,9 +2823,7 @@ class NativeRoutingTests(unittest.TestCase):
                     )
                     self.assertEqual(rejected.returncode, 2)
                     self.assertIn(flag, rejected.stderr)
-                    self.assertFalse(
-                        (self.home / NATIVE.STATE_FILENAME).exists()
-                    )
+                    self.assertFalse((self.home / NATIVE.STATE_FILENAME).exists())
 
         duplicate_crlf = original.replace(
             "--print --model",
