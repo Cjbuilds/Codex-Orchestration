@@ -1,6 +1,6 @@
 {
   "name": "codex-orchestration",
-  "version": "0.9.3",
+  "version": "0.11.0",
   "description": "Give Codex and audited external models safe, provider-pinned roles.",
   "author": {
     "name": "CJ Zafir",
@@ -20,8 +20,8 @@
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Codex Orchestration",
-    "shortDescription": "Plan, review, design, and build with multiple models",
-    "longDescription": "Use sealed Fable 5 or Opus 5 as one bundled Planner-or-Advisor subscription seat, and audited API models in supported bounded roles, without changing the root model or Desktop model picker.",
+    "shortDescription": "Plan, build, and validate with multiple models",
+    "longDescription": "Use sealed Fable 5.1 or Opus 5 as one bundled Planner-or-Advisor subscription seat, and audited API models in supported bounded roles, without changing the root model or Desktop model picker.",
     "developerName": "CJ Zafir",
     "category": "Productivity",
     "websiteURL": "https://github.com/Cjbuilds/Codex-Orchestration",
@@ -33,12 +33,13 @@
       "Plan review",
       "Design handoffs",
       "External model roles",
-      "Efficient execution"
+      "Efficient execution",
+      "Output validation"
     ],
     "defaultPrompt": [
-      "$codex-orchestration:codex-orchestration setup designer: GPT-5.6 Sol High, executor: GPT-5.6 Luna Extra High",
+      "$codex-orchestration:codex-orchestration setup executor: GPT-5.6 Sol Medium, validator: GPT-6 Astra Extra High",
       "$codex-orchestration:codex-orchestration --update",
-      "$codex-orchestration:codex-orchestration Planner: Claude Fable 5 High, Designer: Kimi K3"
+      "$codex-orchestration:codex-orchestration Planner: Claude Fable 5.1 High, Designer: Kimi K3"
     ]
   }
 }

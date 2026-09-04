@@ -32,7 +32,7 @@ PLUGIN_ID = "codex-orchestration@codex-orchestration"
 MARKETPLACE_NAME = "codex-orchestration"
 OLD_RELEASE = "a1d9c546665c3253cdcaa8fe5c0c060199a6126c"
 OLD_VERSION = "0.5.0"
-NEW_VERSION = "0.9.3"
+NEW_VERSION = "0.11.0"
 COMMAND_TIMEOUT_SECONDS = 60
 
 
@@ -585,6 +585,10 @@ def main() -> int:
                 "gpt-5.6-luna",
                 "--designer-effort",
                 "high",
+                "--validator-model",
+                "gpt-5.6-luna",
+                "--validator-effort",
+                "high",
             ]
             direct_preview = run(direct_native_command, cwd=project, env=env)
             if "Dry run only" not in direct_preview.stdout:
@@ -612,9 +616,41 @@ def main() -> int:
                 raise SmokeFailure("Direct native status lost the selected model route")
             if "Designer: gpt-5.6-luna@high" not in direct_status.stdout:
                 raise SmokeFailure("Direct native status lost the selected Designer route")
+            if "Validator: gpt-5.6-luna@high" not in direct_status.stdout:
+                raise SmokeFailure("Direct native status lost the selected Validator route")
 
             state_path = codex_home / ".codex-orchestration-routing.json"
             state_before_repair = state_path.read_bytes()
+            validator_state = json.loads(state_before_repair)
+            assert_equal(validator_state["schema"], 7, "installed Validator schema")
+            assert_equal(
+                validator_state["validator"],
+                {"kind": "model", "model": "gpt-5.6-luna", "effort": "high"},
+                "installed Validator route",
+            )
+            installed_checker = native_configurator.with_name("validate_output.py")
+            packet_path = temp / "validation-packet.json"
+            receipt_path = temp / "validation-receipt.json"
+            packet_path.write_text(json.dumps({
+                "batch_id": "lifecycle",
+                "artifacts": {"plugin": published_commit},
+                "criteria": ["installed"],
+            }), encoding="utf-8")
+            receipt_path.write_text(json.dumps({
+                "decision": "VALIDATION_APPROVED",
+                "batch_id": "lifecycle",
+                "artifacts": {"plugin": published_commit},
+                "checks": [{
+                    "criterion": "installed", "artifacts": ["plugin"],
+                    "status": "pass", "evidence": "Synthetic receipt for checker packaging only.",
+                }],
+                "findings": [],
+            }), encoding="utf-8")
+            checked = run([
+                sys.executable, str(installed_checker), "--packet", str(packet_path),
+                "--receipt", str(receipt_path),
+            ], cwd=project, env=env)
+            assert_equal(checked.stdout.strip(), "VALIDATION_APPROVED", "packaged checker")
             config_path = codex_home / "config.toml"
             drifted_config = config_path.read_text(encoding="utf-8")
             drifted_config = replace_multiline_toml_setting(

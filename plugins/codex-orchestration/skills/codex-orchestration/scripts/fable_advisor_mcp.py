@@ -14,6 +14,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import stat
 import shutil
 import subprocess
@@ -26,6 +27,7 @@ import routing_state
 STATE_FILENAME = ".codex-orchestration-routing.json"
 MANAGED_MARKER = routing_state.MANAGED_MARKER
 FABLE_MODEL = routing_state.FABLE_MODEL
+LEGACY_FABLE_MODEL = routing_state.LEGACY_FABLE_MODEL
 OPUS_MODEL = routing_state.OPUS_MODEL
 FABLE_SERVERS = routing_state.FABLE_SERVERS
 SUPPORTED_EFFORTS = routing_state.FABLE_EFFORTS
@@ -35,22 +37,32 @@ SUPPORTED_EFFORTS = routing_state.FABLE_EFFORTS
 FABLE_HELPER_MODEL = "claude-haiku-4-5-20251001"
 FABLE_RESOLVED_PRIMARY_MODEL = "claude-opus-4-8"
 REVIEWED_PRIMARY_MODELS_BY_ROUTE = {
-    FABLE_MODEL: frozenset({FABLE_MODEL, FABLE_RESOLVED_PRIMARY_MODEL}),
+    FABLE_MODEL: frozenset({FABLE_MODEL}),
+    LEGACY_FABLE_MODEL: frozenset(
+        {LEGACY_FABLE_MODEL, FABLE_RESOLVED_PRIMARY_MODEL}
+    ),
     # The resolved Fable identity is not an alias for the separately sealed
     # Opus route. Opus remains primary-only until independently re-qualified.
     OPUS_MODEL: frozenset({OPUS_MODEL}),
 }
 ALLOWED_RUNTIME_MODELS = frozenset(
-    {*REVIEWED_PRIMARY_MODELS_BY_ROUTE[FABLE_MODEL], FABLE_HELPER_MODEL}
+    REVIEWED_PRIMARY_MODELS_BY_ROUTE[FABLE_MODEL]
 )
 ALLOWED_RUNTIME_MODELS_BY_PRIMARY = {
     FABLE_MODEL: ALLOWED_RUNTIME_MODELS,
+    LEGACY_FABLE_MODEL: frozenset(
+        {
+            *REVIEWED_PRIMARY_MODELS_BY_ROUTE[LEGACY_FABLE_MODEL],
+            FABLE_HELPER_MODEL,
+        }
+    ),
     # No Opus helper identity has been independently verified. Fail closed if
     # Claude Code reports anything beyond the sealed primary.
     OPUS_MODEL: frozenset({OPUS_MODEL}),
 }
 CLAUDE_TIMEOUT_SECONDS = 600
 AUTH_TIMEOUT_SECONDS = 20
+FABLE_MIN_CLAUDE_VERSION = (2, 1, 257)
 # Applies to the combined user-controlled text sent by one model operation.
 MAX_INPUT_CHARS = 200_000
 PLAN_REVIEW_SCHEMA = {
@@ -157,6 +169,16 @@ class AdvisorError(RuntimeError):
     """Fail-closed error for any bundled Claude bridge operation."""
 
 
+def _display_name(model: str) -> str:
+    if model == FABLE_MODEL:
+        return "Claude Fable 5.1"
+    if model == LEGACY_FABLE_MODEL:
+        return "Claude Fable 5"
+    if model == OPUS_MODEL:
+        return "Claude Opus 5"
+    raise AdvisorError("The configured Claude primary model is not sealed.")
+
+
 def codex_home() -> Path:
     value = os.environ.get("CODEX_HOME")
     return Path(value).expanduser() if value else Path.home() / ".codex"
@@ -178,7 +200,7 @@ def _canonical_posix_identity() -> str:
     return name
 
 
-def sanitized_environment() -> dict[str, str]:
+def sanitized_environment(*, include_anthropic_api_key: bool = False) -> dict[str, str]:
     common_names = ("PATH", "LANG", "LC_ALL", "LC_CTYPE")
     if os.name == "nt":
         canonical_names = (
@@ -205,6 +227,10 @@ def sanitized_environment() -> dict[str, str]:
         identity = _canonical_posix_identity()
         env["USER"] = identity
         env["LOGNAME"] = identity
+    if include_anthropic_api_key:
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if isinstance(api_key, str) and api_key:
+            env["ANTHROPIC_API_KEY"] = api_key
     env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
     return env
 
@@ -224,11 +250,15 @@ def resolve_claude() -> Path:
     raise AdvisorError("Claude Code is not installed or `claude` is not on PATH.")
 
 
-def _run_json(command: list[str], *, timeout: int) -> dict[str, Any]:
+def _run_json(
+    command: list[str], *, timeout: int, include_anthropic_api_key: bool = False
+) -> dict[str, Any]:
     try:
         result = subprocess.run(
             command,
-            env=sanitized_environment(),
+            env=sanitized_environment(
+                include_anthropic_api_key=include_anthropic_api_key
+            ),
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -252,25 +282,122 @@ def _run_json(command: list[str], *, timeout: int) -> dict[str, Any]:
     return payload
 
 
-def check_claude_auth(claude: Path | None = None) -> dict[str, str]:
-    executable = claude or resolve_claude()
-    payload = _run_json(
-        [str(executable), "auth", "status", "--json"],
-        timeout=AUTH_TIMEOUT_SECONDS,
-    )
-    subscription = payload.get("subscriptionType")
+def _accepted_auth(
+    payload: dict[str, Any], *, allow_api_keys: bool = False
+) -> dict[str, str] | None:
     if not (
         payload.get("loggedIn") is True
-        and payload.get("authMethod") == "claude.ai"
         and payload.get("apiProvider") == "firstParty"
+    ):
+        return None
+    subscription = payload.get("subscriptionType")
+    if (
+        payload.get("authMethod") == "claude.ai"
         and isinstance(subscription, str)
         and subscription in {"pro", "max", "team"}
     ):
-        raise AdvisorError(
-            "Claude Code must be logged in through a first-party Pro, Max, or Team "
-            "account; run `claude auth login` and try again."
+        return {"auth_method": "claude.ai", "api_provider": "firstParty"}
+    if not allow_api_keys:
+        return None
+    source = payload.get("apiKeySource")
+    if (
+        payload.get("authMethod") == "api_key"
+        and source == "ANTHROPIC_API_KEY"
+    ):
+        return {"auth_method": "api_key", "api_provider": "firstParty"}
+    if (
+        payload.get("authMethod") == "claude.ai"
+        and source == "/login managed key"
+        and subscription is None
+    ):
+        return {"auth_method": "console_api_key", "api_provider": "firstParty"}
+    return None
+
+
+def verify_fable_claude_version(claude: Path, model: str) -> str | None:
+    if model != FABLE_MODEL:
+        return None
+    try:
+        result = subprocess.run(
+            [str(claude), "--version"],
+            env=sanitized_environment(),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=AUTH_TIMEOUT_SECONDS,
+            check=False,
         )
-    return {"auth_method": "claude.ai", "api_provider": "firstParty"}
+    except subprocess.TimeoutExpired as exc:
+        raise AdvisorError("Claude Code version check timed out.") from exc
+    except OSError as exc:
+        raise AdvisorError("Could not run Claude Code version check.") from exc
+    if result.returncode != 0:
+        raise AdvisorError(
+            f"Claude Code version check exited with {result.returncode}; output withheld."
+        )
+    match = re.fullmatch(
+        r"[ \t\r\n]*(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\."
+        r"(0|[1-9][0-9]*) \(Claude Code\)[ \t\r\n]*",
+        result.stdout,
+    )
+    if match is None:
+        raise AdvisorError("Claude Code returned an unparseable version.")
+    observed = tuple(map(int, match.groups()))
+    if observed < FABLE_MIN_CLAUDE_VERSION:
+        required = ".".join(map(str, FABLE_MIN_CLAUDE_VERSION))
+        actual = ".".join(map(str, observed))
+        raise AdvisorError(
+            f"Claude Fable 5.1 requires Claude Code {required} or newer; "
+            f"found {actual}."
+        )
+    return ".".join(map(str, observed))
+
+
+def check_claude_auth(
+    claude: Path | None = None, *, allow_api_keys: bool = False
+) -> dict[str, str]:
+    executable = claude or resolve_claude()
+    command = [str(executable), "auth", "status", "--json"]
+    attempts = [False]
+    if (
+        allow_api_keys
+        and isinstance(os.environ.get("ANTHROPIC_API_KEY"), str)
+        and os.environ["ANTHROPIC_API_KEY"]
+    ):
+        attempts.append(True)
+    for include_anthropic_api_key in attempts:
+        # Environment construction failures are local trust failures, not
+        # alternate-auth misses. Preserve the exact fail-closed diagnostic.
+        sanitized_environment(
+            include_anthropic_api_key=include_anthropic_api_key
+        )
+        try:
+            payload = _run_json(
+                command,
+                timeout=AUTH_TIMEOUT_SECONDS,
+                include_anthropic_api_key=include_anthropic_api_key,
+            )
+        except AdvisorError:
+            continue
+        accepted = _accepted_auth(payload, allow_api_keys=allow_api_keys)
+        if accepted is not None:
+            return accepted
+    if allow_api_keys:
+        raise AdvisorError(
+            "Claude Code requires a first-party Pro, Max, or Team login, an "
+            "ANTHROPIC_API_KEY, or a Console `/login managed key`; authenticate "
+            "and try again."
+        )
+    raise AdvisorError(
+        "Claude Code requires a first-party Pro, Max, or Team login; authenticate "
+        "and try again."
+    )
+
+
+def _model_environment(auth: dict[str, str]) -> dict[str, str]:
+    return sanitized_environment(
+        include_anthropic_api_key=auth.get("auth_method") == "api_key"
+    )
 
 
 def _read_routing_state(home: Path | None = None) -> dict[str, Any]:
@@ -361,10 +488,12 @@ def _validate_runtime_models(
     reviewed_primaries = REVIEWED_PRIMARY_MODELS_BY_ROUTE.get(primary_model)
     if allowed_models is None or reviewed_primaries is None:
         raise AdvisorError("The configured Claude primary model is not sealed.")
-    policy_label = "Fable" if primary_model == FABLE_MODEL else "Claude"
-    primary_label = (
-        "Claude Fable 5" if primary_model == FABLE_MODEL else "Claude Opus 5"
+    policy_label = (
+        "Fable"
+        if primary_model in {FABLE_MODEL, LEGACY_FABLE_MODEL}
+        else "Claude"
     )
+    primary_label = _display_name(primary_model)
     if not isinstance(usage, dict):
         raise AdvisorError("Runtime metadata has a malformed modelUsage mapping.")
     raw_models = list(usage)
@@ -373,10 +502,28 @@ def _validate_runtime_models(
             f"Runtime metadata reported a model outside the allowed {policy_label} "
             "runtime policy."
         )
-    for model_usage in usage.values():
+    for model, model_usage in usage.items():
         if not isinstance(model_usage, dict) or not model_usage:
             raise AdvisorError("Runtime metadata has a malformed modelUsage value.")
         for field, value in model_usage.items():
+            if field == "canonicalModel":
+                if value != model:
+                    raise AdvisorError(
+                        "Runtime metadata has a malformed modelUsage value."
+                    )
+                continue
+            if field == "provider":
+                if value != "firstParty":
+                    raise AdvisorError(
+                        "Runtime metadata has a malformed modelUsage value."
+                    )
+                continue
+            if field == "costBasis":
+                if value != "list":
+                    raise AdvisorError(
+                        "Runtime metadata has a malformed modelUsage value."
+                    )
+                continue
             is_nonnegative_finite_number = (
                 type(value) is int
                 and value >= 0
@@ -403,6 +550,16 @@ def _validate_runtime_models(
             f"Runtime metadata reported a model outside the allowed {policy_label} "
             "runtime policy."
         )
+    if primary_model == FABLE_MODEL:
+        primary_usage = usage.get(FABLE_MODEL)
+        if not isinstance(primary_usage, dict) or (
+            primary_usage.get("canonicalModel") != FABLE_MODEL
+            or primary_usage.get("provider") != "firstParty"
+        ):
+            raise AdvisorError(
+                "Runtime metadata did not confirm the pinned Claude Fable 5.1 "
+                "canonical model and first-party provider."
+            )
     return used_models
 
 
@@ -515,11 +672,13 @@ def _invoke_fable(
     """Run one stateless, seat-authorized, no-tools Claude operation."""
 
     route = load_fable_route(seat=seat)
-    display_name = (
-        "Claude Fable 5" if route["model"] == FABLE_MODEL else "Claude Opus 5"
-    )
+    display_name = _display_name(route["model"])
     claude = resolve_claude()
-    auth = check_claude_auth(claude)
+    verify_fable_claude_version(claude, route["model"])
+    auth = check_claude_auth(
+        claude,
+        allow_api_keys=route["model"] in {FABLE_MODEL, LEGACY_FABLE_MODEL},
+    )
     command = [
         str(claude),
         "--print",
@@ -555,7 +714,7 @@ def _invoke_fable(
         result = subprocess.run(
             command,
             input=prompt,
-            env=sanitized_environment(),
+            env=_model_environment(auth),
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -733,7 +892,13 @@ def _configured_fable_seats() -> dict[str, dict[str, str]]:
 
 def status() -> dict[str, Any]:
     routes = _configured_fable_seats()
-    auth = check_claude_auth()
+    route = next(iter(routes.values()))
+    claude = resolve_claude()
+    verify_fable_claude_version(claude, route["model"])
+    auth = check_claude_auth(
+        claude,
+        allow_api_keys=route["model"] in {FABLE_MODEL, LEGACY_FABLE_MODEL}
+    )
     seats = {
         seat: {"model": route["model"], "effort": route["effort"]}
         for seat, route in routes.items()

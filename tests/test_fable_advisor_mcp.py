@@ -41,10 +41,12 @@ class FableAdvisorMcpTests(unittest.TestCase):
         self.temp.cleanup()
 
     @staticmethod
-    def route(effort: str = "high") -> dict[str, str]:
+    def route(
+        effort: str = "high", *, model: str = FABLE.FABLE_MODEL
+    ) -> dict[str, str]:
         return {
             "kind": "fable",
-            "model": "claude-fable-5",
+            "model": model,
             "effort": effort,
             "server": "fable-advisor-python3",
         }
@@ -58,7 +60,7 @@ class FableAdvisorMcpTests(unittest.TestCase):
             "server": "fable-advisor-python3",
         }
 
-    def write_state(self, *, schema: int = 3, **seats: object) -> None:
+    def write_state(self, *, schema: int = 6, **seats: object) -> None:
         subscription_routes = [
             route
             for route in seats.values()
@@ -107,6 +109,8 @@ class FableAdvisorMcpTests(unittest.TestCase):
             payload["planner"] = None
         if schema >= 4 and "designer" not in payload:
             payload["designer"] = None
+        if schema >= 7 and "validator" not in payload:
+            payload["validator"] = None
         (self.home / FABLE.STATE_FILENAME).write_text(
             json.dumps(payload), encoding="utf-8"
         )
@@ -132,6 +136,26 @@ class FableAdvisorMcpTests(unittest.TestCase):
             ),
         )
 
+    def version_result(
+        self, version: str = "2.1.257 (Claude Code)", *, returncode: int = 0
+    ) -> subprocess.CompletedProcess[str]:
+        return self.completed(
+            ["claude", "--version"],
+            version,
+            returncode=returncode,
+        )
+
+    @staticmethod
+    def current_model_usage(output_tokens: int = 12) -> dict[str, dict[str, object]]:
+        return {
+            FABLE.FABLE_MODEL: {
+                "outputTokens": output_tokens,
+                "canonicalModel": FABLE.FABLE_MODEL,
+                "provider": "firstParty",
+                "costBasis": "list",
+            }
+        }
+
     def model_result(
         self,
         response: str,
@@ -144,7 +168,7 @@ class FableAdvisorMcpTests(unittest.TestCase):
             "result": response,
             "modelUsage": model_usage
             if model_usage is not DEFAULT_MODEL_USAGE
-            else {"claude-fable-5": {"outputTokens": 12}},
+            else self.current_model_usage(),
         }
         if structured_output is not DEFAULT_STRUCTURED_OUTPUT:
             payload["structured_output"] = structured_output
@@ -176,6 +200,8 @@ class FableAdvisorMcpTests(unittest.TestCase):
             command: list[str], **kwargs: object
         ) -> subprocess.CompletedProcess[str]:
             calls.append((command, kwargs))
+            if command[-1] == "--version":
+                return self.version_result()
             if command[-2:] == ["auth", "status"] or command[-3:] == [
                 "auth",
                 "status",
@@ -230,6 +256,7 @@ class FableAdvisorMcpTests(unittest.TestCase):
                 FABLE.subprocess,
                 "run",
                 side_effect=[
+                    self.version_result(),
                     self.auth_result(),
                     self.completed(["claude"], stdout),
                 ],
@@ -248,6 +275,8 @@ class FableAdvisorMcpTests(unittest.TestCase):
             command: list[str], **kwargs: object
         ) -> subprocess.CompletedProcess[str]:
             calls.append((command, kwargs))
+            if command[-1] == "--version":
+                return self.version_result()
             if command[-2:] == ["auth", "status"] or command[-3:] == [
                 "auth",
                 "status",
@@ -277,12 +306,14 @@ class FableAdvisorMcpTests(unittest.TestCase):
             result = FABLE.review_plan("Review this complete plan.")
 
         self.assertEqual(result["decision"], "PLAN_APPROVED")
-        self.assertEqual(result["model"], "claude-fable-5")
-        self.assertEqual(result["used_models"], ["claude-fable-5"])
+        self.assertEqual(result["model"], FABLE.FABLE_MODEL)
+        self.assertEqual(result["used_models"], [FABLE.FABLE_MODEL])
         self.assertNotIn("subscription_type", result)
-        auth_command, auth_kwargs = calls[0]
+        version_command, version_kwargs = calls[0]
+        self.assertEqual(version_command, ["/fake/claude", "--version"])
+        auth_command, auth_kwargs = calls[1]
         self.assertEqual(auth_command[-3:], ["auth", "status", "--json"])
-        review_command, review_kwargs = calls[1]
+        review_command, review_kwargs = calls[2]
         for flag in (
             "--print",
             "--safe-mode",
@@ -301,7 +332,7 @@ class FableAdvisorMcpTests(unittest.TestCase):
             review_command[review_command.index("--permission-mode") + 1], "dontAsk"
         )
         self.assertEqual(
-            review_command[review_command.index("--model") + 1], "claude-fable-5"
+            review_command[review_command.index("--model") + 1], FABLE.FABLE_MODEL
         )
         self.assertEqual(review_command[review_command.index("--effort") + 1], "high")
         self.assertEqual(
@@ -316,7 +347,7 @@ class FableAdvisorMcpTests(unittest.TestCase):
             FABLE.PLAN_REVIEW_SCHEMA,
         )
         self.assertEqual(review_kwargs["input"], "Review this complete plan.")
-        for kwargs in (auth_kwargs, review_kwargs):
+        for kwargs in (version_kwargs, auth_kwargs, review_kwargs):
             sanitized = kwargs["env"]
             self.assertIsInstance(sanitized, dict)
             for name in FABLE.SENSITIVE_ENV:
@@ -409,6 +440,8 @@ class FableAdvisorMcpTests(unittest.TestCase):
                     command: list[str], **kwargs: object
                 ) -> subprocess.CompletedProcess[str]:
                     calls.append((command, kwargs))
+                    if command[-1] == "--version":
+                        return self.version_result()
                     if command[-2:] == ["auth", "status"] or command[-3:] == [
                         "auth",
                         "status",
@@ -447,7 +480,7 @@ class FableAdvisorMcpTests(unittest.TestCase):
                     result = FABLE.review_plan("Review this complete plan.")
 
                 self.assertEqual(result["decision"], "PLAN_APPROVED")
-                self.assertEqual(len(calls), 2)
+                self.assertEqual(len(calls), 3)
                 for _, kwargs in calls:
                     self.assertEqual(kwargs["env"], expected)
 
@@ -476,6 +509,46 @@ class FableAdvisorMcpTests(unittest.TestCase):
                     run.call_args.args[0],
                     [str(executable), "auth", "status", "--json"],
                 )
+                self.assertFalse(run.call_args.kwargs["include_anthropic_api_key"])
+
+        api_key_payload = {
+            "loggedIn": True,
+            "authMethod": "api_key",
+            "apiProvider": "firstParty",
+            "apiKeySource": "ANTHROPIC_API_KEY",
+        }
+        with (
+            mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
+            mock.patch.object(
+                FABLE,
+                "_run_json",
+                side_effect=[{"loggedIn": False}, api_key_payload],
+            ) as run,
+        ):
+            self.assertEqual(
+                FABLE.check_claude_auth(executable, allow_api_keys=True),
+                {"auth_method": "api_key", "api_provider": "firstParty"},
+            )
+            self.assertEqual(
+                [call.kwargs["include_anthropic_api_key"] for call in run.call_args_list],
+                [False, True],
+            )
+
+        managed_key_payload = {
+            "loggedIn": True,
+            "authMethod": "claude.ai",
+            "apiProvider": "firstParty",
+            "apiKeySource": "/login managed key",
+            "subscriptionType": None,
+        }
+        with mock.patch.object(
+            FABLE, "_run_json", return_value=managed_key_payload
+        ) as run:
+            self.assertEqual(
+                FABLE.check_claude_auth(executable, allow_api_keys=True),
+                {"auth_method": "console_api_key", "api_provider": "firstParty"},
+            )
+            self.assertFalse(run.call_args.kwargs["include_anthropic_api_key"])
 
         invalid_payloads = (
             {
@@ -536,6 +609,101 @@ class FableAdvisorMcpTests(unittest.TestCase):
                 self.assertIn("Pro, Max, or Team", str(failure.exception))
                 self.assertNotIn(secret, str(failure.exception))
 
+    def test_opus_auth_rejects_api_and_managed_keys_without_forwarding_them(self) -> None:
+        executable = Path("/fake/claude")
+        api_auth_tuples = (
+            {
+                "loggedIn": True,
+                "authMethod": "api_key",
+                "apiProvider": "firstParty",
+                "apiKeySource": "ANTHROPIC_API_KEY",
+            },
+            {
+                "loggedIn": True,
+                "authMethod": "claude.ai",
+                "apiProvider": "firstParty",
+                "apiKeySource": "/login managed key",
+                "subscriptionType": None,
+            },
+        )
+        for payload in api_auth_tuples:
+            with (
+                self.subTest(auth=payload["apiKeySource"]),
+                mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}),
+                mock.patch.object(FABLE, "_run_json", return_value=payload) as run,
+            ):
+                with self.assertRaisesRegex(
+                    FABLE.AdvisorError, "Pro, Max, or Team"
+                ) as failure:
+                    FABLE.check_claude_auth(executable, allow_api_keys=False)
+                run.assert_called_once()
+                self.assertFalse(run.call_args.kwargs["include_anthropic_api_key"])
+                self.assertNotIn("ANTHROPIC_API_KEY", str(failure.exception))
+                self.assertNotIn("managed key", str(failure.exception))
+
+    def test_api_key_auth_forwards_only_the_selected_key_to_the_sealed_cli(self) -> None:
+        token = "test-anthropic-key"
+        calls: list[tuple[list[str], dict[str, object]]] = []
+
+        def fake_run(
+            command: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            calls.append((command, kwargs))
+            environment = kwargs["env"]
+            assert isinstance(environment, dict)
+            if command[-1] == "--version":
+                return self.version_result()
+            if command[-3:] == ["auth", "status", "--json"]:
+                if environment.get("ANTHROPIC_API_KEY") == token:
+                    return self.completed(
+                        command,
+                        json.dumps(
+                            {
+                                "loggedIn": True,
+                                "authMethod": "api_key",
+                                "apiProvider": "firstParty",
+                                "apiKeySource": "ANTHROPIC_API_KEY",
+                            }
+                        ),
+                    )
+                return self.completed(command, json.dumps({"loggedIn": False}))
+            return self.model_result(
+                "PLAN_APPROVED\nNo material gap.",
+                structured_output={
+                    "signal": "PLAN_APPROVED",
+                    "body": "No material gap.",
+                },
+            )
+
+        with (
+            mock.patch.dict(
+                os.environ,
+                {
+                    "CODEX_HOME": str(self.home),
+                    "ANTHROPIC_API_KEY": token,
+                    "HTTP_PROXY": "http://hostile.invalid",
+                    "CLAUDE_CONFIG_DIR": "/hostile/config",
+                },
+                clear=False,
+            ),
+            mock.patch.object(
+                FABLE, "resolve_claude", return_value=Path("/fake/claude")
+            ),
+            mock.patch.object(FABLE.subprocess, "run", side_effect=fake_run),
+        ):
+            result = FABLE.review_plan("bounded packet")
+
+        self.assertEqual(result["model"], FABLE.FABLE_MODEL)
+        self.assertEqual(len(calls), 4)
+        auth_environments = [calls[1][1]["env"], calls[2][1]["env"]]
+        self.assertNotIn("ANTHROPIC_API_KEY", auth_environments[0])
+        self.assertEqual(auth_environments[1].get("ANTHROPIC_API_KEY"), token)
+        model_environment = calls[3][1]["env"]
+        self.assertEqual(model_environment.get("ANTHROPIC_API_KEY"), token)
+        for environment in (*auth_environments, model_environment):
+            self.assertNotIn("HTTP_PROXY", environment)
+            self.assertNotIn("CLAUDE_CONFIG_DIR", environment)
+
     def test_posix_identity_lookup_failure_stops_before_any_subprocess(self) -> None:
         executable = Path("/fake/claude")
         with (
@@ -553,59 +721,123 @@ class FableAdvisorMcpTests(unittest.TestCase):
                 FABLE.check_claude_auth(executable)
         run.assert_not_called()
 
-    def test_runtime_model_policy_accepts_only_fable_and_exact_allowed_helper(
-        self,
-    ) -> None:
-        resolved_primary = "claude-opus-4-8"
-        allowed_scenarios = (
-            ({FABLE.FABLE_MODEL: {"outputTokens": 12}}, [FABLE.FABLE_MODEL]),
-            ({resolved_primary: {"outputTokens": 12}}, [resolved_primary]),
-            (
-                {
-                    resolved_primary: {"outputTokens": 12},
-                    FABLE.FABLE_HELPER_MODEL: {"outputTokens": 1},
-                },
-                sorted((resolved_primary, FABLE.FABLE_HELPER_MODEL)),
-            ),
-            (
-                {
-                    FABLE.FABLE_MODEL: {"outputTokens": 12},
-                    resolved_primary: {"outputTokens": 12},
-                    FABLE.FABLE_HELPER_MODEL: {"outputTokens": 1},
-                },
-                sorted(
-                    (
-                        FABLE.FABLE_MODEL,
-                        resolved_primary,
-                        FABLE.FABLE_HELPER_MODEL,
-                    )
-                ),
-            ),
+    def test_current_fable_version_reattest_rejects_bad_or_failed_cli_output(self) -> None:
+        executable = Path("/fake/claude")
+        failures = (
+            (self.version_result("2.1.256 (Claude Code)"), "2.1.257 or newer"),
+            (self.version_result("Claude Code 2.1.257"), "unparseable version"),
+            (self.version_result("ignored", returncode=17), "exited with 17"),
         )
-        for model_usage, expected_models in allowed_scenarios:
-            with self.subTest(model_usage=model_usage):
-                result, _ = self.invoke_with_results(
-                    FABLE.review_plan,
-                    "packet",
-                    model_response="PLAN_APPROVED\nNo material gap found.",
-                    model_usage=model_usage,
-                )
-                self.assertEqual(result["decision"], "PLAN_APPROVED")
-                self.assertEqual(result["model"], FABLE.FABLE_MODEL)
-                self.assertEqual(result["used_models"], expected_models)
+        for result, expected_error in failures:
+            with self.subTest(expected_error=expected_error), mock.patch.object(
+                FABLE.subprocess, "run", return_value=result
+            ) as run:
+                with self.assertRaisesRegex(FABLE.AdvisorError, expected_error):
+                    FABLE.verify_fable_claude_version(executable, FABLE.FABLE_MODEL)
+                run.assert_called_once()
+                self.assertEqual(run.call_args.args[0], [str(executable), "--version"])
+
+    def test_current_fable_status_reattests_version_before_auth(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_run(
+            command: list[str], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            if command[-1] == "--version":
+                return self.version_result()
+            return self.auth_result()
+
+        with (
+            mock.patch.dict(os.environ, {"CODEX_HOME": str(self.home)}),
+            mock.patch.object(
+                FABLE, "resolve_claude", return_value=Path("/fake/claude")
+            ),
+            mock.patch.object(FABLE.subprocess, "run", side_effect=fake_run),
+        ):
+            status = FABLE.status()
+
+        self.assertTrue(status["available"])
+        self.assertEqual(
+            calls,
+            [
+                ["/fake/claude", "--version"],
+                ["/fake/claude", "auth", "status", "--json"],
+            ],
+        )
+
+    def test_fable_5_1_runtime_identity_is_exact_and_helper_free(self) -> None:
+        exact_usage = {
+            FABLE.FABLE_MODEL: {
+                "outputTokens": 12,
+                "canonicalModel": FABLE.FABLE_MODEL,
+                "provider": "firstParty",
+                "costBasis": "list",
+            }
+        }
+        result, _ = self.invoke_with_results(
+            FABLE.review_plan,
+            "packet",
+            model_response="PLAN_APPROVED\nNo material gap found.",
+            model_usage=exact_usage,
+        )
+        self.assertEqual(result["decision"], "PLAN_APPROVED")
+        self.assertEqual(result["model"], FABLE.FABLE_MODEL)
+        self.assertEqual(result["used_models"], [FABLE.FABLE_MODEL])
 
         secret = "TOP-SECRET-MODEL-OUTPUT"
         rejected_scenarios = (
             (
+                {FABLE.FABLE_MODEL: {"outputTokens": 12}},
+                "canonical model and first-party provider",
+            ),
+            (
                 {
-                    FABLE.FABLE_MODEL: {"outputTokens": 12},
-                    "claude-haiku-4-5-20251002": {"outputTokens": 1},
+                    FABLE.FABLE_MODEL: {
+                        "outputTokens": 12,
+                        "canonicalModel": "claude-other",
+                        "provider": "firstParty",
+                    }
+                },
+                "malformed modelUsage value",
+            ),
+            (
+                {
+                    FABLE.FABLE_MODEL: {
+                        "outputTokens": 12,
+                        "canonicalModel": FABLE.FABLE_MODEL,
+                        "provider": "bedrock",
+                    }
+                },
+                "malformed modelUsage value",
+            ),
+            (
+                {
+                    FABLE.FABLE_MODEL: {
+                        "outputTokens": 12,
+                        "canonicalModel": FABLE.FABLE_MODEL,
+                        "provider": "firstParty",
+                        "costBasis": "discounted",
+                    }
+                },
+                "malformed modelUsage value",
+            ),
+            (
+                {
+                    **exact_usage,
+                    FABLE.FABLE_HELPER_MODEL: {"outputTokens": 1},
                 },
                 "outside the allowed Fable runtime policy",
             ),
             (
-                {FABLE.FABLE_HELPER_MODEL: {"outputTokens": 1}},
-                "did not confirm the pinned Claude Fable 5 primary model",
+                {
+                    FABLE.LEGACY_FABLE_MODEL: {
+                        "outputTokens": 12,
+                        "canonicalModel": FABLE.LEGACY_FABLE_MODEL,
+                        "provider": "firstParty",
+                    }
+                },
+                "pinned Claude Fable 5.1 primary",
             ),
         )
         for model_usage, expected_error in rejected_scenarios:
@@ -620,6 +852,31 @@ class FableAdvisorMcpTests(unittest.TestCase):
                         model_usage=model_usage,
                     )
                 self.assertNotIn(secret, str(failure.exception))
+
+    def test_legacy_fable_runtime_policy_retains_reviewed_primary_and_helper(
+        self,
+    ) -> None:
+        self.write_state(
+            schema=5,
+            advisor=self.route(model=FABLE.LEGACY_FABLE_MODEL),
+        )
+        resolved_primary = "claude-opus-4-8"
+        model_usage = {
+            resolved_primary: {"outputTokens": 12},
+            FABLE.FABLE_HELPER_MODEL: {"outputTokens": 1},
+        }
+        result, calls = self.invoke_with_results(
+            FABLE.review_plan,
+            "legacy packet",
+            model_response="PLAN_APPROVED\nLegacy policy retained.",
+            model_usage=model_usage,
+        )
+        self.assertEqual(result["model"], FABLE.LEGACY_FABLE_MODEL)
+        self.assertEqual(
+            result["used_models"],
+            sorted((resolved_primary, FABLE.FABLE_HELPER_MODEL)),
+        )
+        self.assertFalse(any(command[-1] == "--version" for command, _ in calls))
 
     def test_runtime_model_usage_values_fail_closed(self) -> None:
         malformed_values = (
@@ -657,12 +914,27 @@ class FableAdvisorMcpTests(unittest.TestCase):
                     FABLE._validate_runtime_models(usage)
 
         for usage in (
-            {FABLE.FABLE_MODEL: {"outputTokens": 0}},
-            {FABLE.FABLE_MODEL: {"outputTokens": 10**309}},
-            {FABLE.FABLE_MODEL: {"costUSD": 0.25, "outputTokens": 12}},
             {
-                FABLE.FABLE_MODEL: {"outputTokens": 12},
-                FABLE.FABLE_HELPER_MODEL: {"outputTokens": 1},
+                FABLE.FABLE_MODEL: {
+                    "outputTokens": 0,
+                    "canonicalModel": FABLE.FABLE_MODEL,
+                    "provider": "firstParty",
+                }
+            },
+            {
+                FABLE.FABLE_MODEL: {
+                    "outputTokens": 10**309,
+                    "canonicalModel": FABLE.FABLE_MODEL,
+                    "provider": "firstParty",
+                }
+            },
+            {
+                FABLE.FABLE_MODEL: {
+                    "costUSD": 0.25,
+                    "outputTokens": 12,
+                    "canonicalModel": FABLE.FABLE_MODEL,
+                    "provider": "firstParty",
+                }
             },
         ):
             with self.subTest(valid_usage=usage):
@@ -685,8 +957,8 @@ class FableAdvisorMcpTests(unittest.TestCase):
         )
         self.assertEqual(created["effort"], "low")
         self.assertEqual(reviewed["effort"], "xhigh")
-        create_command = create_calls[1][0]
-        review_command = review_calls[1][0]
+        create_command = create_calls[2][0]
+        review_command = review_calls[2][0]
         self.assertEqual(create_command[create_command.index("--effort") + 1], "low")
         self.assertEqual(
             review_command[review_command.index("--effort") + 1], "xhigh"
@@ -730,19 +1002,45 @@ class FableAdvisorMcpTests(unittest.TestCase):
         with self.assertRaisesRegex(FABLE.AdvisorError, "state is invalid"):
             FABLE.load_fable_route(self.home, seat="advisor")
 
-        self.write_state(schema=2, advisor=self.route())
+        self.write_state(
+            schema=2, advisor=self.route(model=FABLE.LEGACY_FABLE_MODEL)
+        )
         self.assertEqual(FABLE.load_fable_route(self.home)["effort"], "high")
-        self.write_state(schema=2, planner=self.route())
+        self.write_state(
+            schema=2, planner=self.route(model=FABLE.LEGACY_FABLE_MODEL)
+        )
         with self.assertRaisesRegex(FABLE.AdvisorError, "state is invalid"):
             FABLE.load_fable_route(self.home, seat="planner")
 
-        self.write_state(schema=4, advisor=self.route())
+        self.write_state(
+            schema=4, advisor=self.route(model=FABLE.LEGACY_FABLE_MODEL)
+        )
         self.assertEqual(FABLE.load_fable_route(self.home)["effort"], "high")
-        self.write_state(schema=4, advisor=self.route(), designer=self.route())
+        self.write_state(
+            schema=4,
+            advisor=self.route(model=FABLE.LEGACY_FABLE_MODEL),
+            designer=self.route(model=FABLE.LEGACY_FABLE_MODEL),
+        )
         with self.assertRaisesRegex(FABLE.AdvisorError, "state is invalid"):
             FABLE.load_fable_route(self.home)
-        self.write_state(schema=5, advisor=self.route())
-        self.assertEqual(FABLE.load_fable_route(self.home)["model"], FABLE.FABLE_MODEL)
+        self.write_state(
+            schema=5, advisor=self.route(model=FABLE.LEGACY_FABLE_MODEL)
+        )
+        self.assertEqual(
+            FABLE.load_fable_route(self.home)["model"], FABLE.LEGACY_FABLE_MODEL
+        )
+        self.write_state(
+            schema=7,
+            planner=self.route("xhigh"),
+            validator={
+                "kind": "model",
+                "model": "gpt-6-astra",
+                "effort": "xhigh",
+            },
+        )
+        schema_seven_route = FABLE.load_fable_route(self.home, seat="planner")
+        self.assertEqual(schema_seven_route["model"], FABLE.FABLE_MODEL)
+        self.assertEqual(schema_seven_route["effort"], "xhigh")
 
     def test_opus_route_pins_primary_and_rejects_every_unverified_helper(self) -> None:
         self.write_state(schema=5, advisor=self.opus_route("xhigh"))
@@ -754,6 +1052,7 @@ class FableAdvisorMcpTests(unittest.TestCase):
         )
         self.assertEqual(result["model"], FABLE.OPUS_MODEL)
         self.assertEqual(result["effort"], "xhigh")
+        self.assertFalse(any(command[-1] == "--version" for command, _ in calls))
         review_command = calls[1][0]
         self.assertEqual(
             review_command[review_command.index("--model") + 1], FABLE.OPUS_MODEL
@@ -937,7 +1236,7 @@ class FableAdvisorMcpTests(unittest.TestCase):
         )
         self.assertEqual(result["signal"], "PLAN_REVISION")
         self.assertIn("## REVISED_PLAN", result["revision"])
-        prompt = calls[1][1]["input"]
+        prompt = calls[2][1]["input"]
         self.assertIn("# ORIGINAL_TASK", prompt)
         self.assertIn("# CANONICAL_CURRENT_PLAN_WITH_SOURCE_VERSION", prompt)
         self.assertIn("# LATEST_ADVISOR_CRITIQUE_WITH_STABLE_FINDING_IDS", prompt)
@@ -981,7 +1280,7 @@ class FableAdvisorMcpTests(unittest.TestCase):
                 "history",
                 model_response=response,
             )
-            all_commands.append(calls[1][0])
+            all_commands.append(calls[2][0])
         self.assertEqual(len(all_commands), 2)
         for command in all_commands:
             self.assertEqual(command.count("--no-session-persistence"), 1)
@@ -1001,7 +1300,7 @@ class FableAdvisorMcpTests(unittest.TestCase):
         )
         self.assertEqual(result["decision"], "PLAN_APPROVED")
         self.assertEqual(result["review"], "PLAN_APPROVED\nNo material gap found.")
-        command = calls[1][0]
+        command = calls[2][0]
         self.assertEqual(command.count("--json-schema"), 1)
         self.assertEqual(
             json.loads(command[command.index("--json-schema") + 1]),
@@ -1117,7 +1416,7 @@ class FableAdvisorMcpTests(unittest.TestCase):
             "result": json.dumps(
                 {"signal": "PLAN_APPROVED", "body": "No material gap."}
             ),
-            "modelUsage": {FABLE.FABLE_MODEL: {"outputTokens": 12}},
+            "modelUsage": self.current_model_usage(),
         }
         secret = "TOP-SECRET-AMBIGUOUS-EVENT"
         malformed_outers: tuple[object, ...] = (
@@ -1132,7 +1431,7 @@ class FableAdvisorMcpTests(unittest.TestCase):
                 "result": json.dumps(
                     {"signal": "PLAN_APPROVED", "body": secret}
                 ),
-                "modelUsage": {FABLE.FABLE_MODEL: {"outputTokens": 12}},
+                "modelUsage": self.current_model_usage(),
             },
             secret,
         )
@@ -1166,6 +1465,7 @@ class FableAdvisorMcpTests(unittest.TestCase):
                         FABLE.subprocess,
                         "run",
                         side_effect=[
+                            self.version_result(),
                             self.auth_result(),
                             self.completed(["claude"], stdout),
                         ],
@@ -1194,7 +1494,9 @@ class FableAdvisorMcpTests(unittest.TestCase):
                 FABLE, "resolve_claude", return_value=Path("/fake/claude")
             ),
             mock.patch.object(
-                FABLE.subprocess, "run", side_effect=[self.auth_result(), failed]
+                FABLE.subprocess,
+                "run",
+                side_effect=[self.version_result(), self.auth_result(), failed],
             ),
         ):
             with self.assertRaises(FABLE.AdvisorError) as failure:
@@ -1209,7 +1511,9 @@ class FableAdvisorMcpTests(unittest.TestCase):
                 FABLE, "resolve_claude", return_value=Path("/fake/claude")
             ),
             mock.patch.object(
-                FABLE.subprocess, "run", side_effect=[self.auth_result(), timeout]
+                FABLE.subprocess,
+                "run",
+                side_effect=[self.version_result(), self.auth_result(), timeout],
             ),
         ):
             with self.assertRaises(FABLE.AdvisorError) as timed_out:
@@ -1278,6 +1582,14 @@ class FableAdvisorMcpTests(unittest.TestCase):
                 with (
                     mock.patch.dict(os.environ, {"CODEX_HOME": str(self.home)}),
                     mock.patch.object(
+                        FABLE, "resolve_claude", return_value=Path("/fake/claude")
+                    ),
+                    mock.patch.object(
+                        FABLE,
+                        "verify_fable_claude_version",
+                        return_value="2.1.257",
+                    ),
+                    mock.patch.object(
                         FABLE,
                         "check_claude_auth",
                         return_value={
@@ -1310,6 +1622,14 @@ class FableAdvisorMcpTests(unittest.TestCase):
     def test_status_tool_and_argument_validation_fail_closed(self) -> None:
         with (
             mock.patch.dict(os.environ, {"CODEX_HOME": str(self.home)}),
+            mock.patch.object(
+                FABLE, "resolve_claude", return_value=Path("/fake/claude")
+            ),
+            mock.patch.object(
+                FABLE,
+                "verify_fable_claude_version",
+                return_value="2.1.257",
+            ),
             mock.patch.object(
                 FABLE,
                 "check_claude_auth",

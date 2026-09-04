@@ -1,6 +1,33 @@
 # Changelog
 
-## 0.9.3 — Unreleased
+## 0.11.0 — 2026-09-05
+
+- Add an optional direct-model Validator seat, including GPT-6 Astra Extra High,
+  with native routing schema/policy 7. Existing schemas 1–6 remain readable and
+  their restore snapshots retain the existing repair and disable behavior.
+- Require fresh validation of every substantive output batch and the integrated
+  outcome when Validator is configured, including root-authored work. Revisions,
+  missing evidence, unavailable routes, and malformed receipts block acceptance.
+- Add a pure JSON receipt checker for artifact revisions, criteria, evidence
+  coverage, and consistent decisions. Reviews stay root-directed and read-only
+  by instruction, with a fixed three-review bound and no recursive review loop.
+
+## 0.10.0 — Unreleased
+
+- Upgrade the sealed current Fable route to Claude Fable 5.1
+  (`claude-fable-5-1`) and native routing schema/policy 6. New routes require
+  Claude Code 2.1.257 or newer and accept first-party Pro, Max, and Team login,
+  `ANTHROPIC_API_KEY`, or Console `/login managed key` authentication without
+  changing the sealed Claude Code CLI transport into direct HTTP.
+- Qualify Fable 5.1 only when runtime metadata reports the exact
+  `claude-fable-5-1` `modelUsage` key with matching `canonicalModel`,
+  `firstParty` provider, and no helper model.
+- Keep schemas 1–5 as strict legacy state: their Fable route remains
+  `claude-fable-5` with its previously reviewed primary/helper policy, and can
+  still be validated, upgraded, or disabled without rewriting the restore
+  snapshot.
+
+## 0.9.3 — 2026-09-02
 
 - Raise the bounded Advisor approval loop from five to eight reviews while
   preserving immediate approval exit and fail-closed plan, ledger, and
