@@ -241,7 +241,7 @@ suggestions, and requires JSON runtime metadata to contain an allowed primary.
 For the Fable route, the reviewed primary identities are `claude-fable-5` and
 its resolved runtime identity `claude-opus-4-8`; only the exact internal helper
 `claude-haiku-4-5-20251001` is additionally permitted. The separate Opus route
-still requires `claude-opus-5`, with no helper. Advisor decisions use
+requires `claude-opus-5` and permits that same exact observed helper. Advisor decisions use
 `--json-schema` and are locally revalidated; raw prose is not approval. Any
 missing primary or unknown additional model fails closed. Identity rotation
 therefore requires a reviewed plugin update rather than a wildcard. Setup and

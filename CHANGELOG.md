@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.4 — Unreleased
+
+- Accept the current Claude CLI's documented runtime metadata string fields while
+  retaining numeric validation for usage counters, and permit the observed exact
+  Haiku helper alongside the sealed Claude Opus 5 primary. Unknown metadata
+  fields and helper identities remain fail-closed.
+
 ## 0.9.3 — Unreleased
 
 - Raise the bounded Advisor approval loop from five to eight reviews while
