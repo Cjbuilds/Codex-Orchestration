@@ -490,6 +490,18 @@ may confirm either reviewed Fable primary identity. This does not make
 `claude-opus-4-8` an Opus route alias. Opus still requires the exact
 `claude-opus-5` primary.
 
+Fable additionally accepts optional string `modelUsage` metadata: `provider`
+must be `firstParty`, and `costBasis` must be `list`. `canonicalModel` is bound
+to its outer key: `claude-fable-5` permits `claude-fable-5` or `claude-opus-4-8`;
+`claude-opus-4-8` permits only itself; `claude-haiku-4-5-20251001` permits
+itself or `claude-haiku-4-5`. The undated helper alias is metadata only, never
+an allowed outer runtime model. Every entry still requires a numeric usage
+field. Non-empty string-named numeric fields remain open-ended and accept
+finite nonnegative integers or floats (including zero, fractions, and huge
+integers), excluding booleans. Unknown string fields, invalid metadata values,
+and metadata-only entries fail closed before review content is interpreted.
+Opus retains numeric-only usage metadata and its exact primary-only policy.
+
 Plugin and policy updates cannot replace the MCP process already loaded into the
 current task. If a bundled Claude call fails after an update or repair, run fresh
 native status. When status reports that configured bundled Claude seat

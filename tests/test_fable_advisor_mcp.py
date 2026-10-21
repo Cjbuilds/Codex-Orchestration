@@ -674,6 +674,199 @@ class FableAdvisorMcpTests(unittest.TestCase):
                 )
                 self.assertEqual(result["decision"], "PLAN_APPROVED")
 
+    @staticmethod
+    def saved_helper_usage() -> dict[str, object]:
+        # Public, non-private saved CLI helper entry; primary is synthetic.
+        return {
+            "inputTokens": 18,
+            "outputTokens": 478,
+            "cacheReadInputTokens": 11281,
+            "cacheCreationInputTokens": 11792,
+            "webSearchRequests": 0,
+            "costUSD": 0.0271201,
+            "contextWindow": 200000,
+            "maxOutputTokens": 32000,
+            "thinkingTokens": 242,
+            "canonicalModel": "claude-haiku-4-5",
+            "provider": "firstParty",
+            "costBasis": "list",
+        }
+
+    def test_saved_helper_metadata_through_review_and_mocked_mcp_caller(self) -> None:
+        usage = {
+            FABLE.FABLE_MODEL: {"inputTokens": 1},
+            FABLE.FABLE_HELPER_MODEL: self.saved_helper_usage(),
+        }
+        result, _ = self.invoke_with_results(
+            FABLE.review_plan,
+            "synthetic packet",
+            model_response="PLAN_APPROVED\nSynthetic review.",
+            model_usage=usage,
+        )
+        self.assertEqual(result["decision"], "PLAN_APPROVED")
+        self.assertEqual(result["used_models"], sorted(usage))
+
+        def caller(packet: str) -> dict[str, object]:
+            return FABLE.handle_request({
+                "jsonrpc": "2.0",
+                "id": 42,
+                "method": "tools/call",
+                "params": {"name": "review_plan", "arguments": {"packet": packet}},
+            })
+
+        for invalid in (False, True):
+            with self.subTest(invalid=invalid):
+                helper = self.saved_helper_usage()
+                if invalid:
+                    helper["canonicalModel"] = "private-unknown-identity"
+                with mock.patch.dict(os.environ, {"ANTHROPIC_BASE_URL": "unused"}):
+                    response, calls = self.invoke_with_results(
+                        caller,
+                        "synthetic packet",
+                        model_response="PLAN_APPROVED\nPRIVATE-REVIEW-BODY",
+                        model_usage={
+                            FABLE.FABLE_MODEL: {"inputTokens": 1},
+                            FABLE.FABLE_HELPER_MODEL: helper,
+                        },
+                        structured_output={
+                            "signal": "PLAN_APPROVED", "body": "PRIVATE-REVIEW-BODY"
+                        },
+                    )
+                self.assertNotIn("ANTHROPIC_BASE_URL", calls[1][1]["env"])
+                if invalid:
+                    self.assertNotIn("PRIVATE-REVIEW-BODY", json.dumps(response))
+                    self.assertNotIn("private-unknown-identity", json.dumps(response))
+                    self.assertTrue(response["result"]["isError"])
+                else:
+                    body = json.loads(response["result"]["content"][0]["text"])
+                    self.assertEqual(body["used_models"], sorted(usage))
+                    self.assertEqual(body["decision"], "PLAN_APPROVED")
+
+    def test_fable_metadata_identity_matrix_and_numeric_compatibility(self) -> None:
+        canonicals = {
+            FABLE.FABLE_MODEL: (FABLE.FABLE_MODEL, "claude-opus-4-8"),
+            "claude-opus-4-8": ("claude-opus-4-8",),
+            FABLE.FABLE_HELPER_MODEL: (
+                FABLE.FABLE_HELPER_MODEL, "claude-haiku-4-5"
+            ),
+        }
+        for outer, identities in canonicals.items():
+            for canonical in identities:
+                for numeric in (0, 0.25, 10**309):
+                    with self.subTest(outer=outer, canonical=canonical, numeric=numeric):
+                        primary = (
+                            outer if outer == "claude-opus-4-8" else FABLE.FABLE_MODEL
+                        )
+                        usage = {primary: {"inputTokens": 1}}
+                        usage[outer] = {
+                            "canonicalModel": canonical,
+                            "provider": "firstParty",
+                            "costBasis": "list",
+                            "futureNumericField": numeric,
+                        }
+                        result, _ = self.invoke_with_results(
+                            FABLE.review_plan,
+                            "packet",
+                            model_response="PLAN_APPROVED\nSynthetic review.",
+                            model_usage=usage,
+                            as_events=True,
+                        )
+                        self.assertEqual(result["used_models"], sorted(usage))
+        # Numeric-only payloads retain arbitrary field names and fractions.
+        for route, primary in ((self.route(), FABLE.FABLE_MODEL),
+                               (self.opus_route(), FABLE.OPUS_MODEL)):
+            self.write_state(schema=5, advisor=route)
+            result, _ = self.invoke_with_results(
+                FABLE.review_plan, "packet",
+                model_response="PLAN_APPROVED\nSynthetic review.",
+                model_usage={primary: {"futureCounter": 0.5, "huge": 10**309}},
+            )
+            self.assertEqual(result["used_models"], [primary])
+
+    def test_metadata_rejections_precede_review_content_and_remain_content_free(self) -> None:
+        bad_entries = [
+            {"inputTokens": 1, field: value}
+            for field, values in {
+                "provider": ("", " ", "other", None, [], {}, True),
+                "costBasis": ("", " ", "other", None, [], {}, False),
+                "canonicalModel": ("", "unknown", FABLE.OPUS_MODEL, {}, []),
+                "unknownStringField": ("private-metadata",),
+                "futureCounter": (-1, float("nan"), float("inf"), True, False),
+                " ": (1,),
+            }.items()
+            for value in values
+        ]
+        bad_entries.extend((
+            {"provider": "firstParty"},
+            {"canonicalModel": FABLE.FABLE_MODEL, "costBasis": "list"},
+            {"inputTokens": 1, "canonicalModel": FABLE.FABLE_HELPER_MODEL},
+        ))
+        scenarios = [{FABLE.FABLE_MODEL: entry} for entry in bad_entries]
+        for outer, canonical in (
+            ("claude-opus-4-8", FABLE.FABLE_MODEL),
+            ("claude-opus-4-8", FABLE.FABLE_HELPER_MODEL),
+            (FABLE.FABLE_HELPER_MODEL, FABLE.FABLE_MODEL),
+            (FABLE.FABLE_HELPER_MODEL, "claude-opus-4-8"),
+        ):
+            scenarios.append({
+                FABLE.FABLE_MODEL: {"inputTokens": 1},
+                outer: {"inputTokens": 1, "canonicalModel": canonical},
+            })
+        scenarios.extend((
+            None, [], {}, {FABLE.FABLE_MODEL: []},
+            {FABLE.FABLE_HELPER_MODEL: self.saved_helper_usage()},
+            {FABLE.FABLE_MODEL: {"inputTokens": 1},
+             FABLE.FABLE_HELPER_MODEL: {
+                 "provider": "firstParty", "costBasis": "list",
+                 "canonicalModel": "claude-haiku-4-5",
+             }},
+            {FABLE.FABLE_MODEL: {"inputTokens": 1},
+             "claude-haiku-4-5": self.saved_helper_usage()},
+            {FABLE.FABLE_MODEL: {"inputTokens": 1},
+             "private-unknown-model": {"inputTokens": 1}},
+        ))
+        for usage in scenarios:
+            with self.subTest(usage=usage):
+                with mock.patch.object(FABLE, "_review_response") as read_review:
+                    with self.assertRaises(FABLE.AdvisorError) as failure:
+                        self.invoke_with_results(
+                            FABLE.review_plan, "packet",
+                            model_response="PRIVATE-REVIEW-BODY",
+                            structured_output={"private": "invalid review"},
+                            model_usage=usage,
+                        )
+                    read_review.assert_not_called()
+                error = str(failure.exception)
+                for private in ("PRIVATE-REVIEW-BODY", "private-metadata",
+                                "private-unknown-model", "invalid review"):
+                    self.assertNotIn(private, error)
+
+    def test_opus_still_rejects_string_metadata_and_other_primaries(self) -> None:
+        self.write_state(schema=5, advisor=self.opus_route())
+        scenarios = [
+            {FABLE.OPUS_MODEL: {"inputTokens": 1, field: value}}
+            for field, value in (
+                ("canonicalModel", FABLE.OPUS_MODEL),
+                ("provider", "firstParty"), ("costBasis", "list"),
+            )
+        ]
+        scenarios.extend((
+            {FABLE.FABLE_MODEL: {"inputTokens": 1}},
+            {"claude-opus-4-8": {"inputTokens": 1}},
+            {FABLE.OPUS_MODEL: {"inputTokens": 1},
+             FABLE.FABLE_HELPER_MODEL: {"inputTokens": 1}},
+        ))
+        for usage in scenarios:
+            with self.subTest(usage=usage):
+                with mock.patch.object(FABLE, "_review_response") as read_review:
+                    with self.assertRaises(FABLE.AdvisorError):
+                        self.invoke_with_results(
+                            FABLE.review_plan, "packet",
+                            model_response="PLAN_APPROVED\nPrivate review.",
+                            model_usage=usage,
+                        )
+                    read_review.assert_not_called()
+
     def test_each_operation_pins_its_authorized_seat_effort(self) -> None:
         self.write_state(planner=self.route("low"))
         created, create_calls = self.invoke_with_results(

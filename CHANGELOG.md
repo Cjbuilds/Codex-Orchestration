@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.4 — Unreleased
+
+- Accept Fable's optional exact first-party provider, list cost basis, and
+  per-model canonical identity metadata, including the undated Haiku canonical
+  alias. Preserve numeric usage compatibility, required reviewed primary,
+  complete runtime model reporting, and the unchanged Opus primary-only policy.
+
 ## 0.9.3 — Unreleased
 
 - Raise the bounded Advisor approval loop from five to eight reviews while

@@ -248,6 +248,18 @@ therefore requires a reviewed plugin update rather than a wildcard. Setup and
 status never make a model call, and mocked local tests do not constitute a
 positive live Opus invocation.
 
+Fable additionally accepts optional string `modelUsage` metadata: `provider`
+must be `firstParty`, and `costBasis` must be `list`. `canonicalModel` is bound
+to its outer key: `claude-fable-5` permits `claude-fable-5` or `claude-opus-4-8`;
+`claude-opus-4-8` permits only itself; `claude-haiku-4-5-20251001` permits
+itself or `claude-haiku-4-5`. The undated helper alias is metadata only, never
+an allowed outer runtime model. Every entry still requires a numeric usage
+field. Non-empty string-named numeric fields remain open-ended and accept
+finite nonnegative integers or floats (including zero, fractions, and huge
+integers), excluding booleans. Unknown string fields, invalid metadata values,
+and metadata-only entries fail closed before review content is interpreted.
+Opus retains numeric-only usage metadata and its exact primary-only policy.
+
 An MCP process is loaded for the lifetime of its Codex task. Updating the plugin or
 repairing policy state cannot replace that already loaded process. If a current-task
 bundled Claude call fails after either operation while a fresh native status check

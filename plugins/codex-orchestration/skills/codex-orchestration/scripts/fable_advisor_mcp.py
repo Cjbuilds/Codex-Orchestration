@@ -49,6 +49,13 @@ ALLOWED_RUNTIME_MODELS_BY_PRIMARY = {
     # Claude Code reports anything beyond the sealed primary.
     OPUS_MODEL: frozenset({OPUS_MODEL}),
 }
+# Optional string metadata is accepted only on the Fable route and is bound
+# to the exact outer runtime identity; it never expands the runtime allowlist.
+FABLE_CANONICAL_MODELS = {
+    FABLE_MODEL: frozenset({FABLE_MODEL, FABLE_RESOLVED_PRIMARY_MODEL}),
+    FABLE_RESOLVED_PRIMARY_MODEL: frozenset({FABLE_RESOLVED_PRIMARY_MODEL}),
+    FABLE_HELPER_MODEL: frozenset({FABLE_HELPER_MODEL, "claude-haiku-4-5"}),
+}
 CLAUDE_TIMEOUT_SECONDS = 600
 AUTH_TIMEOUT_SECONDS = 20
 # Applies to the combined user-controlled text sent by one model operation.
@@ -373,9 +380,10 @@ def _validate_runtime_models(
             f"Runtime metadata reported a model outside the allowed {policy_label} "
             "runtime policy."
         )
-    for model_usage in usage.values():
+    for model, model_usage in usage.items():
         if not isinstance(model_usage, dict) or not model_usage:
             raise AdvisorError("Runtime metadata has a malformed modelUsage value.")
+        has_numeric_usage = False
         for field, value in model_usage.items():
             is_nonnegative_finite_number = (
                 type(value) is int
@@ -384,14 +392,26 @@ def _validate_runtime_models(
                 and math.isfinite(value)
                 and value >= 0
             )
-            if (
-                not isinstance(field, str)
-                or not field.strip()
-                or not is_nonnegative_finite_number
-            ):
+            if not isinstance(field, str) or not field.strip():
                 raise AdvisorError(
                     "Runtime metadata has a malformed modelUsage value."
                 )
+            # Preserve the legacy open-ended numeric field contract, including
+            # fractional values and integers too large to convert to float.
+            if is_nonnegative_finite_number:
+                has_numeric_usage = True
+                continue
+            if primary_model == FABLE_MODEL and isinstance(value, str):
+                if (
+                    field == "provider" and value == "firstParty"
+                    or field == "costBasis" and value == "list"
+                    or field == "canonicalModel"
+                    and value in FABLE_CANONICAL_MODELS.get(model, ())
+                ):
+                    continue
+            raise AdvisorError("Runtime metadata has a malformed modelUsage value.")
+        if not has_numeric_usage:
+            raise AdvisorError("Runtime metadata has a malformed modelUsage value.")
     used_models = sorted(raw_models)
     if not set(used_models).intersection(reviewed_primaries):
         raise AdvisorError(
