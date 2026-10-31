@@ -1,0 +1,11 @@
+# Claude model upgrade threat model — 0.10.0
+
+Assets are the user's exact saved routes and restoration snapshots, first-party login isolation, model/effort identity, and the authority of a bounded planning/review result. Untrusted inputs include saved JSON, CLI capability advertisements, runtime usage metadata, ambient environment, and natural-language model labels.
+
+Schema/policy 6 adds exact Fable 5.1 and Opus 5.5 identities. New routes accept only their own primary runtime ID; neither inherits legacy Fable's alias/helper allowance. Old schemas and schema-6 legacy routes keep their original identities. No wildcard, shared alias, model fallback, effort downgrade, or implicit state migration is allowed. The selected effort must be in the per-model sealed set and the installed CLI's advertised set. Fable's historical user-facing ultra alias means max, never a new capability. ultracode is not an effort and cannot enable tools.
+
+A version change requires full disable followed by explicit complete setup. Disable restores exact saved hint/config snapshots; validation and status do not rewrite them. Explicit migration preserves an old effort only when it is passed again. New defaults are high for Fable 5.1 and medium for Opus 5.5. Unknown/malformed state, wrong model kind, incompatible schema, wrong runtime primary, helpers, and invalid usage counters fail closed. One bundled Claude seat remains the maximum.
+
+The bridge continues to enforce first-party login, minimal platform environment, no tools, no session persistence, immutable saved model/effort, and strict Advisor decision schema. Setup/status perform capability/auth checks only. No model calls or real auth/config changes are used by local verification; lifecycle tests use isolated temporary homes. Existing legacy regression coverage remains alongside exact new-route and migration tests.
+
+Residual qualification: local mocked tests cannot prove provider availability or live runtime metadata. Manual first-party qualification of both new models/seats remains required by RELEASE.md before release. Hosted protected checks and a fresh independent review attestation bound to the final exact commit remain authoritative. No loaded plugin cache or global configuration is changed by this patch.

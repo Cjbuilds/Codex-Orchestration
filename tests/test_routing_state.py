@@ -300,5 +300,27 @@ class RoutingStateTests(unittest.TestCase):
                 STATE.validate_routing_state(state)
 
 
+    def test_schema_six_exact_models_and_legacy_version_boundaries(self) -> None:
+        for model, kind in ((STATE.FABLE_51_MODEL, "fable"), (STATE.OPUS_55_MODEL, "claude_subscription")):
+            for schema in (3, 4, 5, 6):
+                state = genuine_state(schema)
+                state["planner"] = {"kind": kind, "model": model, "effort": "max", "server": "fable-advisor-python3"}
+                with self.subTest(model=model, schema=schema):
+                    if schema == 6:
+                        self.assertIs(STATE.validate_routing_state(state), state)
+                    else:
+                        with self.assertRaises(STATE.RoutingStateError):
+                            STATE.validate_routing_state(state)
+        state = genuine_state(6)
+        original = deepcopy(state)
+        STATE.validate_routing_state(state)
+        self.assertEqual(state, original)
+        for field, value in (("model", "claude-fable-5-2"), ("model", True), ("effort", "ultracode"), ("effort", None), ("kind", "model")):
+            invalid = deepcopy(state)
+            invalid["planner"][field] = value
+            with self.subTest(field=field, value=value), self.assertRaises(STATE.RoutingStateError):
+                STATE.validate_routing_state(invalid)
+
+
 if __name__ == "__main__":
     unittest.main()

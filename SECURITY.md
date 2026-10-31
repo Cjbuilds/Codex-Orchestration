@@ -110,3 +110,10 @@ provider endpoints are trusted dependencies. The plugin does not weaken sandbox 
 approval settings and cannot guarantee that policy-guided delegation is
 engine-enforced. See the README and External Models reference for the operational
 contract.
+
+Schema/policy 6 adds Fable 5.1 and Opus 5.5 as distinct exact routes, without
+retargeting schemas 1–5 or their restoration snapshots. New identities are
+primary-only; legacy Fable alias/helper allowances remain exclusive to the old
+Fable route. Version changes require explicit disable and setup. See
+[the 0.10.0 threat model](docs/claude-model-upgrade-threat-model.md) for boundaries,
+negative regressions, and remaining live qualification.

@@ -14,8 +14,8 @@ FABLE_MODEL = "claude-fable-5"
 OPUS_PROVIDER = "claude-opus"
 OPUS_MODEL = "claude-opus-5"
 SEALED_MODELS = {
-    FABLE_PROVIDER: FABLE_MODEL,
-    OPUS_PROVIDER: OPUS_MODEL,
+    FABLE_PROVIDER: frozenset({FABLE_MODEL, "claude-fable-5-1"}),
+    OPUS_PROVIDER: frozenset({OPUS_MODEL, "claude-opus-5-5"}),
 }
 OPERATION_SEATS = {
     "create_plan": "planner",
@@ -41,11 +41,11 @@ def validate_route(
 ) -> tuple[dict[str, Any], str]:
     """Resolve only manifest-sealed provider/model/effort/operation tuples."""
 
-    _require(provider_id in SEALED_MODELS, "subscription provider is not audited")
+    _require(type(provider_id) is str and provider_id in SEALED_MODELS, "subscription provider is not audited")
     provider = external_providers.load_provider(provider_id)
     _require(provider["lane"] == "subscription", "provider is not a subscription adapter")
     _require(
-        model == SEALED_MODELS[provider_id],
+        type(model) is str and model in SEALED_MODELS[provider_id],
         "subscription provider/model pair is not sealed",
     )
     selected_effort = external_providers.resolve_effort(provider, model, effort)
@@ -64,7 +64,7 @@ def validate_route(
 def status(
     *,
     provider_id: str = FABLE_PROVIDER,
-    model: str = FABLE_MODEL,
+    model: str | None = None,
     effort: str = "high",
     seat: str = "planner",
 ) -> dict[str, Any]:
@@ -72,10 +72,11 @@ def status(
 
     _require(seat in {"planner", "advisor"}, "subscription seat is unsupported")
     operation = "create_plan" if seat == "planner" else "review_plan"
+    route = fable_advisor_mcp.load_fable_route(seat=seat)
+    model = route["model"] if model is None else model
     provider, selected_effort = validate_route(
         provider_id, model, effort, operation
     )
-    route = fable_advisor_mcp.load_fable_route(seat=seat)
     _require(route["model"] == model, "configured Claude route model drifted")
     _require(
         route["effort"] == selected_effort,
@@ -99,12 +100,12 @@ def invoke(
     arguments: dict[str, str],
     *,
     provider_id: str = FABLE_PROVIDER,
-    model: str = FABLE_MODEL,
+    model: str | None = None,
     effort: str = "high",
 ) -> dict[str, Any]:
     """Dispatch one operation through the existing no-tools Claude bridge."""
 
-    _, selected_effort = validate_route(provider_id, model, effort, operation)
+    _require(operation in OPERATION_SEATS, "subscription operation is not allowed")
     expected_keys = {
         "create_plan": {"packet"},
         "revise_plan": {"task", "current_plan", "critique", "history"},
@@ -118,8 +119,9 @@ def invoke(
         all(type(value) is str and bool(value.strip()) for value in arguments.values()),
         "subscription arguments must be non-empty strings",
     )
-    seat = OPERATION_SEATS[operation]
-    configured = fable_advisor_mcp.load_fable_route(seat=seat)
+    configured = fable_advisor_mcp.load_fable_route(seat=OPERATION_SEATS[operation])
+    model = configured["model"] if model is None else model
+    _, selected_effort = validate_route(provider_id, model, effort, operation)
     _require(
         configured["model"] == model,
         "configured Claude route model differs from the requested model",

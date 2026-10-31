@@ -42,7 +42,7 @@ class ExternalProviderTests(unittest.TestCase):
         self.assertEqual(fable["runtime_identity"], "cli_metadata")
         self.assertEqual(opus["lane"], "subscription")
         self.assertEqual(opus["runtime_identity"], "cli_metadata")
-        self.assertEqual(set(opus["models"]), {"claude-opus-5"})
+        self.assertEqual(set(opus["models"]), {"claude-opus-5", "claude-opus-5-5"})
         self.assertEqual(
             opus["models"]["claude-opus-5"]["supported_efforts"],
             ["low", "medium", "high", "xhigh", "max"],
@@ -109,6 +109,17 @@ class ExternalProviderTests(unittest.TestCase):
             with self.subTest(provider_id=provider_id):
                 with self.assertRaises(PROVIDERS.ProviderError):
                     PROVIDERS.load_provider(provider_id)
+
+
+    def test_new_claude_model_efforts_are_exact_and_defaults_model_specific(self) -> None:
+        for provider_id, model, default in (("claude-fable", "claude-fable-5-1", "high"), ("claude-opus", "claude-opus-5-5", "medium")):
+            provider = PROVIDERS.load_provider(provider_id)
+            self.assertEqual(PROVIDERS.resolve_effort(provider, model, "auto"), default)
+            for effort in ("low", "medium", "high", "xhigh", "max"):
+                self.assertEqual(PROVIDERS.resolve_effort(provider, model, effort), effort)
+            for effort in ("ultra", "ultracode", "extreme"):
+                with self.assertRaises(PROVIDERS.ProviderError):
+                    PROVIDERS.resolve_effort(provider, model, effort)
 
 
 if __name__ == "__main__":

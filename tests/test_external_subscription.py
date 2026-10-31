@@ -30,10 +30,12 @@ class ExternalSubscriptionTests(unittest.TestCase):
         opus, opus_effort = SUBSCRIPTION.validate_route(
             "claude-opus", "claude-opus-5", "xhigh", "review_plan"
         )
-        self.assertEqual(opus["name"], "Claude Opus 5")
+        self.assertEqual(opus["name"], "Claude Opus 5.5")
         self.assertEqual(opus_effort, "xhigh")
         for values in (
             ("unknown", "claude-fable-5", "high", "create_plan"),
+            ([], "claude-fable-5", "high", "create_plan"),
+            ("claude-fable", [], "high", "create_plan"),
             ("claude-fable", "claude-other", "high", "create_plan"),
             ("claude-fable", "claude-opus-5", "high", "create_plan"),
             ("claude-opus", "claude-fable-5", "high", "create_plan"),
@@ -245,6 +247,21 @@ class ExternalSubscriptionTests(unittest.TestCase):
         self.assertIs(revise_result, revised)
         create.assert_called_once_with(packet="bounded planning packet")
         revise.assert_called_once_with(**revision_arguments)
+
+
+    def test_new_routes_dispatch_exact_model_and_reject_legacy_metadata(self) -> None:
+        for provider, model in (("claude-fable", "claude-fable-5-1"), ("claude-opus", "claude-opus-5-5")):
+            expected = {"model": model, "effort": "max", "used_models": [model], "signal": "PLAN_DRAFT"}
+            with self.subTest(model=model), mock.patch.object(SUBSCRIPTION.fable_advisor_mcp, "load_fable_route", return_value={"model": model, "effort": "max"}), mock.patch.object(SUBSCRIPTION.fable_advisor_mcp, "create_plan", return_value=expected):
+                self.assertIs(SUBSCRIPTION.invoke("create_plan", {"packet": "bounded"}, provider_id=provider, model=model, effort="max"), expected)
+                for usage in (["claude-fable-5"], ["claude-opus-5"], [model, "claude-haiku-4-5-20251001"], [model, "unknown"]):
+                    expected["used_models"] = usage
+                    with self.assertRaises(SUBSCRIPTION.SubscriptionAdapterError):
+                        SUBSCRIPTION.invoke("create_plan", {"packet": "bounded"}, provider_id=provider, model=model, effort="max")
+        with mock.patch.object(SUBSCRIPTION.fable_advisor_mcp, "load_fable_route", return_value={"model": "claude-fable-5", "effort": "max"}), mock.patch.object(SUBSCRIPTION.fable_advisor_mcp, "create_plan") as call:
+            with self.assertRaisesRegex(SUBSCRIPTION.SubscriptionAdapterError, "differs"):
+                SUBSCRIPTION.invoke("create_plan", {"packet": "bounded"}, model="claude-fable-5-1", effort="max")
+            call.assert_not_called()
 
 
 if __name__ == "__main__":

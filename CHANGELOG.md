@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.0 — Unreleased
+
+- Add exact Claude Fable 5.1 and Claude Opus 5.5 bundled routes with model-specific effort defaults and primary-only runtime identity confirmation.
+- Preserve legacy Fable 5/Opus 5 saved identities and their distinct metadata policies; schema 6 introduces new versions without retargeting existing state. Explicit disable and reconfiguration is required to change a bundled model version.
+- Keep first-party authentication, minimal environment, no tools, no session persistence and fail-closed structured decisions unchanged. New model live qualification remains a release requirement.
+
 ## 0.9.3 — Unreleased
 
 - Raise the bounded Advisor approval loop from five to eight reviews while

@@ -27,6 +27,8 @@ STATE_FILENAME = ".codex-orchestration-routing.json"
 MANAGED_MARKER = routing_state.MANAGED_MARKER
 FABLE_MODEL = routing_state.FABLE_MODEL
 OPUS_MODEL = routing_state.OPUS_MODEL
+FABLE_51_MODEL = routing_state.FABLE_51_MODEL
+OPUS_55_MODEL = routing_state.OPUS_55_MODEL
 FABLE_SERVERS = routing_state.FABLE_SERVERS
 SUPPORTED_EFFORTS = routing_state.FABLE_EFFORTS
 # Claude Code currently reports this exact internal helper alongside Fable for
@@ -39,6 +41,8 @@ REVIEWED_PRIMARY_MODELS_BY_ROUTE = {
     # The resolved Fable identity is not an alias for the separately sealed
     # Opus route. Opus remains primary-only until independently re-qualified.
     OPUS_MODEL: frozenset({OPUS_MODEL}),
+    FABLE_51_MODEL: frozenset({FABLE_51_MODEL}),
+    OPUS_55_MODEL: frozenset({OPUS_55_MODEL}),
 }
 ALLOWED_RUNTIME_MODELS = frozenset(
     {*REVIEWED_PRIMARY_MODELS_BY_ROUTE[FABLE_MODEL], FABLE_HELPER_MODEL}
@@ -48,6 +52,8 @@ ALLOWED_RUNTIME_MODELS_BY_PRIMARY = {
     # No Opus helper identity has been independently verified. Fail closed if
     # Claude Code reports anything beyond the sealed primary.
     OPUS_MODEL: frozenset({OPUS_MODEL}),
+    FABLE_51_MODEL: frozenset({FABLE_51_MODEL}),
+    OPUS_55_MODEL: frozenset({OPUS_55_MODEL}),
 }
 CLAUDE_TIMEOUT_SECONDS = 600
 AUTH_TIMEOUT_SECONDS = 20
@@ -362,9 +368,7 @@ def _validate_runtime_models(
     if allowed_models is None or reviewed_primaries is None:
         raise AdvisorError("The configured Claude primary model is not sealed.")
     policy_label = "Fable" if primary_model == FABLE_MODEL else "Claude"
-    primary_label = (
-        "Claude Fable 5" if primary_model == FABLE_MODEL else "Claude Opus 5"
-    )
+    primary_label = routing_state.CLAUDE_MODEL_LABELS[primary_model]
     if not isinstance(usage, dict):
         raise AdvisorError("Runtime metadata has a malformed modelUsage mapping.")
     raw_models = list(usage)
@@ -515,9 +519,7 @@ def _invoke_fable(
     """Run one stateless, seat-authorized, no-tools Claude operation."""
 
     route = load_fable_route(seat=seat)
-    display_name = (
-        "Claude Fable 5" if route["model"] == FABLE_MODEL else "Claude Opus 5"
-    )
+    display_name = routing_state.CLAUDE_MODEL_LABELS[route["model"]]
     claude = resolve_claude()
     auth = check_claude_auth(claude)
     command = [

@@ -1352,5 +1352,29 @@ class FableAdvisorMcpTests(unittest.TestCase):
                 self.assertEqual(FABLE.load_fable_route(self.home)["effort"], effort)
 
 
+    def test_new_models_send_exact_identity_and_keep_sealed_execution(self) -> None:
+        for model, kind in (("claude-fable-5-1", "fable"), ("claude-opus-5-5", "claude_subscription")):
+            for seat, function, response in (("advisor", FABLE.review_plan, "PLAN_APPROVED\nBounded review complete."), ("planner", FABLE.create_plan, "PLAN_DRAFT\nBounded plan.")):
+                with self.subTest(model=model, seat=seat):
+                    self.write_state(schema=6, **{seat: {"kind": kind, "model": model, "effort": "max", "server": "fable-advisor-python3"}})
+                    result, calls = self.invoke_with_results(function, "bounded packet", model_response=response, model_usage={model: {"outputTokens": 12}})
+                    command = calls[-1][0]
+                    self.assertEqual(command[command.index("--model") + 1], model)
+                    self.assertEqual(command[command.index("--effort") + 1], "max")
+                    self.assertEqual(command[command.index("--tools") + 1], "")
+                    self.assertIn("--no-session-persistence", command)
+                    self.assertEqual(result["used_models"], [model])
+
+    def test_new_models_reject_legacy_helper_alias_unknown_and_malformed_usage(self) -> None:
+        for model in ("claude-fable-5-1", "claude-opus-5-5"):
+            for other in ("claude-fable-5", "claude-opus-5", "claude-opus-4-8", "claude-haiku-4-5-20251001", "unknown"):
+                for usage in ({other: {"outputTokens": 1}}, {model: {"outputTokens": 1}, other: {"outputTokens": 1}}):
+                    with self.subTest(model=model, usage=usage), self.assertRaises(FABLE.AdvisorError):
+                        FABLE._validate_runtime_models(usage, model)
+            for usage in ({}, None, {model: {"outputTokens": True}}, {model: {"outputTokens": -1}}):
+                with self.subTest(model=model, usage=usage), self.assertRaises(FABLE.AdvisorError):
+                    FABLE._validate_runtime_models(usage, model)
+
+
 if __name__ == "__main__":
     unittest.main()
