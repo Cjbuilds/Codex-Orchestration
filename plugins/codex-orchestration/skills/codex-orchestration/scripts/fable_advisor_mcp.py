@@ -377,10 +377,19 @@ def _validate_runtime_models(
             f"Runtime metadata reported a model outside the allowed {policy_label} "
             "runtime policy."
         )
-    for model_usage in usage.values():
+    for model, model_usage in usage.items():
         if not isinstance(model_usage, dict) or not model_usage:
             raise AdvisorError("Runtime metadata has a malformed modelUsage value.")
+        # CLI 2.1.316 can add a complete identity tuple alongside usage counters.
+        identity = {"canonicalModel": model, "provider": "firstParty", "costBasis": "list"}
+        if model_usage.keys() & identity.keys():
+            if len(model_usage) <= len(identity) or any(
+                model_usage.get(key) != expected for key, expected in identity.items()
+            ):
+                raise AdvisorError("Runtime metadata has a malformed modelUsage value.")
         for field, value in model_usage.items():
+            if field in identity:
+                continue
             is_nonnegative_finite_number = (
                 type(value) is int
                 and value >= 0

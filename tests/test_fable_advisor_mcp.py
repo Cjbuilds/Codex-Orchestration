@@ -674,6 +674,46 @@ class FableAdvisorMcpTests(unittest.TestCase):
                 )
                 self.assertEqual(result["decision"], "PLAN_APPROVED")
 
+    def test_cli_2_1_316_usage_with_exact_identity_and_counters(self) -> None:
+        # Fable values observed in CLI 2.1.316. The parallel Opus case is synthetic.
+        counters = {
+            "inputTokens": 2, "outputTokens": 219, "cacheReadInputTokens": 819,
+            "cacheCreationInputTokens": 0, "webSearchRequests": 0, "costUSD": 0.01117475,
+            "contextWindow": 1000000, "maxOutputTokens": 64000, "thinkingTokens": 0,
+            "cacheCreationEphemeral5mInputTokens": 0, "cacheCreationEphemeral1hInputTokens": 0,
+        }
+        for model, route in ((FABLE.FABLE_51_MODEL, self.route()), (FABLE.OPUS_55_MODEL, self.opus_route())):
+            with self.subTest(model=model):
+                self.write_state(schema=6, planner={**route, "model": model})
+                usage = {**counters, "canonicalModel": model, "provider": "firstParty", "costBasis": "list"}
+                result, _ = self.invoke_with_results(
+                    FABLE.create_plan, "bounded packet", model_response="PLAN_DRAFT\nDraft",
+                    model_usage={model: usage},
+                )
+                self.assertEqual(result["used_models"], [model])
+
+    def test_cli_2_1_316_metadata_rejects_ambiguous_identity_and_invalid_usage(self) -> None:
+        model = FABLE.FABLE_51_MODEL
+        identity = {"canonicalModel": model, "provider": "firstParty", "costBasis": "list"}
+        complete = {**identity, "outputTokens": 1}
+        invalid = [
+            identity,
+            {**complete, "canonicalModel": FABLE.FABLE_MODEL},
+            {**complete, "canonicalModel": 1},
+            {**complete, "provider": "thirdParty"},
+            {**complete, "costBasis": "other"},
+            {**complete, "unexpected": "string"},
+            *({**complete, "outputTokens": invalid_value} for invalid_value in (
+                True, "1", -1, float("nan"), float("inf"), float("-inf"),
+            )),
+        ]
+        for key in identity:
+            invalid.append({name: value for name, value in complete.items() if name != key})
+            invalid.append({key: identity[key], "outputTokens": 1})
+        for row in invalid:
+            with self.subTest(row=row), self.assertRaises(FABLE.AdvisorError):
+                FABLE._validate_runtime_models({model: row}, model)
+
     def test_each_operation_pins_its_authorized_seat_effort(self) -> None:
         self.write_state(planner=self.route("low"))
         created, create_calls = self.invoke_with_results(

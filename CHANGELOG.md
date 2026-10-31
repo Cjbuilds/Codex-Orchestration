@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.10.1 — Unreleased
+
+- Accept Claude CLI 2.1.316 usage records with the exact canonical model, first-party provider, and list cost basis alongside numeric counters. Reject incomplete or conflicting metadata.
+
 ## 0.10.0 — Unreleased
 
 - Add exact Claude Fable 5.1 and Claude Opus 5.5 bundled routes with model-specific effort defaults and primary-only runtime identity confirmation.
