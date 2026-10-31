@@ -11,7 +11,7 @@ Only two lanes are accepted:
 
 1. A bundled, reviewed native provider manifest using HTTPS and the Responses API,
    plus command-backed authentication and provider-pinned personal custom agents.
-2. A bundled, reviewed first-party subscription CLI adapter. Claude Fable 5 is the
+2. A bundled, reviewed first-party subscription CLI adapter. Claude Fable 5.1 is the
    only adapter in this lane and retains its no-tools, no-session-persistence,
    first-party-login, runtime-metadata bridge.
 

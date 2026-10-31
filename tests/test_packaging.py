@@ -255,7 +255,7 @@ class PackagingTests(unittest.TestCase):
 
         self.assertEqual(manifest["name"], "codex-orchestration")
         self.assertEqual(manifest["skills"], "./skills/")
-        self.assertEqual(manifest["version"], "0.9.3")
+        self.assertEqual(manifest["version"], "0.10.1")
         self.assertEqual(manifest["mcpServers"], "./.mcp.json")
         self.assertRegex(
             manifest["version"],
@@ -278,7 +278,7 @@ class PackagingTests(unittest.TestCase):
         self.assertFalse((SKILL_ROOT / "scripts" / "update_plugin.py").exists())
         self.assertIn("config/batchWrite", native.read_text(encoding="utf-8"))
         self.assertIn('"--repair"', native.read_text(encoding="utf-8"))
-        self.assertIn('"version": "0.9.3"', native.read_text(encoding="utf-8"))
+        self.assertIn('"version": "0.10.1"', native.read_text(encoding="utf-8"))
         self.assertIn("validate_routing_state", routing_state.read_text(encoding="utf-8"))
         self.assertIn("Standalone custom agent", custom.read_text(encoding="utf-8"))
 
@@ -309,7 +309,7 @@ class PackagingTests(unittest.TestCase):
             ["max"],
         )
         self.assertEqual(fable["subscription_adapter"]["module"], "fable_advisor_mcp")
-        self.assertEqual(opus["models"].keys(), {"claude-opus-5"})
+        self.assertEqual(opus["models"].keys(), {"claude-opus-5", "claude-opus-5-5"})
         self.assertEqual(
             opus["models"]["claude-opus-5"]["supported_efforts"],
             ["low", "medium", "high", "xhigh", "max"],
@@ -453,7 +453,7 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("@openai/codex@0.144.1", workflow)
         smoke_text = smoke.read_text(encoding="utf-8")
         self.assertIn('OLD_VERSION = "0.5.0"', smoke_text)
-        self.assertIn('NEW_VERSION = "0.9.3"', smoke_text)
+        self.assertIn('NEW_VERSION = "0.10.1"', smoke_text)
         self.assertIn("old Advisor-only cache unexpectedly supports Planner", smoke_text)
         self.assertIn("Upgraded installed skill is missing Planner contract", smoke_text)
         self.assertIn("reused the Advisor-only 0.5.0 cache directory", smoke_text)
@@ -484,7 +484,7 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("Other unbundled providers must already be configured and authenticated", readme)
         self.assertIn("never creates credentials or bypasses permissions", readme)
         self.assertIn("Codex decides when delegation or parallel work is useful", readme)
-        self.assertIn("Fable 5 is the bundled cross-provider exception", readme)
+        self.assertIn("Version 0.10.0 adds these exact model versions", readme)
         self.assertIn('ROUTING_TOOL_NAMESPACE = "agents"', routing_state)
 
     def test_ascii_and_role_copy_are_plain_and_root_centered(self) -> None:
@@ -530,8 +530,8 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("`.codex/agents/`", readme)
         self.assertIn("`~/.codex/agents/`", readme)
         skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("explicit exact helper allowlist", skill)
-        self.assertIn("unknown additional or missing primary model", skill)
+        self.assertIn("optional exact `claude-haiku-4-5-20251001` helper", skill)
+        self.assertIn("unknown models, or a missing primary", skill)
 
     def test_speed_and_limit_copy_is_clear_and_qualified(self) -> None:
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
@@ -545,7 +545,7 @@ class PackagingTests(unittest.TestCase):
 
         self.assertIn("## Quick start", readme)
         self.assertIn(
-            "planner: Claude Fable 5 High",
+            "planner: Claude Fable 5.1 High",
             readme,
         )
         self.assertIn("Fable defaults to **High**", readme)

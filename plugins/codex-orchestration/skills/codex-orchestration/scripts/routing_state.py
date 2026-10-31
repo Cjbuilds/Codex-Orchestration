@@ -17,6 +17,22 @@ FABLE_MODEL = "claude-fable-5"
 FABLE_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
 OPUS_MODEL = "claude-opus-5"
 OPUS_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
+# Historical constants remain exact for saved schemas 1–5 and imported clients.
+FABLE_51_MODEL = "claude-fable-5-1"
+OPUS_55_MODEL = "claude-opus-5-5"
+CLAUDE_MODEL_EFFORTS = {
+    FABLE_MODEL: FABLE_EFFORTS,
+    OPUS_MODEL: OPUS_EFFORTS,
+    FABLE_51_MODEL: frozenset({"low", "medium", "high", "xhigh", "max"}),
+    OPUS_55_MODEL: frozenset({"low", "medium", "high", "xhigh", "max"}),
+}
+CLAUDE_MODEL_LABELS = {
+    FABLE_MODEL: "Claude Fable 5",
+    OPUS_MODEL: "Claude Opus 5",
+    FABLE_51_MODEL: "Claude Fable 5.1",
+    OPUS_55_MODEL: "Claude Opus 5.5",
+}
+
 FABLE_SERVERS = frozenset(
     {
         "fable-advisor-python3",
@@ -25,7 +41,7 @@ FABLE_SERVERS = frozenset(
     }
 )
 
-_SCHEMA_POLICY_PAIRS = {1: 1, 2: 2, 3: 3, 4: 4, 5: 5}
+_SCHEMA_POLICY_PAIRS = {1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6}
 _MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+/@-]{0,199}$")
 _AGENT_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 _EFFORT_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
@@ -106,7 +122,7 @@ def _validate_route(route: Any, *, seat: str, schema: int) -> str:
             f"{seat} model route has an invalid model",
         )
         _require(
-            route["model"] not in {FABLE_MODEL, OPUS_MODEL},
+            route["model"] not in CLAUDE_MODEL_EFFORTS,
             f"{seat} model route uses a reserved Claude model",
         )
         _require(
@@ -132,9 +148,12 @@ def _validate_route(route: Any, *, seat: str, schema: int) -> str:
             set(route) == {"kind", "model", "effort", "server"},
             f"{seat} Fable route has the wrong shape",
         )
-        _require(route["model"] == FABLE_MODEL, "Fable model is not pinned")
         _require(
-            type(route["effort"]) is str and route["effort"] in FABLE_EFFORTS,
+            route["model"] == FABLE_MODEL or (schema >= 6 and route["model"] == FABLE_51_MODEL),
+            "Fable model is not pinned for this schema",
+        )
+        _require(
+            type(route["effort"]) is str and route["effort"] in CLAUDE_MODEL_EFFORTS[route["model"]],
             "Fable effort is unsupported",
         )
         _require(
@@ -150,10 +169,13 @@ def _validate_route(route: Any, *, seat: str, schema: int) -> str:
             set(route) == {"kind", "model", "effort", "server"},
             f"{seat} Claude subscription route has the wrong shape",
         )
-        _require(route["model"] == OPUS_MODEL, "Claude subscription model is not pinned")
         _require(
-            type(route["effort"]) is str and route["effort"] in OPUS_EFFORTS,
-            "Claude Opus 5 effort is unsupported",
+            route["model"] == OPUS_MODEL or (schema >= 6 and route["model"] == OPUS_55_MODEL),
+            "Claude subscription model is not pinned for this schema",
+        )
+        _require(
+            type(route["effort"]) is str and route["effort"] in CLAUDE_MODEL_EFFORTS[route["model"]],
+            "Claude Opus effort is unsupported",
         )
         _require(
             type(route["server"]) is str and route["server"] in FABLE_SERVERS,
@@ -230,7 +252,7 @@ def _validate_scalar_conversion(state: dict[str, Any], managed: dict[str, Any]) 
 
 
 def validate_routing_state(value: Any) -> dict[str, Any]:
-    """Validate and return one exact, complete persisted schema 1 through 5.
+    """Validate and return one exact, complete persisted schema 1 through 6.
 
     Unknown keys and future extensions are rejected intentionally. Callers must
     perform their own secure file read and any caller-specific path/seat checks.

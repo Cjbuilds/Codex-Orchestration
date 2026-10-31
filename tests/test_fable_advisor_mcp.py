@@ -674,6 +674,46 @@ class FableAdvisorMcpTests(unittest.TestCase):
                 )
                 self.assertEqual(result["decision"], "PLAN_APPROVED")
 
+    def test_cli_2_1_316_usage_with_exact_identity_and_counters(self) -> None:
+        # Fable values observed in CLI 2.1.316. The parallel Opus case is synthetic.
+        counters = {
+            "inputTokens": 2, "outputTokens": 219, "cacheReadInputTokens": 819,
+            "cacheCreationInputTokens": 0, "webSearchRequests": 0, "costUSD": 0.01117475,
+            "contextWindow": 1000000, "maxOutputTokens": 64000, "thinkingTokens": 0,
+            "cacheCreationEphemeral5mInputTokens": 0, "cacheCreationEphemeral1hInputTokens": 0,
+        }
+        for model, route in ((FABLE.FABLE_51_MODEL, self.route()), (FABLE.OPUS_55_MODEL, self.opus_route())):
+            with self.subTest(model=model):
+                self.write_state(schema=6, planner={**route, "model": model})
+                usage = {**counters, "canonicalModel": model, "provider": "firstParty", "costBasis": "list"}
+                result, _ = self.invoke_with_results(
+                    FABLE.create_plan, "bounded packet", model_response="PLAN_DRAFT\nDraft",
+                    model_usage={model: usage},
+                )
+                self.assertEqual(result["used_models"], [model])
+
+    def test_cli_2_1_316_metadata_rejects_ambiguous_identity_and_invalid_usage(self) -> None:
+        model = FABLE.FABLE_51_MODEL
+        identity = {"canonicalModel": model, "provider": "firstParty", "costBasis": "list"}
+        complete = {**identity, "outputTokens": 1}
+        invalid = [
+            identity,
+            {**complete, "canonicalModel": FABLE.FABLE_MODEL},
+            {**complete, "canonicalModel": 1},
+            {**complete, "provider": "thirdParty"},
+            {**complete, "costBasis": "other"},
+            {**complete, "unexpected": "string"},
+            *({**complete, "outputTokens": invalid_value} for invalid_value in (
+                True, "1", -1, float("nan"), float("inf"), float("-inf"),
+            )),
+        ]
+        for key in identity:
+            invalid.append({name: value for name, value in complete.items() if name != key})
+            invalid.append({key: identity[key], "outputTokens": 1})
+        for row in invalid:
+            with self.subTest(row=row), self.assertRaises(FABLE.AdvisorError):
+                FABLE._validate_runtime_models({model: row}, model)
+
     def test_each_operation_pins_its_authorized_seat_effort(self) -> None:
         self.write_state(planner=self.route("low"))
         created, create_calls = self.invoke_with_results(
@@ -1350,6 +1390,30 @@ class FableAdvisorMcpTests(unittest.TestCase):
             with self.subTest(effort=effort):
                 self.write_state(advisor=self.route(effort))
                 self.assertEqual(FABLE.load_fable_route(self.home)["effort"], effort)
+
+
+    def test_new_models_send_exact_identity_and_keep_sealed_execution(self) -> None:
+        for model, kind in (("claude-fable-5-1", "fable"), ("claude-opus-5-5", "claude_subscription")):
+            for seat, function, response in (("advisor", FABLE.review_plan, "PLAN_APPROVED\nBounded review complete."), ("planner", FABLE.create_plan, "PLAN_DRAFT\nBounded plan.")):
+                with self.subTest(model=model, seat=seat):
+                    self.write_state(schema=6, **{seat: {"kind": kind, "model": model, "effort": "max", "server": "fable-advisor-python3"}})
+                    result, calls = self.invoke_with_results(function, "bounded packet", model_response=response, model_usage={model: {"outputTokens": 12}})
+                    command = calls[-1][0]
+                    self.assertEqual(command[command.index("--model") + 1], model)
+                    self.assertEqual(command[command.index("--effort") + 1], "max")
+                    self.assertEqual(command[command.index("--tools") + 1], "")
+                    self.assertIn("--no-session-persistence", command)
+                    self.assertEqual(result["used_models"], [model])
+
+    def test_new_models_reject_legacy_helper_alias_unknown_and_malformed_usage(self) -> None:
+        for model in ("claude-fable-5-1", "claude-opus-5-5"):
+            for other in ("claude-fable-5", "claude-opus-5", "claude-opus-4-8", "claude-haiku-4-5-20251001", "unknown"):
+                for usage in ({other: {"outputTokens": 1}}, {model: {"outputTokens": 1}, other: {"outputTokens": 1}}):
+                    with self.subTest(model=model, usage=usage), self.assertRaises(FABLE.AdvisorError):
+                        FABLE._validate_runtime_models(usage, model)
+            for usage in ({}, None, {model: {"outputTokens": True}}, {model: {"outputTokens": -1}}):
+                with self.subTest(model=model, usage=usage), self.assertRaises(FABLE.AdvisorError):
+                    FABLE._validate_runtime_models(usage, model)
 
 
 if __name__ == "__main__":
