@@ -234,6 +234,11 @@ def _run_json(command: list[str], *, timeout: int) -> dict[str, Any]:
             stderr=subprocess.PIPE,
             timeout=timeout,
             check=False,
+            # A GUI parent (e.g. a pythonw MCP manifest on Windows) spawning this
+            # console-subsystem child allocates a new conhost window per call,
+            # visible as black console flashes. CREATE_NO_WINDOW suppresses the
+            # console; getattr default 0 keeps every other platform unchanged.
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except subprocess.TimeoutExpired as exc:
         raise AdvisorError("Claude Code authentication check timed out.") from exc
@@ -561,6 +566,9 @@ def _invoke_fable(
             stderr=subprocess.PIPE,
             timeout=CLAUDE_TIMEOUT_SECONDS,
             check=False,
+            # Same windowless-child flag as _run_json: no conhost flash when
+            # launched from a GUI parent on Windows; no-op elsewhere.
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except subprocess.TimeoutExpired as exc:
         raise AdvisorError(f"{display_name} {operation} timed out.") from exc
